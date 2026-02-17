@@ -38,7 +38,7 @@
 #pragma comment(lib, "Comdlg32.lib")
 #pragma comment(lib, "Msimg32.lib")
 #pragma comment(lib, "opengl32.lib")
-#pragma comment(lib, "libglew32.lib")
+#pragma comment(lib, "glew32s.lib")  // Static GLEW - use glew32.lib for dynamic
 #pragma comment(lib, "DbgHelp.lib")
 
 #define STB_IMAGE_IMPLEMENTATION

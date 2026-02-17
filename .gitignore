@@ -7,3 +7,6 @@
 !src/gui/**
 !src/*.toml
 !src/*.png
+!BUILD.md
+!Toolscreen.sln
+!Toolscreen.vcxproj
