@@ -187,6 +187,8 @@ constexpr bool CURSORS_ENABLED = false;
 // EyeZoomConfig Defaults
 // ============================================================================
 constexpr int EYEZOOM_CLONE_WIDTH = 24;
+// Number of overlay boxes/labels per side of center (legacy behavior: cloneWidth/2)
+constexpr int EYEZOOM_OVERLAY_WIDTH = EYEZOOM_CLONE_WIDTH / 2;
 constexpr int EYEZOOM_CLONE_HEIGHT = 2080;
 constexpr int EYEZOOM_STRETCH_WIDTH = 810;
 constexpr int EYEZOOM_WINDOW_WIDTH = 384;

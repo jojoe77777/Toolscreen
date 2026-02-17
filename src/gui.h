@@ -330,6 +330,15 @@ struct HotkeyConfig {
     HotkeyConditions conditions;
     int debounce = 100;
     bool triggerOnRelease = false; // When true, hotkey triggers on key release instead of key press
+
+    // When true, the key event that matched this hotkey is consumed and NOT forwarded to the game.
+    // The hotkey still triggers normally.
+    bool blockKeyFromGame = false;
+
+    // When true, exiting the active secondary mode back to Fullscreen is allowed even if
+    // the current game state does not match this hotkey's required game states.
+    // Entering the secondary mode still respects required game states.
+    bool allowExitToFullscreenRegardlessOfGameState = false;
 };
 
 // Sensitivity hotkey - temporarily overrides mouse sensitivity until next mode change
@@ -383,6 +392,10 @@ struct CursorsConfig {
 };
 struct EyeZoomConfig {
     int cloneWidth = 24;
+    // Number of overlay grid boxes (and number labels) to render on EACH side of the center line.
+    // Example: cloneWidth=30 => 15 pixels per side sampled; overlayWidth=5 => only render 5 boxes per side (10 total).
+    // Set to cloneWidth/2 to match legacy behavior (overlay covers the full clone width).
+    int overlayWidth = 12;
     int cloneHeight = 2080;
     int stretchWidth = 810; // Width of the rendered zoom output on screen
     int windowWidth = 384;

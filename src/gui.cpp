@@ -86,6 +86,20 @@ void RegisterBindingInputEvent(UINT uMsg, WPARAM wParam, LPARAM lParam) {
         DWORD resolvedVk = static_cast<DWORD>(keyWParam);
         if (mappedVk != 0) { resolvedVk = static_cast<DWORD>(mappedVk); }
 
+        // Normalize generic modifier VKs to left/right variants.
+        // Windows typically reports VK_CONTROL/VK_MENU/VK_SHIFT in wParam for both sides.
+        // For binding UI (hotkeys/rebinds), we want deterministic L/R codes.
+        const bool isExtended = (keyLParam & (1LL << 24)) != 0;
+        const UINT scanOnly = static_cast<UINT>((keyLParam >> 16) & 0xFF);
+        if (resolvedVk == VK_SHIFT) {
+            DWORD lr = static_cast<DWORD>(::MapVirtualKeyW(scanOnly, MAPVK_VSC_TO_VK_EX));
+            if (lr != 0) { resolvedVk = lr; }
+        } else if (resolvedVk == VK_CONTROL) {
+            resolvedVk = isExtended ? VK_RCONTROL : VK_LCONTROL;
+        } else if (resolvedVk == VK_MENU) {
+            resolvedVk = isExtended ? VK_RMENU : VK_LMENU;
+        }
+
         // Ensure dedicated navigation keys keep their non-numpad VK when extended bit is present.
         if ((keyLParam & (1LL << 24)) != 0) {
             switch (scanCodeWithFlags & 0xFF) {
@@ -1613,6 +1627,15 @@ void SaveTheme() {
         toml::table tbl;
         tbl.insert_or_assign("theme", g_config.appearance.theme);
 
+        // Persist custom palette alongside the theme name so edits survive restarts
+        // even if the main config save is throttled or theme.toml overrides config theme.
+        // Always write the table (even if empty) so "Reset" reliably clears saved overrides.
+        toml::table colorsTbl;
+        for (const auto& [name, color] : g_config.appearance.customColors) {
+            colorsTbl.insert(name, ColorToTomlArray(color));
+        }
+        tbl.insert_or_assign("customColors", colorsTbl);
+
         std::string narrowPath = WideToUtf8(themePath);
         std::ofstream o(narrowPath);
         if (!o.is_open()) {
@@ -1649,6 +1672,19 @@ void LoadTheme() {
             std::string themeName = tbl["theme"].value_or<std::string>("Dark");
             g_config.appearance.theme = themeName;
             Log("Loaded theme from theme.toml: " + themeName);
+        }
+
+        // Optional: load custom palette from theme.toml (newer versions store it here).
+        if (const toml::node* ccNode = tbl.get("customColors")) {
+            if (const toml::table* colorsTbl = ccNode->as_table()) {
+                g_config.appearance.customColors.clear();
+                for (const auto& [key, value] : *colorsTbl) {
+                    if (auto arr = value.as_array()) {
+                        g_config.appearance.customColors[std::string(key.str())] =
+                            ColorFromTomlArray(arr, { 0.0f, 0.0f, 0.0f, 1.0f });
+                    }
+                }
+            }
         }
     } catch (const toml::parse_error& e) {
         Log("ERROR: Failed to parse theme.toml: " + std::string(e.what()));
@@ -2435,13 +2471,20 @@ void RenderSettingsGUI() {
         // Build list of currently pressed keys (excluding pre-held keys)
         std::vector<DWORD> currentlyPressed;
 
-        // Check modifier keys first (in order: Ctrl, Shift, Alt)
-        if ((GetAsyncKeyState(VK_LCONTROL) & 0x8000) && !s_preHeldKeys.count(VK_LCONTROL)) currentlyPressed.push_back(VK_LCONTROL);
-        if ((GetAsyncKeyState(VK_RCONTROL) & 0x8000) && !s_preHeldKeys.count(VK_RCONTROL)) currentlyPressed.push_back(VK_RCONTROL);
-        if ((GetAsyncKeyState(VK_LSHIFT) & 0x8000) && !s_preHeldKeys.count(VK_LSHIFT)) currentlyPressed.push_back(VK_LSHIFT);
-        if ((GetAsyncKeyState(VK_RSHIFT) & 0x8000) && !s_preHeldKeys.count(VK_RSHIFT)) currentlyPressed.push_back(VK_RSHIFT);
-        if ((GetAsyncKeyState(VK_LMENU) & 0x8000) && !s_preHeldKeys.count(VK_LMENU)) currentlyPressed.push_back(VK_LMENU);
-        if ((GetAsyncKeyState(VK_RMENU) & 0x8000) && !s_preHeldKeys.count(VK_RMENU)) currentlyPressed.push_back(VK_RMENU);
+        const bool lctrlDown = (GetAsyncKeyState(VK_LCONTROL) & 0x8000) != 0;
+        const bool rctrlDown = (GetAsyncKeyState(VK_RCONTROL) & 0x8000) != 0;
+        const bool lshiftDown = (GetAsyncKeyState(VK_LSHIFT) & 0x8000) != 0;
+        const bool rshiftDown = (GetAsyncKeyState(VK_RSHIFT) & 0x8000) != 0;
+        const bool laltDown = (GetAsyncKeyState(VK_LMENU) & 0x8000) != 0;
+        const bool raltDown = (GetAsyncKeyState(VK_RMENU) & 0x8000) != 0;
+
+        const bool ctrlPreHeld = s_preHeldKeys.count(VK_LCONTROL) || s_preHeldKeys.count(VK_RCONTROL) || s_preHeldKeys.count(VK_CONTROL);
+        const bool shiftPreHeld = s_preHeldKeys.count(VK_LSHIFT) || s_preHeldKeys.count(VK_RSHIFT) || s_preHeldKeys.count(VK_SHIFT);
+        const bool altPreHeld = s_preHeldKeys.count(VK_LMENU) || s_preHeldKeys.count(VK_RMENU) || s_preHeldKeys.count(VK_MENU);
+
+        if ((lctrlDown || rctrlDown) && !ctrlPreHeld) currentlyPressed.push_back(VK_CONTROL);
+        if ((lshiftDown || rshiftDown) && !shiftPreHeld) currentlyPressed.push_back(VK_SHIFT);
+        if ((laltDown || raltDown) && !altPreHeld) currentlyPressed.push_back(VK_MENU);
 
         // Check all other keys
         for (int vk = 1; vk < 0xFF; ++vk) {
@@ -2460,14 +2503,14 @@ void RenderSettingsGUI() {
             if (std::find(s_bindingKeys.begin(), s_bindingKeys.end(), key) == s_bindingKeys.end()) {
                 // New key - add it in the right position
                 // Modifiers should be at the front, main key at the end
-                bool isModifier = (key == VK_LCONTROL || key == VK_RCONTROL || key == VK_LSHIFT || key == VK_RSHIFT || key == VK_LMENU ||
-                                   key == VK_RMENU);
+                bool isModifier = (key == VK_CONTROL || key == VK_SHIFT || key == VK_MENU || key == VK_LCONTROL || key == VK_RCONTROL ||
+                                   key == VK_LSHIFT || key == VK_RSHIFT || key == VK_LMENU || key == VK_RMENU);
                 if (isModifier) {
                     // Insert modifiers before non-modifiers
                     auto insertPos = s_bindingKeys.begin();
                     for (auto it = s_bindingKeys.begin(); it != s_bindingKeys.end(); ++it) {
-                        bool itIsModifier = (*it == VK_LCONTROL || *it == VK_RCONTROL || *it == VK_LSHIFT || *it == VK_RSHIFT ||
-                                             *it == VK_LMENU || *it == VK_RMENU);
+                        bool itIsModifier = (*it == VK_CONTROL || *it == VK_SHIFT || *it == VK_MENU || *it == VK_LCONTROL || *it == VK_RCONTROL ||
+                                             *it == VK_LSHIFT || *it == VK_RSHIFT || *it == VK_LMENU || *it == VK_RMENU);
                         if (!itIsModifier) {
                             insertPos = it;
                             break;
@@ -2691,7 +2734,29 @@ void InitializeImGuiContext(HWND hwnd) {
         if (scaleFactor < 1.0f) { scaleFactor = 1.0f; }
 
         std::string fontPath = g_config.fontPath;
-        io.Fonts->AddFontFromFileTTF(fontPath.c_str(), 16.0f * scaleFactor);
+        const float baseFontSize = 16.0f * scaleFactor;
+
+        // Some font files (or paths) can cause ImGui font loading/build to fail.
+        // If that happens, ignore the custom font and fall back to Arial.
+        auto isStable = [](const std::string& p, float sz) -> bool {
+            if (p.empty()) return false;
+            ImFontAtlas testAtlas;
+            ImFont* f = testAtlas.AddFontFromFileTTF(p.c_str(), sz);
+            if (!f) return false;
+            return testAtlas.Build();
+        };
+
+        std::string usePath = fontPath.empty() ? ConfigDefaults::CONFIG_FONT_PATH : fontPath;
+        if (!isStable(usePath, baseFontSize)) { usePath = ConfigDefaults::CONFIG_FONT_PATH; }
+
+        ImFont* baseFont = io.Fonts->AddFontFromFileTTF(usePath.c_str(), baseFontSize);
+        if (!baseFont && usePath != ConfigDefaults::CONFIG_FONT_PATH) {
+            baseFont = io.Fonts->AddFontFromFileTTF(ConfigDefaults::CONFIG_FONT_PATH.c_str(), baseFontSize);
+        }
+        if (!baseFont) {
+            Log("GUI: Failed to load configured font, using ImGui default font");
+            io.Fonts->AddFontDefault();
+        }
 
         ImGui::StyleColorsDark();
         LoadTheme();             // Load theme from theme.toml
@@ -2702,7 +2767,7 @@ void InitializeImGuiContext(HWND hwnd) {
         ImGui_ImplOpenGL3_Init("#version 330");
 
         // Initialize larger font for overlay text labels
-        InitializeOverlayTextFont(fontPath, 16.0f, scaleFactor);
+        InitializeOverlayTextFont(usePath, 16.0f, scaleFactor);
     }
 }
 
@@ -3135,7 +3200,27 @@ void HandleConfigLoadFailed(HDC hDc, BOOL (*oWglSwapBuffers)(HDC)) {
         if (scaleFactor < 1.0f) { scaleFactor = 1.0f; }
 
         std::string fontPath = g_config.fontPath;
-        io.Fonts->AddFontFromFileTTF(fontPath.c_str(), 16.0f * scaleFactor);
+        const float baseFontSize = 16.0f * scaleFactor;
+
+        auto isStable = [](const std::string& p, float sz) -> bool {
+            if (p.empty()) return false;
+            ImFontAtlas testAtlas;
+            ImFont* f = testAtlas.AddFontFromFileTTF(p.c_str(), sz);
+            if (!f) return false;
+            return testAtlas.Build();
+        };
+
+        std::string usePath = fontPath.empty() ? ConfigDefaults::CONFIG_FONT_PATH : fontPath;
+        if (!isStable(usePath, baseFontSize)) { usePath = ConfigDefaults::CONFIG_FONT_PATH; }
+
+        ImFont* baseFont = io.Fonts->AddFontFromFileTTF(usePath.c_str(), baseFontSize);
+        if (!baseFont && usePath != ConfigDefaults::CONFIG_FONT_PATH) {
+            baseFont = io.Fonts->AddFontFromFileTTF(ConfigDefaults::CONFIG_FONT_PATH.c_str(), baseFontSize);
+        }
+        if (!baseFont) {
+            Log("GUI: Failed to load configured font, using ImGui default font");
+            io.Fonts->AddFontDefault();
+        }
 
         ImGui::StyleColorsDark();
         LoadTheme();             // Load theme from theme.toml
@@ -3146,7 +3231,7 @@ void HandleConfigLoadFailed(HDC hDc, BOOL (*oWglSwapBuffers)(HDC)) {
         ImGui_ImplOpenGL3_Init("#version 330");
 
         // Initialize larger font for overlay text labels
-        InitializeOverlayTextFont(fontPath, 16.0f, scaleFactor);
+        InitializeOverlayTextFont(usePath, 16.0f, scaleFactor);
     }
 
     ImGui_ImplOpenGL3_NewFrame();

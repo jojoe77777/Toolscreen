@@ -1,6 +1,7 @@
 #include "config_toml.h"
 #include "config_defaults.h"
 #include "gui.h"
+#include "logic_thread.h"
 #include "utils.h"
 
 #include <cmath>
@@ -239,8 +240,6 @@ void MirrorRenderConfigFromToml(const toml::table& tbl, MirrorRenderConfig& cfg)
     cfg.relativeX = GetOr(tbl, "relativeX", 0.5f);
     cfg.relativeY = GetOr(tbl, "relativeY", 0.5f);
 
-    // Read x/y - check if they're floats (0-1) or integers
-    // If the value is a float between 0 and 1, treat as percentage
     auto xNode = tbl["x"];
     auto yNode = tbl["y"];
 
@@ -249,7 +248,10 @@ void MirrorRenderConfigFromToml(const toml::table& tbl, MirrorRenderConfig& cfg)
 
     if (xNode.is_floating_point()) {
         double xVal = xNode.as_floating_point()->get();
-        if (xVal >= 0.0 && xVal <= 1.0) {
+        if (cfg.useRelativePosition) {
+            cfg.relativeX = static_cast<float>(xVal);
+            xIsPercentage = true;
+        } else if (xVal >= 0.0 && xVal <= 1.0) {
             cfg.relativeX = static_cast<float>(xVal);
             xIsPercentage = true;
         } else {
@@ -263,7 +265,10 @@ void MirrorRenderConfigFromToml(const toml::table& tbl, MirrorRenderConfig& cfg)
 
     if (yNode.is_floating_point()) {
         double yVal = yNode.as_floating_point()->get();
-        if (yVal >= 0.0 && yVal <= 1.0) {
+        if (cfg.useRelativePosition) {
+            cfg.relativeY = static_cast<float>(yVal);
+            yIsPercentage = true;
+        } else if (yVal >= 0.0 && yVal <= 1.0) {
             cfg.relativeY = static_cast<float>(yVal);
             yIsPercentage = true;
         } else {
@@ -277,6 +282,18 @@ void MirrorRenderConfigFromToml(const toml::table& tbl, MirrorRenderConfig& cfg)
 
     // Auto-detect relative mode if both x and y were percentages
     if (!tbl.contains("useRelativePosition") && xIsPercentage && yIsPercentage) { cfg.useRelativePosition = true; }
+
+    if (cfg.useRelativePosition) {
+        int screenW = GetCachedScreenWidth();
+        int screenH = GetCachedScreenHeight();
+
+        if (screenW > 0 && (tbl.contains("relativeX") || xIsPercentage)) {
+            cfg.x = static_cast<int>(cfg.relativeX * static_cast<float>(screenW));
+        }
+        if (screenH > 0 && (tbl.contains("relativeY") || yIsPercentage)) {
+            cfg.y = static_cast<int>(cfg.relativeY * static_cast<float>(screenH));
+        }
+    }
 
     cfg.scale = GetOr(tbl, "scale", ConfigDefaults::MIRROR_RENDER_SCALE);
     cfg.separateScale = GetOr(tbl, "separateScale", ConfigDefaults::MIRROR_RENDER_SEPARATE_SCALE);
@@ -1054,6 +1071,9 @@ void HotkeyConfigToToml(const HotkeyConfig& cfg, toml::table& out) {
 
     out.insert("debounce", cfg.debounce);
     out.insert("triggerOnRelease", cfg.triggerOnRelease);
+
+    out.insert("blockKeyFromGame", cfg.blockKeyFromGame);
+    out.insert("allowExitToFullscreenRegardlessOfGameState", cfg.allowExitToFullscreenRegardlessOfGameState);
 }
 
 void HotkeyConfigFromToml(const toml::table& tbl, HotkeyConfig& cfg) {
@@ -1082,6 +1102,9 @@ void HotkeyConfigFromToml(const toml::table& tbl, HotkeyConfig& cfg) {
 
     cfg.debounce = GetOr(tbl, "debounce", ConfigDefaults::HOTKEY_DEBOUNCE);
     cfg.triggerOnRelease = GetOr(tbl, "triggerOnRelease", false);
+
+    cfg.blockKeyFromGame = GetOr(tbl, "blockKeyFromGame", false);
+    cfg.allowExitToFullscreenRegardlessOfGameState = GetOr(tbl, "allowExitToFullscreenRegardlessOfGameState", false);
     // Note: currentSecondaryMode is now tracked separately via thread-safe
     // Get/SetHotkeySecondaryMode() API - initialized by ResetAllHotkeySecondaryModes() after load
 }
@@ -1216,6 +1239,7 @@ void CursorsConfigFromToml(const toml::table& tbl, CursorsConfig& cfg) {
 
 void EyeZoomConfigToToml(const EyeZoomConfig& cfg, toml::table& out) {
     out.insert("cloneWidth", cfg.cloneWidth);
+    out.insert("overlayWidth", cfg.overlayWidth);
     out.insert("cloneHeight", cfg.cloneHeight);
     out.insert("stretchWidth", cfg.stretchWidth);
     out.insert("windowWidth", cfg.windowWidth);
@@ -1240,6 +1264,23 @@ void EyeZoomConfigToToml(const EyeZoomConfig& cfg, toml::table& out) {
 
 void EyeZoomConfigFromToml(const toml::table& tbl, EyeZoomConfig& cfg) {
     cfg.cloneWidth = GetOr(tbl, "cloneWidth", ConfigDefaults::EYEZOOM_CLONE_WIDTH);
+    // cloneWidth must be even and >= 2 for center-split math used by the overlay.
+    if (cfg.cloneWidth < 2) cfg.cloneWidth = 2;
+    if (cfg.cloneWidth % 2 != 0) cfg.cloneWidth = (cfg.cloneWidth / 2) * 2;
+
+    // overlayWidth is boxes/labels PER SIDE. Backward-compatible default is cloneWidth/2.
+    // Allow older configs (without overlayWidth) to behave like before.
+    int overlayDefaultSentinel = -1;
+    int overlayWidth = GetOr(tbl, "overlayWidth", overlayDefaultSentinel);
+    if (overlayWidth == overlayDefaultSentinel) {
+        cfg.overlayWidth = cfg.cloneWidth / 2;
+    } else {
+        cfg.overlayWidth = overlayWidth;
+    }
+    if (cfg.overlayWidth < 0) cfg.overlayWidth = 0;
+    int maxOverlay = cfg.cloneWidth / 2;
+    if (cfg.overlayWidth > maxOverlay) cfg.overlayWidth = maxOverlay;
+
     cfg.cloneHeight = GetOr(tbl, "cloneHeight", ConfigDefaults::EYEZOOM_CLONE_HEIGHT);
     cfg.stretchWidth = GetOr(tbl, "stretchWidth", ConfigDefaults::EYEZOOM_STRETCH_WIDTH);
     cfg.windowWidth = GetOr(tbl, "windowWidth", ConfigDefaults::EYEZOOM_WINDOW_WIDTH);
@@ -1315,8 +1356,10 @@ void KeyRebindsConfigFromToml(const toml::table& tbl, KeyRebindsConfig& cfg) {
 void AppearanceConfigToToml(const AppearanceConfig& cfg, toml::table& out) {
     out.insert("theme", cfg.theme);
 
-    // Only save custom colors if theme is "Custom" and there are custom colors
-    if (cfg.theme == "Custom" && !cfg.customColors.empty()) {
+    // Save custom colors whenever present.
+    // Rationale: users may customize colors, then switch to a preset theme temporarily.
+    // Keeping the custom palette in the config allows switching back to "Custom" without losing edits.
+    if (!cfg.customColors.empty()) {
         toml::table colorsTbl;
         for (const auto& [name, color] : cfg.customColors) { colorsTbl.insert(name, ColorToTomlArray(color)); }
         out.insert("customColors", colorsTbl);

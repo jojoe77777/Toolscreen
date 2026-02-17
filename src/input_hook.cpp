@@ -11,6 +11,8 @@
 
 #include "imgui_impl_win32.h"
 
+#include "imgui_input_queue.h"
+
 #include <chrono>
 #include <map>
 #include <set>
@@ -51,6 +53,23 @@ extern std::mutex g_triggerOnReleaseMutex;
 
 // Forward declaration for ImGui handler
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+static bool s_forcedShowCursor = false;
+
+static void EnsureSystemCursorVisible() {
+    if (g_gameVersion < GameVersion(1, 13, 0)) { return; }
+
+    CURSORINFO ci{ sizeof(CURSORINFO) };
+    if (GetCursorInfo(&ci) && (ci.flags & CURSOR_SHOWING)) { return; }
+    ShowCursor(TRUE);
+}
+
+static void EnsureSystemCursorHidden() {
+    if (g_gameVersion < GameVersion(1, 13, 0)) { return; }
+
+    CURSORINFO ci{ sizeof(CURSORINFO) };
+    if (GetCursorInfo(&ci) && !(ci.flags & CURSOR_SHOWING)) { return; }
+    ShowCursor(FALSE);
+}
 
 InputHandlerResult HandleMouseMoveViewportOffset(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM& lParam) {
     PROFILE_SCOPE("HandleMouseMoveViewportOffset");
@@ -194,6 +213,13 @@ InputHandlerResult HandleSetCursor(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
 
     if (uMsg != WM_SETCURSOR) { return { false, 0 }; }
 
+    if (g_showGui.load() && s_forcedShowCursor && g_gameVersion >= GameVersion(1, 13, 0)) {
+        EnsureSystemCursorVisible();
+        static HCURSOR s_arrowCursor = LoadCursorW(NULL, IDC_ARROW);
+        SetCursor(s_arrowCursor);
+        return { true, true };
+    }
+
     if (!IsCursorVisible() && !g_showGui.load()) {
         SetCursor(NULL);
         return { true, true };
@@ -222,32 +248,57 @@ InputHandlerResult HandleImGuiInput(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM 
 
     if (!g_showGui.load()) { return { false, 0 }; }
 
-    // ImGui context can legitimately be unavailable on this thread (e.g. when ImGui is owned by the render thread).
-    // Avoid calling backend handlers without a current context to prevent null deref/assert crashes.
-    if (!ImGui::GetCurrentContext()) { return { false, 0 }; }
-
-    if (ImGui_ImplWin32_WndProcHandler(hWnd, uMsg, wParam, lParam)) {
-        if (ImGui::GetCurrentContext()) {
-            ImGuiIO& io = ImGui::GetIO();
-            if (uMsg >= WM_MOUSEFIRST && uMsg <= WM_MOUSELAST) {
-                if (io.WantCaptureMouse) { return { true, true }; }
-            } else if ((uMsg >= WM_KEYFIRST && uMsg <= WM_KEYLAST) || uMsg == WM_CHAR) {
-                if (io.WantCaptureKeyboard) { return { true, true }; }
-            } else {
-                return { true, true };
-            }
-        }
-    }
+    // IMPORTANT: Never call ImGui from this thread.
+    // Instead, enqueue the message for the render thread (which owns the ImGui context).
+    ImGuiInputQueue_EnqueueWin32Message(hWnd, uMsg, wParam, lParam);
     return { false, 0 };
 }
 
 InputHandlerResult HandleGuiToggle(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     PROFILE_SCOPE("HandleGuiToggle");
 
-    if (uMsg != WM_KEYDOWN || (!IsGuiHotkeyPressed(wParam) && wParam != VK_ESCAPE)) { return { false, 0 }; }
+    DWORD vkCode = 0;
+    bool isEscape = false;
+    switch (uMsg) {
+    case WM_KEYDOWN:
+    case WM_SYSKEYDOWN: {
+        vkCode = static_cast<DWORD>(wParam);
+        isEscape = (wParam == VK_ESCAPE);
+
+        // Normalize generic modifier VKs to left/right variants.
+        if (vkCode == VK_SHIFT) {
+            DWORD mapped = static_cast<DWORD>(::MapVirtualKeyW((UINT)((lParam >> 16) & 0xff), MAPVK_VSC_TO_VK_EX));
+            if (mapped != 0) vkCode = mapped;
+        } else if (vkCode == VK_CONTROL) {
+            vkCode = (HIWORD(lParam) & KF_EXTENDED) ? VK_RCONTROL : VK_LCONTROL;
+        } else if (vkCode == VK_MENU) {
+            vkCode = (HIWORD(lParam) & KF_EXTENDED) ? VK_RMENU : VK_LMENU;
+        }
+        break;
+    }
+    case WM_LBUTTONDOWN:
+        vkCode = VK_LBUTTON;
+        break;
+    case WM_RBUTTONDOWN:
+        vkCode = VK_RBUTTON;
+        break;
+    case WM_MBUTTONDOWN:
+        vkCode = VK_MBUTTON;
+        break;
+    case WM_XBUTTONDOWN: {
+        WORD xButton = GET_XBUTTON_WPARAM(wParam);
+        vkCode = (xButton == XBUTTON1) ? VK_XBUTTON1 : VK_XBUTTON2;
+        break;
+    }
+    default:
+        return { false, 0 };
+    }
+
+    // Escape always toggles GUI (with additional guards below). Otherwise, require the configured GUI hotkey.
+    if (!isEscape && !CheckHotkeyMatch(g_config.guiHotkey, vkCode)) { return { false, 0 }; }
 
     bool allow_toggle = true;
-    if (wParam == VK_ESCAPE && !g_showGui.load()) { allow_toggle = false; }
+    if (isEscape && !g_showGui.load()) { allow_toggle = false; }
 
     if (!allow_toggle) { return { false, 0 }; }
 
@@ -266,13 +317,22 @@ InputHandlerResult HandleGuiToggle(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
     }
 
     bool is_closing = g_showGui.load();
-    // ImGui context may not be available on this thread; guard to avoid crashes.
-    if (wParam == VK_ESCAPE && ImGui::GetCurrentContext() && ImGui::IsAnyItemActive()) { is_closing = false; }
-    if (wParam == VK_ESCAPE && IsHotkeyBindingActive()) { is_closing = false; }
-    if (wParam == VK_ESCAPE && IsRebindBindingActive()) { is_closing = false; }
+
+    if (isEscape && g_imguiAnyItemActive.load(std::memory_order_acquire)) { is_closing = false; }
+    if (isEscape && IsHotkeyBindingActive()) { is_closing = false; }
+    if (isEscape && IsRebindBindingActive()) { is_closing = false; }
 
     if (is_closing) {
         g_showGui = false;
+        if (s_forcedShowCursor) {
+            EnsureSystemCursorHidden();
+            s_forcedShowCursor = false;
+        }
+
+        // Flush any queued ImGui input and release any mouse capture we may have taken.
+        ImGuiInputQueue_Clear();
+        ImGuiInputQueue_ResetMouseCapture(hWnd);
+
         if (!g_wasCursorVisible.load()) {
             RECT fullScreenRect;
             fullScreenRect.left = 0;
@@ -307,11 +367,18 @@ InputHandlerResult HandleGuiToggle(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
         s_hoveredWindowOverlayName = "";
         s_draggedWindowOverlayName = "";
         s_isWindowOverlayDragging = false;
-    } else if (wParam != VK_ESCAPE) {
+    } else if (!isEscape) {
         g_showGui = true;
-        g_wasCursorVisible = IsCursorVisible();
+        const bool wasCursorVisible = IsCursorVisible();
+        g_wasCursorVisible = wasCursorVisible;
         g_guiNeedsRecenter = true;
         ClipCursor(NULL);
+        if (!wasCursorVisible && g_gameVersion >= GameVersion(1, 13, 0)) {
+            s_forcedShowCursor = true;
+            EnsureSystemCursorVisible();
+            static HCURSOR s_arrowCursor = LoadCursorW(NULL, IDC_ARROW);
+            SetCursor(s_arrowCursor);
+        }
 
         // Dismiss ONLY the fullscreen configure prompt (toast2) for THIS SESSION once the user opens the GUI.
         // toast1 (windowed fullscreenPrompt) should continue to show in windowed mode.
@@ -340,11 +407,8 @@ InputHandlerResult HandleWindowOverlayKeyboard(HWND hWnd, UINT uMsg, WPARAM wPar
     // (once from our WM_KEYDOWN being translated, once from our forwarded WM_CHAR)
     if (uMsg != WM_KEYDOWN && uMsg != WM_KEYUP && uMsg != WM_SYSKEYDOWN && uMsg != WM_SYSKEYUP) { return { false, 0 }; }
 
-    bool imguiWantsKeyboard = false;
-    if (g_showGui.load() && ImGui::GetCurrentContext()) {
-        ImGuiIO& io = ImGui::GetIO();
-        imguiWantsKeyboard = io.WantCaptureKeyboard;
-    }
+    // Never query ImGui from this thread. Use state published by render thread.
+    bool imguiWantsKeyboard = g_showGui.load() && g_imguiWantCaptureKeyboard.load(std::memory_order_acquire);
 
     if (!imguiWantsKeyboard) {
         if (ForwardKeyboardToWindowOverlay(uMsg, wParam, lParam)) { return { true, 1 }; }
@@ -461,6 +525,8 @@ InputHandlerResult HandleActivate(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lP
     if (uMsg != WM_ACTIVATE) { return { false, 0 }; }
 
     if (wParam == WA_INACTIVE) {
+        ImGuiInputQueue_EnqueueFocus(false);
+
         // Log only in debug mode to avoid I/O on every focus change
         if (auto cs = GetConfigSnapshot(); cs && cs->debug.showHotkeyDebug) Log("[WINDOW] Window became inactive.");
         extern std::atomic<bool> g_isGameFocused;
@@ -470,6 +536,8 @@ InputHandlerResult HandleActivate(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lP
         RestoreWindowsMouseSpeed();
         RestoreKeyRepeatSettings();
     } else {
+        ImGuiInputQueue_EnqueueFocus(true);
+
         // Log only in debug mode
         if (auto cs = GetConfigSnapshot(); cs && cs->debug.showHotkeyDebug) Log("[WINDOW] Window became active.");
         extern std::atomic<bool> g_isGameFocused;
@@ -501,57 +569,78 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
     PROFILE_SCOPE("HandleHotkeys");
 
     // Determine the virtual key code based on message type
-    DWORD vkCode = 0;
+    DWORD rawVkCode = 0;
+    DWORD vkCode = 0; // Normalized (left/right variants for Ctrl/Shift/Alt)
     bool isKeyDown = false;
 
     if (uMsg == WM_KEYDOWN || uMsg == WM_SYSKEYDOWN) {
-        vkCode = static_cast<DWORD>(wParam);
+        rawVkCode = static_cast<DWORD>(wParam);
         isKeyDown = true;
     } else if (uMsg == WM_KEYUP || uMsg == WM_SYSKEYUP) {
-        vkCode = static_cast<DWORD>(wParam);
+        rawVkCode = static_cast<DWORD>(wParam);
         isKeyDown = false;
     } else if (uMsg == WM_XBUTTONDOWN) {
         // Side mouse buttons (Mouse 4/5)
         WORD xButton = GET_XBUTTON_WPARAM(wParam);
-        vkCode = (xButton == XBUTTON1) ? VK_XBUTTON1 : VK_XBUTTON2;
+        rawVkCode = (xButton == XBUTTON1) ? VK_XBUTTON1 : VK_XBUTTON2;
         isKeyDown = true;
     } else if (uMsg == WM_XBUTTONUP) {
         WORD xButton = GET_XBUTTON_WPARAM(wParam);
-        vkCode = (xButton == XBUTTON1) ? VK_XBUTTON1 : VK_XBUTTON2;
+        rawVkCode = (xButton == XBUTTON1) ? VK_XBUTTON1 : VK_XBUTTON2;
         isKeyDown = false;
     } else if (uMsg == WM_LBUTTONDOWN) {
-        vkCode = VK_LBUTTON;
+        rawVkCode = VK_LBUTTON;
         isKeyDown = true;
     } else if (uMsg == WM_LBUTTONUP) {
-        vkCode = VK_LBUTTON;
+        rawVkCode = VK_LBUTTON;
         isKeyDown = false;
     } else if (uMsg == WM_RBUTTONDOWN) {
-        vkCode = VK_RBUTTON;
+        rawVkCode = VK_RBUTTON;
         isKeyDown = true;
     } else if (uMsg == WM_RBUTTONUP) {
-        vkCode = VK_RBUTTON;
+        rawVkCode = VK_RBUTTON;
         isKeyDown = false;
     } else if (uMsg == WM_MBUTTONDOWN) {
-        vkCode = VK_MBUTTON;
+        rawVkCode = VK_MBUTTON;
         isKeyDown = true;
     } else if (uMsg == WM_MBUTTONUP) {
-        vkCode = VK_MBUTTON;
+        rawVkCode = VK_MBUTTON;
         isKeyDown = false;
     } else {
         return { false, 0 };
     }
 
-    if (!IsResolutionChangeSupported(g_gameVersion)) { return { true, CallWindowProc(g_originalWndProc, hWnd, uMsg, wParam, lParam) }; }
+    // Normalize generic modifier VKs to left/right variants (needed for RSHIFT/RCTRL/RALT, etc.).
+    // This mirrors imgui_impl_win32 behavior and enables reliable hotkeys + key rebinding.
+    vkCode = rawVkCode;
+    if (uMsg == WM_KEYDOWN || uMsg == WM_SYSKEYDOWN || uMsg == WM_KEYUP || uMsg == WM_SYSKEYUP) {
+        if (vkCode == VK_SHIFT) {
+            vkCode = static_cast<DWORD>(::MapVirtualKeyW((UINT)((lParam >> 16) & 0xff), MAPVK_VSC_TO_VK_EX));
+        } else if (vkCode == VK_CONTROL) {
+            vkCode = (HIWORD(lParam) & KF_EXTENDED) ? VK_RCONTROL : VK_LCONTROL;
+        } else if (vkCode == VK_MENU) {
+            vkCode = (HIWORD(lParam) & KF_EXTENDED) ? VK_RMENU : VK_LMENU;
+        }
+        if (vkCode == 0) vkCode = rawVkCode;
+    }
+
+    // Even if resolution-change features are unsupported, we must not short-circuit the input pipeline.
+    // Key rebinding, mouse coordinate translation, overlays, etc. may still rely on downstream handlers.
+    if (!IsResolutionChangeSupported(g_gameVersion)) { return { false, 0 }; }
 
     // Lock-free check of hotkey main keys - acceptable to race (worst case: miss one keypress)
-    if (g_hotkeyMainKeys.find(vkCode) == g_hotkeyMainKeys.end()) {
+    // Check both raw and normalized VK so Shift/Ctrl/Alt variants and generic VKs are handled.
+    if (g_hotkeyMainKeys.find(rawVkCode) == g_hotkeyMainKeys.end() && g_hotkeyMainKeys.find(vkCode) == g_hotkeyMainKeys.end()) {
         // This key is not a hotkey main key, but it might invalidate pending trigger-on-release hotkeys
         if (isKeyDown) {
             std::lock_guard<std::mutex> lock(g_triggerOnReleaseMutex);
             // Any key press (that's not a hotkey) invalidates ALL pending trigger-on-release hotkeys
             for (const auto& pendingHotkeyId : g_triggerOnReleasePending) { g_triggerOnReleaseInvalidated.insert(pendingHotkeyId); }
         }
-        return { true, CallWindowProc(g_originalWndProc, hWnd, uMsg, wParam, lParam) };
+        // IMPORTANT: Do not return "consumed" here.
+        // We intentionally skip scanning hotkeys for non-main keys, but we still want later phases
+        // (mouse coordinate translation, key rebinding, etc.) to run and the message to be forwarded once.
+        return { false, 0 };
     }
 
     // Use config snapshot for thread-safe hotkey iteration
@@ -561,7 +650,10 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
 
     bool s_enableHotkeyDebug = cfg.debug.showHotkeyDebug;
 
-    if (s_enableHotkeyDebug) { Log("[Hotkey] Key/button pressed: " + std::to_string(vkCode) + " in mode: " + currentModeId); }
+    if (s_enableHotkeyDebug) {
+        Log("[Hotkey] Key/button pressed: " + std::to_string(vkCode) + " (raw=" + std::to_string(rawVkCode) + ") in mode: " +
+            currentModeId);
+    }
     if (s_enableHotkeyDebug) {
         Log("[Hotkey] Current game state: " + gameState);
         Log("[Hotkey] Evaluating " + std::to_string(cfg.hotkeys.size()) + " configured hotkeys");
@@ -574,12 +666,25 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
                 ")");
         }
 
+        // Game-state conditions normally gate ALL transitions.
+        // Optional behavior: allow exiting the current secondary mode back to Fullscreen even if game state doesn't match.
         bool conditionsMet = hotkey.conditions.gameState.empty() ||
                              std::find(hotkey.conditions.gameState.begin(), hotkey.conditions.gameState.end(), gameState) !=
                                  hotkey.conditions.gameState.end();
+
+        // Determine if this hotkey is currently in its active secondary mode (meaning main hotkey would exit to Fullscreen).
+        // Note: GetHotkeySecondaryMode is thread-safe.
+        std::string currentSecMode = GetHotkeySecondaryMode(hotkeyIdx);
+        bool wouldExitToFullscreen = !currentSecMode.empty() && EqualsIgnoreCase(currentModeId, currentSecMode);
+
         if (!conditionsMet) {
-            if (s_enableHotkeyDebug) { Log("[Hotkey] SKIP: Game state conditions not met"); }
-            continue;
+            if (!(hotkey.allowExitToFullscreenRegardlessOfGameState && wouldExitToFullscreen)) {
+                if (s_enableHotkeyDebug) { Log("[Hotkey] SKIP: Game state conditions not met"); }
+                continue;
+            }
+            if (s_enableHotkeyDebug) {
+                Log("[Hotkey] BYPASS: Allowing exit to Fullscreen even though game state conditions are not met");
+            }
         }
 
         // Check Alt secondary mode hotkeys first
@@ -598,6 +703,7 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
                         g_triggerOnReleasePending.insert(hotkeyId);
                         if (s_enableHotkeyDebug) { Log("[Hotkey] Alt trigger-on-release hotkey pressed, added to pending: " + hotkeyId); }
                         // Pass through the key-down event to the game so modifier keys work with other combos
+                        if (hotkey.blockKeyFromGame) return { true, 0 };
                         return { true, CallWindowProc(g_originalWndProc, hWnd, uMsg, wParam, lParam) };
                     } else {
                         // Key released - check if invalidated
@@ -611,6 +717,7 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
 
                         if (wasInvalidated) {
                             if (s_enableHotkeyDebug) { Log("[Hotkey] Alt trigger-on-release hotkey invalidated: " + hotkeyId); }
+                            if (hotkey.blockKeyFromGame) return { true, 0 };
                             return { true, CallWindowProc(g_originalWndProc, hWnd, uMsg, wParam, lParam) };
                         }
                     }
@@ -625,6 +732,7 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
                         std::chrono::duration_cast<std::chrono::milliseconds>(now - g_hotkeyTimestamps[hotkeyId]).count() <
                             hotkey.debounce) {
                         if (s_enableHotkeyDebug) { Log("[Hotkey] Alt hotkey matched but debounced: " + hotkeyId); }
+                        if (hotkey.blockKeyFromGame) return { true, 0 };
                         return { true, CallWindowProc(g_originalWndProc, hWnd, uMsg, wParam, lParam) };
                     }
                     g_hotkeyTimestamps[hotkeyId] = now;
@@ -637,6 +745,7 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
 
                     if (!newSecMode.empty()) { SwitchToMode(newSecMode, "alt hotkey"); }
                 }
+                if (hotkey.blockKeyFromGame) return { true, 0 };
                 return { true, CallWindowProc(g_originalWndProc, hWnd, uMsg, wParam, lParam) };
             }
         }
@@ -658,6 +767,7 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
                     g_triggerOnReleasePending.insert(hotkeyId);
                     if (s_enableHotkeyDebug) { Log("[Hotkey] Trigger-on-release hotkey pressed, added to pending: " + hotkeyId); }
                     // Pass through the key-down event to the game so modifier keys work with other combos
+                    if (hotkey.blockKeyFromGame) return { true, 0 };
                     return { true, CallWindowProc(g_originalWndProc, hWnd, uMsg, wParam, lParam) };
                 } else {
                     // Key released - check if invalidated
@@ -674,6 +784,7 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
                         if (s_enableHotkeyDebug) {
                             Log("[Hotkey] Trigger-on-release hotkey invalidated (another key was pressed): " + hotkeyId);
                         }
+                        if (hotkey.blockKeyFromGame) return { true, 0 };
                         return { true, CallWindowProc(g_originalWndProc, hWnd, uMsg, wParam, lParam) };
                     }
                     // Fall through to trigger the hotkey
@@ -688,13 +799,13 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
                 if (g_hotkeyTimestamps.count(hotkeyId) &&
                     std::chrono::duration_cast<std::chrono::milliseconds>(now - g_hotkeyTimestamps[hotkeyId]).count() < hotkey.debounce) {
                     if (s_enableHotkeyDebug) { Log("[Hotkey] Main hotkey matched but debounced: " + hotkeyId); }
+                    if (hotkey.blockKeyFromGame) return { true, 0 };
                     return { true, CallWindowProc(g_originalWndProc, hWnd, uMsg, wParam, lParam) };
                 }
                 g_hotkeyTimestamps[hotkeyId] = now;
 
                 // Lock-free read of current mode ID from double-buffer
                 std::string current = g_modeIdBuffers[g_currentModeIdIndex.load(std::memory_order_acquire)];
-                std::string currentSecMode = GetHotkeySecondaryMode(hotkeyIdx);
                 std::string targetMode;
 
                 if (EqualsIgnoreCase(current, currentSecMode)) {
@@ -709,6 +820,7 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
 
                 if (!targetMode.empty()) { SwitchToMode(targetMode, "main hotkey"); }
             }
+            if (hotkey.blockKeyFromGame) return { true, 0 };
             return { true, CallWindowProc(g_originalWndProc, hWnd, uMsg, wParam, lParam) };
         }
     }
@@ -922,62 +1034,99 @@ InputHandlerResult HandleKeyRebinding(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
     PROFILE_SCOPE("HandleKeyRebinding");
 
     // Determine the virtual key code based on message type
-    DWORD vkCode = 0;
+    DWORD rawVkCode = 0;
+    DWORD vkCode = 0; // Normalized (left/right variants for Ctrl/Shift/Alt)
     bool isMouseButton = false;
     bool isKeyDown = false;
 
     if (uMsg == WM_KEYDOWN || uMsg == WM_SYSKEYDOWN) {
-        vkCode = static_cast<DWORD>(wParam);
+        rawVkCode = static_cast<DWORD>(wParam);
         isKeyDown = true;
     } else if (uMsg == WM_KEYUP || uMsg == WM_SYSKEYUP) {
-        vkCode = static_cast<DWORD>(wParam);
+        rawVkCode = static_cast<DWORD>(wParam);
         isKeyDown = false;
     } else if (uMsg == WM_XBUTTONDOWN) {
         WORD xButton = GET_XBUTTON_WPARAM(wParam);
-        vkCode = (xButton == XBUTTON1) ? VK_XBUTTON1 : VK_XBUTTON2;
+        rawVkCode = (xButton == XBUTTON1) ? VK_XBUTTON1 : VK_XBUTTON2;
         isMouseButton = true;
         isKeyDown = true;
     } else if (uMsg == WM_XBUTTONUP) {
         WORD xButton = GET_XBUTTON_WPARAM(wParam);
-        vkCode = (xButton == XBUTTON1) ? VK_XBUTTON1 : VK_XBUTTON2;
+        rawVkCode = (xButton == XBUTTON1) ? VK_XBUTTON1 : VK_XBUTTON2;
         isMouseButton = true;
         isKeyDown = false;
     } else if (uMsg == WM_LBUTTONDOWN) {
-        vkCode = VK_LBUTTON;
+        rawVkCode = VK_LBUTTON;
         isMouseButton = true;
         isKeyDown = true;
     } else if (uMsg == WM_LBUTTONUP) {
-        vkCode = VK_LBUTTON;
+        rawVkCode = VK_LBUTTON;
         isMouseButton = true;
         isKeyDown = false;
     } else if (uMsg == WM_RBUTTONDOWN) {
-        vkCode = VK_RBUTTON;
+        rawVkCode = VK_RBUTTON;
         isMouseButton = true;
         isKeyDown = true;
     } else if (uMsg == WM_RBUTTONUP) {
-        vkCode = VK_RBUTTON;
+        rawVkCode = VK_RBUTTON;
         isMouseButton = true;
         isKeyDown = false;
     } else if (uMsg == WM_MBUTTONDOWN) {
-        vkCode = VK_MBUTTON;
+        rawVkCode = VK_MBUTTON;
         isMouseButton = true;
         isKeyDown = true;
     } else if (uMsg == WM_MBUTTONUP) {
-        vkCode = VK_MBUTTON;
+        rawVkCode = VK_MBUTTON;
         isMouseButton = true;
         isKeyDown = false;
     } else {
         return { false, 0 };
     }
 
+    // Normalize generic modifier VKs to left/right variants so rebinds like VK_RSHIFT work.
+    vkCode = rawVkCode;
+    if (!isMouseButton && (uMsg == WM_KEYDOWN || uMsg == WM_SYSKEYDOWN || uMsg == WM_KEYUP || uMsg == WM_SYSKEYUP)) {
+        if (vkCode == VK_SHIFT) {
+            vkCode = static_cast<DWORD>(::MapVirtualKeyW((UINT)((lParam >> 16) & 0xff), MAPVK_VSC_TO_VK_EX));
+        } else if (vkCode == VK_CONTROL) {
+            vkCode = (HIWORD(lParam) & KF_EXTENDED) ? VK_RCONTROL : VK_LCONTROL;
+        } else if (vkCode == VK_MENU) {
+            vkCode = (HIWORD(lParam) & KF_EXTENDED) ? VK_RMENU : VK_LMENU;
+        }
+        if (vkCode == 0) vkCode = rawVkCode;
+    }
+
     // Use config snapshot for thread-safe access to key rebinds
     auto rebindCfg = GetConfigSnapshot();
     if (!rebindCfg || !rebindCfg->keyRebinds.enabled) { return { false, 0 }; }
 
+    auto matchesFromKey = [&](DWORD incomingVk, DWORD incomingRawVk, DWORD fromKey) -> bool {
+        if (fromKey == 0) return false;
+        if (incomingVk == fromKey) return true;
+
+        // Allow generic modifiers to match either left/right variant.
+        if (fromKey == VK_CONTROL) {
+            return incomingVk == VK_LCONTROL || incomingVk == VK_RCONTROL || incomingRawVk == VK_CONTROL;
+        }
+        if (fromKey == VK_SHIFT) {
+            return incomingVk == VK_LSHIFT || incomingVk == VK_RSHIFT || incomingRawVk == VK_SHIFT;
+        }
+        if (fromKey == VK_MENU) {
+            return incomingVk == VK_LMENU || incomingVk == VK_RMENU || incomingRawVk == VK_MENU;
+        }
+
+        // Also allow left/right modifier bindings to match generic incoming VK_*.
+        if (incomingRawVk == VK_CONTROL && (fromKey == VK_LCONTROL || fromKey == VK_RCONTROL)) return true;
+        if (incomingRawVk == VK_SHIFT && (fromKey == VK_LSHIFT || fromKey == VK_RSHIFT)) return true;
+        if (incomingRawVk == VK_MENU && (fromKey == VK_LMENU || fromKey == VK_RMENU)) return true;
+
+        return false;
+    };
+
     for (size_t i = 0; i < rebindCfg->keyRebinds.rebinds.size(); ++i) {
         const auto& rebind = rebindCfg->keyRebinds.rebinds[i];
 
-        if (rebind.enabled && rebind.fromKey != 0 && rebind.toKey != 0 && vkCode == rebind.fromKey) {
+        if (rebind.enabled && rebind.fromKey != 0 && rebind.toKey != 0 && matchesFromKey(vkCode, rawVkCode, rebind.fromKey)) {
             DWORD outputVK;
             UINT outputScanCode;
 
@@ -993,7 +1142,37 @@ InputHandlerResult HandleKeyRebinding(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
             if (outputVK == VK_LBUTTON || outputVK == VK_RBUTTON || outputVK == VK_MBUTTON || outputVK == VK_XBUTTON1 ||
                 outputVK == VK_XBUTTON2) {
                 UINT newMsg = 0;
-                WPARAM newWParam = wParam;
+                auto buildMouseKeyState = [&](DWORD buttonVk, bool buttonDown) -> WORD {
+                    WORD mk = 0;
+                    if ((GetKeyState(VK_CONTROL) & 0x8000) != 0) mk |= MK_CONTROL;
+                    if ((GetKeyState(VK_SHIFT) & 0x8000) != 0) mk |= MK_SHIFT;
+
+                    auto setBtn = [&](int vk, WORD mask, bool isThisButton) {
+                        bool down = (GetKeyState(vk) & 0x8000) != 0;
+                        if (isThisButton) down = buttonDown;
+                        if (down) mk |= mask;
+                    };
+
+                    setBtn(VK_LBUTTON, MK_LBUTTON, buttonVk == VK_LBUTTON);
+                    setBtn(VK_RBUTTON, MK_RBUTTON, buttonVk == VK_RBUTTON);
+                    setBtn(VK_MBUTTON, MK_MBUTTON, buttonVk == VK_MBUTTON);
+                    setBtn(VK_XBUTTON1, MK_XBUTTON1, buttonVk == VK_XBUTTON1);
+                    setBtn(VK_XBUTTON2, MK_XBUTTON2, buttonVk == VK_XBUTTON2);
+                    return mk;
+                };
+
+                LPARAM mouseLParam = lParam;
+                if (!isMouseButton) {
+                    POINT pt{};
+                    if (GetCursorPos(&pt) && ScreenToClient(hWnd, &pt)) {
+                        mouseLParam = MAKELPARAM(pt.x, pt.y);
+                    } else {
+                        mouseLParam = MAKELPARAM(0, 0);
+                    }
+                }
+
+                WORD mkState = buildMouseKeyState(outputVK, isKeyDown);
+                WPARAM newWParam = mkState;
 
                 if (outputVK == VK_LBUTTON) {
                     newMsg = isKeyDown ? WM_LBUTTONDOWN : WM_LBUTTONUP;
@@ -1003,13 +1182,13 @@ InputHandlerResult HandleKeyRebinding(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
                     newMsg = isKeyDown ? WM_MBUTTONDOWN : WM_MBUTTONUP;
                 } else if (outputVK == VK_XBUTTON1) {
                     newMsg = isKeyDown ? WM_XBUTTONDOWN : WM_XBUTTONUP;
-                    newWParam = MAKEWPARAM(LOWORD(wParam), XBUTTON1);
+                    newWParam = MAKEWPARAM(mkState, XBUTTON1);
                 } else if (outputVK == VK_XBUTTON2) {
                     newMsg = isKeyDown ? WM_XBUTTONDOWN : WM_XBUTTONUP;
-                    newWParam = MAKEWPARAM(LOWORD(wParam), XBUTTON2);
+                    newWParam = MAKEWPARAM(mkState, XBUTTON2);
                 }
 
-                return { true, CallWindowProc(g_originalWndProc, hWnd, newMsg, newWParam, lParam) };
+                return { true, CallWindowProc(g_originalWndProc, hWnd, newMsg, newWParam, mouseLParam) };
             }
 
             // For keyboard output from keyboard/mouse input
@@ -1083,6 +1262,15 @@ InputHandlerResult HandleCharRebinding(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
 
 LRESULT CALLBACK SubclassedWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     PROFILE_SCOPE("SubclassedWndProc");
+    if (g_showGui.load() && s_forcedShowCursor && g_gameVersion >= GameVersion(1, 13, 0)) {
+        EnsureSystemCursorVisible();
+        static HCURSOR s_arrowCursor = LoadCursorW(NULL, IDC_ARROW);
+        SetCursor(s_arrowCursor);
+    }
+    if (!g_showGui.load() && s_forcedShowCursor) {
+        EnsureSystemCursorHidden();
+        s_forcedShowCursor = false;
+    }
 
     RegisterBindingInputEvent(uMsg, wParam, lParam);
 

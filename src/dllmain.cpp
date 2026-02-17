@@ -325,10 +325,20 @@ void RebuildHotkeyMainKeys_Internal() {
         // VK_CONTROL/VK_SHIFT/VK_MENU in wParam, not the left/right-specific codes
         if (mainKey == VK_LCONTROL || mainKey == VK_RCONTROL) {
             g_hotkeyMainKeys.insert(VK_CONTROL);
+        } else if (mainKey == VK_CONTROL) {
+            // If the binding uses the generic modifier, also accept left/right variants
+            g_hotkeyMainKeys.insert(VK_LCONTROL);
+            g_hotkeyMainKeys.insert(VK_RCONTROL);
         } else if (mainKey == VK_LSHIFT || mainKey == VK_RSHIFT) {
             g_hotkeyMainKeys.insert(VK_SHIFT);
+        } else if (mainKey == VK_SHIFT) {
+            g_hotkeyMainKeys.insert(VK_LSHIFT);
+            g_hotkeyMainKeys.insert(VK_RSHIFT);
         } else if (mainKey == VK_LMENU || mainKey == VK_RMENU) {
             g_hotkeyMainKeys.insert(VK_MENU);
+        } else if (mainKey == VK_MENU) {
+            g_hotkeyMainKeys.insert(VK_LMENU);
+            g_hotkeyMainKeys.insert(VK_RMENU);
         }
     };
 
@@ -353,7 +363,28 @@ void RebuildHotkeyMainKeys_Internal() {
     // Include key rebinds so they're not skipped by the early exit optimization
     if (g_config.keyRebinds.enabled) {
         for (const auto& rebind : g_config.keyRebinds.rebinds) {
-            if (rebind.enabled && rebind.fromKey != 0) { g_hotkeyMainKeys.insert(rebind.fromKey); }
+            if (rebind.enabled && rebind.fromKey != 0) {
+                g_hotkeyMainKeys.insert(rebind.fromKey);
+
+                // Mirror the modifier normalization rules so rebinding VK_RSHIFT still works even though
+                // Windows may deliver VK_SHIFT in wParam (and vice-versa).
+                if (rebind.fromKey == VK_LCONTROL || rebind.fromKey == VK_RCONTROL) {
+                    g_hotkeyMainKeys.insert(VK_CONTROL);
+                } else if (rebind.fromKey == VK_CONTROL) {
+                    g_hotkeyMainKeys.insert(VK_LCONTROL);
+                    g_hotkeyMainKeys.insert(VK_RCONTROL);
+                } else if (rebind.fromKey == VK_LSHIFT || rebind.fromKey == VK_RSHIFT) {
+                    g_hotkeyMainKeys.insert(VK_SHIFT);
+                } else if (rebind.fromKey == VK_SHIFT) {
+                    g_hotkeyMainKeys.insert(VK_LSHIFT);
+                    g_hotkeyMainKeys.insert(VK_RSHIFT);
+                } else if (rebind.fromKey == VK_LMENU || rebind.fromKey == VK_RMENU) {
+                    g_hotkeyMainKeys.insert(VK_MENU);
+                } else if (rebind.fromKey == VK_MENU) {
+                    g_hotkeyMainKeys.insert(VK_LMENU);
+                    g_hotkeyMainKeys.insert(VK_RMENU);
+                }
+            }
         }
     }
 }

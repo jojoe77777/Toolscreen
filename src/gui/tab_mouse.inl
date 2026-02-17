@@ -7,7 +7,7 @@
 
                 ImGui::Text("Mouse Sensitivity:");
                 ImGui::SetNextItemWidth(600);
-                if (ImGui::SliderFloat("##mouseSensitivity", &g_config.mouseSensitivity, 0.1f, 3.0f, "%.2fx")) {
+                if (ImGui::SliderFloat("##mouseSensitivity", &g_config.mouseSensitivity, 0.001f, 10.0f, "%.3fx")) {
                     g_configIsDirty = true;
                 }
                 ImGui::SameLine();

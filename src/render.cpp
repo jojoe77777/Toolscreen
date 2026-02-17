@@ -1711,6 +1711,9 @@ void handleEyeZoomMode(const GLState& s, float opacity, int animatedViewportX) {
 
         float pixelWidthOnScreen = zoomOutputWidth / (float)zoomConfig.cloneWidth;
         int labelsPerSide = zoomConfig.cloneWidth / 2;
+        int overlayLabelsPerSide = zoomConfig.overlayWidth;
+        if (overlayLabelsPerSide < 0) overlayLabelsPerSide = labelsPerSide;
+        if (overlayLabelsPerSide > labelsPerSide) overlayLabelsPerSide = labelsPerSide;
         float centerY_local = zoomOutputHeight / 2.0f;
 
         float boxHeight;
@@ -1720,10 +1723,11 @@ void handleEyeZoomMode(const GLState& s, float opacity, int animatedViewportX) {
             boxHeight = static_cast<float>(zoomConfig.rectHeight);
         }
 
-        int boxIndex = 0;
-        for (int xOffset = -labelsPerSide; xOffset <= labelsPerSide; xOffset++) {
+        for (int xOffset = -overlayLabelsPerSide; xOffset <= overlayLabelsPerSide; xOffset++) {
             if (xOffset == 0) continue;
 
+            // Map xOffset (relative to center) to the full clone column index [0..cloneWidth-1]
+            int boxIndex = xOffset + labelsPerSide - (xOffset > 0 ? 1 : 0);
             float boxLeft = boxIndex * pixelWidthOnScreen;
             float boxRight = boxLeft + pixelWidthOnScreen;
             float boxBottom_local = centerY_local - boxHeight / 2.0f;
@@ -1732,8 +1736,6 @@ void handleEyeZoomMode(const GLState& s, float opacity, int animatedViewportX) {
             Color boxColor = (boxIndex % 2 == 0) ? zoomConfig.gridColor1 : zoomConfig.gridColor2;
             float boxOpacity = (boxIndex % 2 == 0) ? zoomConfig.gridColor1Opacity : zoomConfig.gridColor2Opacity;
             glUniform4f(g_solidColorShaderLocs.color, boxColor.r, boxColor.g, boxColor.b, boxOpacity);
-
-            boxIndex++;
 
             // Convert to NDC in temp texture space
             float boxNdcLeft = (boxLeft / (float)zoomOutputWidth) * 2.0f - 1.0f;
@@ -1880,6 +1882,9 @@ void handleEyeZoomMode(const GLState& s, float opacity, int animatedViewportX) {
 
         float pixelWidthOnScreen = zoomOutputWidth / (float)zoomConfig.cloneWidth;
         int labelsPerSide = zoomConfig.cloneWidth / 2;
+        int overlayLabelsPerSide = zoomConfig.overlayWidth;
+        if (overlayLabelsPerSide < 0) overlayLabelsPerSide = labelsPerSide;
+        if (overlayLabelsPerSide > labelsPerSide) overlayLabelsPerSide = labelsPerSide;
         float centerY = zoomY + zoomOutputHeight / 2.0f;
 
         float boxHeight;
@@ -1889,10 +1894,11 @@ void handleEyeZoomMode(const GLState& s, float opacity, int animatedViewportX) {
             boxHeight = static_cast<float>(zoomConfig.rectHeight);
         }
 
-        int boxIndex = 0;
-        for (int xOffset = -labelsPerSide; xOffset <= labelsPerSide; xOffset++) {
+        for (int xOffset = -overlayLabelsPerSide; xOffset <= overlayLabelsPerSide; xOffset++) {
             if (xOffset == 0) continue;
 
+            // Map xOffset (relative to center) to the full clone column index [0..cloneWidth-1]
+            int boxIndex = xOffset + labelsPerSide - (xOffset > 0 ? 1 : 0);
             float boxLeft = zoomX + (boxIndex * pixelWidthOnScreen);
             float boxRight = boxLeft + pixelWidthOnScreen;
             float boxBottom = centerY - boxHeight / 2.0f;
@@ -1901,8 +1907,6 @@ void handleEyeZoomMode(const GLState& s, float opacity, int animatedViewportX) {
             Color boxColor = (boxIndex % 2 == 0) ? zoomConfig.gridColor1 : zoomConfig.gridColor2;
             float boxOpacity = (boxIndex % 2 == 0) ? zoomConfig.gridColor1Opacity : zoomConfig.gridColor2Opacity;
             glUniform4f(g_solidColorShaderLocs.color, boxColor.r, boxColor.g, boxColor.b, boxOpacity);
-
-            boxIndex++;
 
             float boxNdcLeft = (boxLeft / (float)fullW) * 2.0f - 1.0f;
             float boxNdcRight = (boxRight / (float)fullW) * 2.0f - 1.0f;
@@ -3180,11 +3184,34 @@ void InitializeOverlayTextFont(const std::string& fontPath, float baseFontSize, 
     if (!ImGui::GetCurrentContext()) return;
 
     ImGuiIO& io = ImGui::GetIO();
-    // Add a larger font (1.5x the base size) for overlay text labels
-    g_overlayTextFont = io.Fonts->AddFontFromFileTTF(fontPath.c_str(), baseFontSize * 1.5f * scaleFactor);
+    const float sizePixels = baseFontSize * 1.5f * scaleFactor;
+
+    // Add a larger font (1.5x the base size) for overlay text labels.
+    // If the configured font can't be loaded reliably, fall back to Arial.
+    std::string usePath = fontPath.empty() ? ConfigDefaults::CONFIG_FONT_PATH : fontPath;
+
+    // Validate stability in a temporary atlas to avoid poisoning the live atlas.
+    auto isStable = [](const std::string& p, float sz) -> bool {
+        if (p.empty()) return false;
+        ImFontAtlas testAtlas;
+        ImFont* f = testAtlas.AddFontFromFileTTF(p.c_str(), sz);
+        if (!f) return false;
+        return testAtlas.Build();
+    };
+
+    if (!isStable(usePath, sizePixels)) { usePath = ConfigDefaults::CONFIG_FONT_PATH; }
+
+    g_overlayTextFont = io.Fonts->AddFontFromFileTTF(usePath.c_str(), sizePixels);
+    if (!g_overlayTextFont && usePath != ConfigDefaults::CONFIG_FONT_PATH) {
+        g_overlayTextFont = io.Fonts->AddFontFromFileTTF(ConfigDefaults::CONFIG_FONT_PATH.c_str(), sizePixels);
+    }
+    if (!g_overlayTextFont) {
+        // Last resort: ensure overlay text still has a usable font.
+        g_overlayTextFont = io.Fonts->AddFontDefault();
+    }
 
     // Rebuild font atlas to apply changes
-    io.Fonts->Build();
+    (void)io.Fonts->Build();
 }
 
 // Update overlay text font size dynamically

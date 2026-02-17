@@ -13,7 +13,7 @@ if (ImGui::BeginTabItem("Inputs")) {
 
             ImGui::Text("Mouse Sensitivity:");
             ImGui::SetNextItemWidth(600);
-            if (ImGui::SliderFloat("##mouseSensitivity", &g_config.mouseSensitivity, 0.1f, 3.0f, "%.2fx")) { g_configIsDirty = true; }
+            if (ImGui::SliderFloat("##mouseSensitivity", &g_config.mouseSensitivity, 0.001f, 10.0f, "%.3fx")) { g_configIsDirty = true; }
             ImGui::SameLine();
             HelpMarker("Multiplies mouse movement for raw input events (mouselook).\n"
                        "1.0 = normal sensitivity, higher = faster, lower = slower.\n"
@@ -347,9 +347,9 @@ if (ImGui::BeginTabItem("Inputs")) {
                     LPARAM capturedLParam = 0;
                     bool capturedIsMouse = false;
                     if (ConsumeBindingInputEventSince(s_lastBindingInputSeqInputs1, capturedVk, capturedLParam, capturedIsMouse)) {
-                        if (capturedVk != VK_ESCAPE && capturedVk != VK_LWIN && capturedVk != VK_RWIN && capturedVk != VK_CONTROL &&
-                            capturedVk != VK_LCONTROL && capturedVk != VK_RCONTROL && capturedVk != VK_SHIFT && capturedVk != VK_LSHIFT &&
-                            capturedVk != VK_RSHIFT && capturedVk != VK_MENU && capturedVk != VK_LMENU && capturedVk != VK_RMENU) {
+                        // Allow binding modifier keys (L/R Ctrl/Shift/Alt) for key rebinding.
+                        // Only disallow Escape (cancel) and Windows keys.
+                        if (capturedVk != VK_ESCAPE && capturedVk != VK_LWIN && capturedVk != VK_RWIN) {
                             if (s_rebindFromKeyToBind != -1 && s_rebindFromKeyToBind < (int)g_config.keyRebinds.rebinds.size()) {
                                 g_config.keyRebinds.rebinds[s_rebindFromKeyToBind].fromKey = capturedVk;
                                 g_configIsDirty = true;
@@ -388,9 +388,8 @@ if (ImGui::BeginTabItem("Inputs")) {
                     LPARAM capturedLParam = 0;
                     bool capturedIsMouse = false;
                     if (ConsumeBindingInputEventSince(s_lastBindingInputSeqInputs2, capturedVk, capturedLParam, capturedIsMouse)) {
-                        if (capturedVk != VK_ESCAPE && capturedVk != VK_LWIN && capturedVk != VK_RWIN && capturedVk != VK_CONTROL &&
-                            capturedVk != VK_LCONTROL && capturedVk != VK_RCONTROL && capturedVk != VK_SHIFT && capturedVk != VK_LSHIFT &&
-                            capturedVk != VK_RSHIFT && capturedVk != VK_MENU && capturedVk != VK_LMENU && capturedVk != VK_RMENU) {
+                        // Allow modifier keys here as well (useful when the desired output is a modifier).
+                        if (capturedVk != VK_ESCAPE && capturedVk != VK_LWIN && capturedVk != VK_RWIN) {
                             if (s_rebindOutputVKToBind >= 0 && s_rebindOutputVKToBind < (int)g_config.keyRebinds.rebinds.size()) {
                                 auto& rebind = g_config.keyRebinds.rebinds[s_rebindOutputVKToBind];
                                 rebind.toKey = capturedVk;
@@ -429,9 +428,8 @@ if (ImGui::BeginTabItem("Inputs")) {
                     LPARAM capturedLParam = 0;
                     bool capturedIsMouse = false;
                     if (ConsumeBindingInputEventSince(s_lastBindingInputSeqInputs3, capturedVk, capturedLParam, capturedIsMouse)) {
-                        if (capturedVk != VK_ESCAPE && capturedVk != VK_LWIN && capturedVk != VK_RWIN && capturedVk != VK_CONTROL &&
-                            capturedVk != VK_LCONTROL && capturedVk != VK_RCONTROL && capturedVk != VK_SHIFT && capturedVk != VK_LSHIFT &&
-                            capturedVk != VK_RSHIFT && capturedVk != VK_MENU && capturedVk != VK_LMENU && capturedVk != VK_RMENU) {
+                        // Allow modifier keys when capturing scan codes too.
+                        if (capturedVk != VK_ESCAPE && capturedVk != VK_LWIN && capturedVk != VK_RWIN) {
                             if (s_rebindOutputScanToBind >= 0 && s_rebindOutputScanToBind < (int)g_config.keyRebinds.rebinds.size()) {
                                 auto& rebind = g_config.keyRebinds.rebinds[s_rebindOutputScanToBind];
 

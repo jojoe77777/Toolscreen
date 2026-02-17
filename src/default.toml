@@ -56,6 +56,7 @@ centerLineColor = [ 255, 255, 255 ]
 centerLineColorOpacity = 1.0
 cloneHeight = 1300
 cloneWidth = 18
+overlayWidth = 9
 gridColor1 = [ 255, 182, 193 ]
 gridColor1Opacity = 1.0
 gridColor2 = [ 173, 216, 230 ]

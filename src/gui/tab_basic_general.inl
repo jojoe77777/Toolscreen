@@ -182,7 +182,14 @@ if (ImGui::BeginTabItem("General")) {
         ImGui::TableNextColumn();
         if (modeConfig) {
             ImGui::PushID((std::string(label) + "_width").c_str());
-            if (Spinner("##w", &modeConfig->width, 10, 1, maxWidth, 64, 3)) { g_configIsDirty = true; }
+            if (Spinner("##w", &modeConfig->width, 10, 1, maxWidth, 64, 3)) {
+                // Basic tab edits are absolute pixel dimensions.
+                // If an expression was previously set, it would overwrite this on next launch (and on any recalc).
+                // Clear the expression and relative sentinel so the new value is persisted.
+                if (!modeConfig->widthExpr.empty()) { modeConfig->widthExpr.clear(); }
+                modeConfig->relativeWidth = -1.0f;
+                g_configIsDirty = true;
+            }
             ImGui::PopID();
         }
 
@@ -190,7 +197,11 @@ if (ImGui::BeginTabItem("General")) {
         ImGui::TableNextColumn();
         if (modeConfig) {
             ImGui::PushID((std::string(label) + "_height").c_str());
-            if (Spinner("##h", &modeConfig->height, 10, 1, maxHeight, 64, 3)) { g_configIsDirty = true; }
+            if (Spinner("##h", &modeConfig->height, 10, 1, maxHeight, 64, 3)) {
+                if (!modeConfig->heightExpr.empty()) { modeConfig->heightExpr.clear(); }
+                modeConfig->relativeHeight = -1.0f;
+                g_configIsDirty = true;
+            }
             ImGui::PopID();
         }
 
@@ -256,7 +267,7 @@ if (ImGui::BeginTabItem("General")) {
     ImGui::Text("Global:");
     ImGui::SameLine();
     ImGui::SetNextItemWidth(200);
-    if (ImGui::SliderFloat("##globalSensBasic", &g_config.mouseSensitivity, 0.1f, 3.0f, "%.2fx")) { g_configIsDirty = true; }
+    if (ImGui::SliderFloat("##globalSensBasic", &g_config.mouseSensitivity, 0.001f, 10.0f, "%.3fx")) { g_configIsDirty = true; }
     ImGui::SameLine();
     HelpMarker("Global mouse sensitivity multiplier (1.0 = normal).\nAffects all modes unless overridden.");
 
@@ -267,8 +278,8 @@ if (ImGui::BeginTabItem("General")) {
             ImGui::Text("EyeZoom:");
             ImGui::SameLine();
             ImGui::SetNextItemWidth(200);
-            if (ImGui::SliderFloat("##eyezoomSensBasic", &eyezoomMode->modeSensitivity, 0.01f, 3.0f, "%.2fx")) {
-                if (eyezoomMode->modeSensitivity < 0.01f) eyezoomMode->modeSensitivity = 0.01f;
+            if (ImGui::SliderFloat("##eyezoomSensBasic", &eyezoomMode->modeSensitivity, 0.001f, 10.0f, "%.3fx")) {
+                if (eyezoomMode->modeSensitivity < 0.001f) eyezoomMode->modeSensitivity = 0.001f;
                 eyezoomMode->sensitivityOverrideEnabled = true;
                 g_configIsDirty = true;
             }

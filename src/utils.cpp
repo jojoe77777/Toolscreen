@@ -1642,6 +1642,11 @@ bool CheckHotkeyMatch(const std::vector<DWORD>& keys, WPARAM wParam, const std::
     PROFILE_SCOPE_CAT("Hotkey Match Check", "Game Logic");
     if (keys.empty()) return false;
 
+    auto isModifierKey = [](DWORD key) {
+        return key == VK_CONTROL || key == VK_LCONTROL || key == VK_RCONTROL || key == VK_SHIFT || key == VK_LSHIFT || key == VK_RSHIFT ||
+               key == VK_MENU || key == VK_LMENU || key == VK_RMENU;
+    };
+
     // For trigger on release, skip exclusion key checks since user may have released modifiers
     // before or at the same time as the main key
     if (!triggerOnRelease) {
@@ -1702,6 +1707,18 @@ bool CheckHotkeyMatch(const std::vector<DWORD>& keys, WPARAM wParam, const std::
     // Handle modifier keys specially - Windows sends VK_CONTROL/VK_SHIFT/VK_MENU in wParam,
     // not the specific left/right variants. We need to check if the specific key is pressed.
     bool main_key_pressed = (main_key == wParam);
+
+    if (!main_key_pressed) {
+        // Also support the inverse: bindings may use generic VK_* while the caller passes
+        // left/right variants (after resolving from scan code / extended flag).
+        if (main_key == VK_CONTROL && (wParam == VK_LCONTROL || wParam == VK_RCONTROL)) {
+            main_key_pressed = true;
+        } else if (main_key == VK_SHIFT && (wParam == VK_LSHIFT || wParam == VK_RSHIFT)) {
+            main_key_pressed = true;
+        } else if (main_key == VK_MENU && (wParam == VK_LMENU || wParam == VK_RMENU)) {
+            main_key_pressed = true;
+        }
+    }
 
     if (!main_key_pressed) {
         // Check if wParam is a generic modifier and main_key is a specific variant
@@ -1800,6 +1817,19 @@ bool CheckHotkeyMatch(const std::vector<DWORD>& keys, WPARAM wParam, const std::
         if (requires_alt && !alt_down_now) {
             if (s_enableHotkeyDebug) Log("[Hotkey] FAIL: Alt required but not pressed");
             return false;
+        }
+
+        for (size_t i = 0; i + 1 < keys.size(); ++i) {
+            DWORD requiredKey = keys[i];
+            if (isModifierKey(requiredKey)) continue;
+            if (requiredKey == 0) continue;
+
+            if ((GetAsyncKeyState(requiredKey) & 0x8000) == 0) {
+                if (s_enableHotkeyDebug) {
+                    Log("[Hotkey] FAIL: Required key " + std::to_string(requiredKey) + " is not pressed");
+                }
+                return false;
+            }
         }
 
         // Only check for unwanted modifiers if they are NOT in the exclusion list

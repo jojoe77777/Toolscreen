@@ -1,6 +1,7 @@
 #include "render_thread.h"
 #include "fake_cursor.h"
 #include "gui.h"
+#include "imgui_input_queue.h"
 #include "mirror_thread.h"
 #include "obs_thread.h"
 #include "profiler.h"
@@ -154,6 +155,50 @@ static ImFont* g_eyeZoomTextFont = nullptr;
 static std::string g_eyeZoomFontPathCached = "";
 static float g_eyeZoomScaleFactor = 1.0f;
 
+// Font loading can fail or behave inconsistently with some font files.
+// We treat any font that can't be built reliably as invalid and fall back to Arial.
+static bool RT_IsFontStable(const std::string& fontPath, float sizePixels) {
+    if (fontPath.empty()) return false;
+
+    // Build in a temporary atlas so a broken font doesn't poison the real atlas.
+    ImFontAtlas testAtlas;
+    ImFont* testFont = testAtlas.AddFontFromFileTTF(fontPath.c_str(), sizePixels);
+    if (!testFont) return false;
+    return testAtlas.Build();
+}
+
+static ImFont* RT_AddFontWithArialFallback(ImFontAtlas* atlas, const std::string& requestedPath, float sizePixels, const char* what,
+                                          std::string* outUsedPath = nullptr) {
+    if (!atlas) return nullptr;
+
+    auto setUsed = [&](const std::string& p) {
+        if (outUsedPath) { *outUsedPath = p; }
+    };
+
+    // 1) Requested font (if stable)
+    if (!requestedPath.empty() && RT_IsFontStable(requestedPath, sizePixels)) {
+        if (ImFont* f = atlas->AddFontFromFileTTF(requestedPath.c_str(), sizePixels)) {
+            setUsed(requestedPath);
+            return f;
+        }
+    }
+
+    // 2) Arial fallback (if stable)
+    const std::string& arial = ConfigDefaults::CONFIG_FONT_PATH;
+    if (RT_IsFontStable(arial, sizePixels)) {
+        Log(std::string("Render Thread: Falling back to Arial for ") + what);
+        if (ImFont* f = atlas->AddFontFromFileTTF(arial.c_str(), sizePixels)) {
+            setUsed(arial);
+            return f;
+        }
+    }
+
+    // 3) ImGui built-in default as last resort
+    Log(std::string("Render Thread: Failed to load ") + what + ", using ImGui default font");
+    setUsed(std::string());
+    return atlas->AddFontDefault();
+}
+
 static bool RT_TryInitializeImGui(HWND hwnd, const Config& cfg) {
     if (g_renderThreadImGuiInitialized) { return true; }
     if (!hwnd) { return false; }
@@ -181,26 +226,17 @@ static bool RT_TryInitializeImGui(HWND hwnd, const Config& cfg) {
     if (scaleFactor < 1.0f) { scaleFactor = 1.0f; }
     g_eyeZoomScaleFactor = scaleFactor;
 
-    // Load base font (fall back to default if missing)
-    if (!cfg.fontPath.empty()) {
-        ImFont* baseFont = io.Fonts->AddFontFromFileTTF(cfg.fontPath.c_str(), 16.0f * scaleFactor);
-        if (!baseFont) {
-            Log("Render Thread: Failed to load base font from " + cfg.fontPath + ", using default");
-            io.Fonts->AddFontDefault();
-        }
-    } else {
-        io.Fonts->AddFontDefault();
+    // Load base font (fall back to Arial, then ImGui default)
+    {
+        const std::string requestedBase = cfg.fontPath;
+        (void)RT_AddFontWithArialFallback(io.Fonts, requestedBase, 16.0f * scaleFactor, "base font");
     }
 
     // Load EyeZoom text font (uses custom path if set, otherwise global font)
-    std::string eyeZoomFontPath = cfg.eyezoom.textFontPath.empty() ? cfg.fontPath : cfg.eyezoom.textFontPath;
-    if (!eyeZoomFontPath.empty()) {
-        g_eyeZoomTextFont = io.Fonts->AddFontFromFileTTF(eyeZoomFontPath.c_str(), 80.0f * scaleFactor);
-        g_eyeZoomFontPathCached = eyeZoomFontPath;
-    }
-    if (!g_eyeZoomTextFont) {
-        Log("Render Thread: Failed to load EyeZoom font, using default");
-        g_eyeZoomTextFont = io.Fonts->AddFontDefault();
+    {
+        std::string eyeZoomFontPath = cfg.eyezoom.textFontPath.empty() ? cfg.fontPath : cfg.eyezoom.textFontPath;
+        g_eyeZoomTextFont = RT_AddFontWithArialFallback(io.Fonts, eyeZoomFontPath, 80.0f * scaleFactor, "EyeZoom font", &g_eyeZoomFontPathCached);
+        if (g_eyeZoomFontPathCached.empty()) { g_eyeZoomFontPathCached = ConfigDefaults::CONFIG_FONT_PATH; }
     }
 
     ImGui::StyleColorsDark();
@@ -1748,16 +1784,20 @@ static void RT_RenderEyeZoom(GLuint gameTexture, int requestViewportX, int fullW
 
     float pixelWidthOnScreen = zoomOutputWidth / (float)zoomConfig.cloneWidth;
     int labelsPerSide = zoomConfig.cloneWidth / 2;
+    int overlayLabelsPerSide = zoomConfig.overlayWidth;
+    if (overlayLabelsPerSide < 0) overlayLabelsPerSide = labelsPerSide;
+    if (overlayLabelsPerSide > labelsPerSide) overlayLabelsPerSide = labelsPerSide;
     // Use zoomY_gl (OpenGL coordinates) for centerY since NDC conversion expects Y=0 at bottom
     float centerY = zoomY_gl + zoomOutputHeight / 2.0f;
 
     // Use configured font size for box height
     float boxHeight = zoomConfig.linkRectToFont ? (zoomConfig.textFontSize * 1.2f) : (float)zoomConfig.rectHeight;
 
-    int boxIndex = 0;
-    for (int xOffset = -labelsPerSide; xOffset <= labelsPerSide; xOffset++) {
+    for (int xOffset = -overlayLabelsPerSide; xOffset <= overlayLabelsPerSide; xOffset++) {
         if (xOffset == 0) continue;
 
+        // Map xOffset (relative to center) to the full clone column index [0..cloneWidth-1]
+        int boxIndex = xOffset + labelsPerSide - (xOffset > 0 ? 1 : 0);
         float boxLeft = zoomX + (boxIndex * pixelWidthOnScreen);
         float boxRight = boxLeft + pixelWidthOnScreen;
         float boxBottom = centerY - boxHeight / 2.0f;
@@ -1766,8 +1806,6 @@ static void RT_RenderEyeZoom(GLuint gameTexture, int requestViewportX, int fullW
         Color boxColor = (boxIndex % 2 == 0) ? zoomConfig.gridColor1 : zoomConfig.gridColor2;
         float boxOpacity = (boxIndex % 2 == 0) ? zoomConfig.gridColor1Opacity : zoomConfig.gridColor2Opacity;
         glUniform4f(rt_solidColorShaderLocs.color, boxColor.r, boxColor.g, boxColor.b, boxOpacity);
-
-        boxIndex++;
 
         float boxNdcLeft = (boxLeft / (float)fullW) * 2.0f - 1.0f;
         float boxNdcRight = (boxRight / (float)fullW) * 2.0f - 1.0f;
@@ -2790,17 +2828,14 @@ static void RenderThreadFunc(void* gameGLContext) {
                 }
                 const Config& fontCfgRef = *fontCfg;
                 std::string fontPath = fontCfgRef.fontPath;
-                io.Fonts->AddFontFromFileTTF(fontPath.c_str(), 16.0f * scaleFactor);
+                // Ensure we always end up with a usable base font.
+                (void)RT_AddFontWithArialFallback(io.Fonts, fontPath, 16.0f * scaleFactor, "base font");
 
                 // Load EyeZoom text font (uses custom path if set, otherwise global font)
                 std::string eyeZoomFontPath =
                     fontCfgRef.eyezoom.textFontPath.empty() ? fontCfgRef.fontPath : fontCfgRef.eyezoom.textFontPath;
-                g_eyeZoomTextFont = io.Fonts->AddFontFromFileTTF(eyeZoomFontPath.c_str(), 80.0f * scaleFactor);
-                g_eyeZoomFontPathCached = eyeZoomFontPath;
-                if (!g_eyeZoomTextFont) {
-                    Log("Render Thread: Failed to load EyeZoom font from " + eyeZoomFontPath + ", using default");
-                    g_eyeZoomTextFont = io.Fonts->AddFontDefault();
-                }
+                g_eyeZoomTextFont = RT_AddFontWithArialFallback(io.Fonts, eyeZoomFontPath, 80.0f * scaleFactor, "EyeZoom font", &g_eyeZoomFontPathCached);
+                if (g_eyeZoomFontPathCached.empty()) { g_eyeZoomFontPathCached = ConfigDefaults::CONFIG_FONT_PATH; }
 
                 ImGui::StyleColorsDark();
                 LoadTheme();             // Load theme from theme.toml
@@ -3355,18 +3390,38 @@ static void RenderThreadFunc(void* gameGLContext) {
                         Log("Render Thread: Reloading EyeZoom font from " + newFontPath);
                         ImGuiIO& io = ImGui::GetIO();
 
-                        // Add the new font to the atlas
-                        ImFont* newFont = io.Fonts->AddFontFromFileTTF(newFontPath.c_str(), 80.0f * g_eyeZoomScaleFactor);
-                        if (newFont) {
-                            g_eyeZoomTextFont = newFont;
-                            g_eyeZoomFontPathCached = newFontPath;
+                        // Rebuild the atlas from scratch to avoid unbounded growth and stale pointers.
+                        // If the requested font is unstable, we ignore it and fall back to Arial.
+                        io.Fonts->Clear();
 
-                            // Rebuild font atlas - new ImGui handles texture upload automatically
-                            io.Fonts->Build();
-                            Log("Render Thread: EyeZoom font reloaded successfully");
-                        } else {
-                            Log("Render Thread: Failed to load EyeZoom font from " + newFontPath);
+                        // Base font
+                        (void)RT_AddFontWithArialFallback(io.Fonts, cfg.fontPath, 16.0f * g_eyeZoomScaleFactor, "base font");
+
+                        // EyeZoom font
+                        g_eyeZoomTextFont = RT_AddFontWithArialFallback(io.Fonts, newFontPath, 80.0f * g_eyeZoomScaleFactor, "EyeZoom font",
+                                                                        &g_eyeZoomFontPathCached);
+                        if (g_eyeZoomFontPathCached.empty()) { g_eyeZoomFontPathCached = ConfigDefaults::CONFIG_FONT_PATH; }
+
+                        // Overlay text label font
+                        InitializeOverlayTextFont(cfg.fontPath.empty() ? ConfigDefaults::CONFIG_FONT_PATH : cfg.fontPath, 16.0f, g_eyeZoomScaleFactor);
+
+                        // Rebuild + upload a new font texture (required when modifying fonts at runtime).
+                        if (!io.Fonts->Build()) {
+                            Log("Render Thread: Font atlas build failed after reload; forcing Arial fallback");
+                            io.Fonts->Clear();
+                            (void)RT_AddFontWithArialFallback(io.Fonts, ConfigDefaults::CONFIG_FONT_PATH, 16.0f * g_eyeZoomScaleFactor,
+                                                             "base font (forced Arial)");
+                            g_eyeZoomTextFont = RT_AddFontWithArialFallback(io.Fonts, ConfigDefaults::CONFIG_FONT_PATH,
+                                                                            80.0f * g_eyeZoomScaleFactor, "EyeZoom font (forced Arial)");
+                            InitializeOverlayTextFont(ConfigDefaults::CONFIG_FONT_PATH, 16.0f, g_eyeZoomScaleFactor);
+                            (void)io.Fonts->Build();
                         }
+
+                        // Ensure OpenGL font texture matches the rebuilt atlas.
+                        ImGui_ImplOpenGL3_DestroyFontsTexture();
+                        ImGui_ImplOpenGL3_CreateFontsTexture();
+
+                        Log("Render Thread: Fonts reloaded successfully");
                     }
                 }
 
@@ -3384,6 +3439,10 @@ static void RenderThreadFunc(void* gameGLContext) {
                 // Start ImGui frame
                 ImGui_ImplOpenGL3_NewFrame();
                 ImGui_ImplWin32_NewFrame();
+
+                // Feed queued input from the Win32 message thread into ImGui.
+                // Must happen before ImGui::NewFrame() to affect the current frame.
+                ImGuiInputQueue_DrainToImGui();
                 ImGui::NewFrame();
 
                 // Render texture grid if enabled
@@ -3445,10 +3504,23 @@ static void RenderThreadFunc(void* gameGLContext) {
                         // Calculate per-box width based on the actual output width
                         float pixelWidthOnScreen = zoomOutputWidth / (float)zoomConfig.cloneWidth;
                         int labelsPerSide = zoomConfig.cloneWidth / 2;
+                        int overlayLabelsPerSide = zoomConfig.overlayWidth;
+                        if (overlayLabelsPerSide < 0) overlayLabelsPerSide = labelsPerSide;
+                        if (overlayLabelsPerSide > labelsPerSide) overlayLabelsPerSide = labelsPerSide;
                         float centerY = zoomY + zoomOutputHeight / 2.0f;
 
                         ImDrawList* drawList = request.shouldRenderGui ? ImGui::GetBackgroundDrawList() : ImGui::GetForegroundDrawList();
-                        float fontSize = (float)zoomConfig.textFontSize;
+                        // Auto-scale font size down based on the current box size.
+                        // Even though overlayWidth only changes how many boxes are drawn, users often adjust these settings together;
+                        // scaling by box size ensures the numbers always fit.
+                        float requestedFontSize = (float)zoomConfig.textFontSize;
+                        float boxHeight = zoomConfig.linkRectToFont ? (requestedFontSize * 1.2f) : (float)zoomConfig.rectHeight;
+                        float maxFontByWidth = pixelWidthOnScreen * 0.85f; // leave some horizontal padding
+                        float maxFontByHeight = boxHeight * 0.80f;          // leave some vertical padding
+                        float fontSize = requestedFontSize;
+                        if (maxFontByWidth > 0.0f) fontSize = (std::min)(fontSize, maxFontByWidth);
+                        if (maxFontByHeight > 0.0f) fontSize = (std::min)(fontSize, maxFontByHeight);
+                        if (fontSize < 6.0f) fontSize = 6.0f;
                         // Combine textColorOpacity with the fade opacity
                         float finalTextAlpha = zoomConfig.textColorOpacity * request.eyeZoomFadeOpacity;
                         ImU32 textColor =
@@ -3458,24 +3530,30 @@ static void RenderThreadFunc(void* gameGLContext) {
                         // Get the font to use for rendering (use EyeZoom-specific font if available)
                         ImFont* font = g_eyeZoomTextFont ? g_eyeZoomTextFont : ImGui::GetFont();
 
-                        int boxIndex = 0;
-                        for (int xOffset = -labelsPerSide; xOffset <= labelsPerSide; xOffset++) {
+                        for (int xOffset = -overlayLabelsPerSide; xOffset <= overlayLabelsPerSide; xOffset++) {
                             if (xOffset == 0) continue;
 
+                            int boxIndex = xOffset + labelsPerSide - (xOffset > 0 ? 1 : 0);
                             float boxLeft = zoomX + (boxIndex * pixelWidthOnScreen);
-                            boxIndex++;
 
                             int displayNumber = abs(xOffset);
                             std::string text = std::to_string(displayNumber);
 
-                            // Use font->CalcTextSizeA with the configured fontSize for proper sizing
-                            ImVec2 textSize = font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, text.c_str());
+                            // Shrink further for multi-digit numbers if needed to fit inside a single box.
+                            float finalFontSize = fontSize;
+                            ImVec2 textSize = font->CalcTextSizeA(finalFontSize, FLT_MAX, 0.0f, text.c_str());
+                            float maxTextWidth = pixelWidthOnScreen * 0.90f;
+                            if (maxTextWidth > 0.0f && textSize.x > maxTextWidth && textSize.x > 0.0f) {
+                                float scale = maxTextWidth / textSize.x;
+                                finalFontSize = (std::max)(6.0f, finalFontSize * scale);
+                                textSize = font->CalcTextSizeA(finalFontSize, FLT_MAX, 0.0f, text.c_str());
+                            }
                             float numberCenterX = boxLeft + pixelWidthOnScreen / 2.0f;
                             float numberCenterY = centerY;
                             ImVec2 textPos(numberCenterX - textSize.x / 2.0f, numberCenterY - textSize.y / 2.0f);
 
                             // Use AddText overload with font and fontSize to render at configured size
-                            drawList->AddText(font, fontSize, textPos, textColor, text.c_str());
+                            drawList->AddText(font, finalFontSize, textPos, textColor, text.c_str());
                         }
                     }
                 }
@@ -3491,6 +3569,9 @@ static void RenderThreadFunc(void* gameGLContext) {
 
                 // Render profiler
                 RenderProfilerOverlay(request.showProfiler, request.showPerformanceOverlay);
+
+                // Publish capture flags for the window thread (ESC handling, overlay keyboard forwarding, etc.)
+                ImGuiInputQueue_PublishCaptureState();
 
                 ImGui::Render();
                 ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());

@@ -261,18 +261,18 @@
                         if (mode.separateXYSensitivity) {
                             ImGui::Text("X Sensitivity:");
                             ImGui::SetNextItemWidth(200);
-                            if (ImGui::SliderFloat("##FullscreenSensitivityX", &mode.modeSensitivityX, 0.1f, 3.0f, "%.2fx")) {
+                            if (ImGui::SliderFloat("##FullscreenSensitivityX", &mode.modeSensitivityX, 0.001f, 10.0f, "%.3fx")) {
                                 g_configIsDirty = true;
                             }
                             ImGui::Text("Y Sensitivity:");
                             ImGui::SetNextItemWidth(200);
-                            if (ImGui::SliderFloat("##FullscreenSensitivityY", &mode.modeSensitivityY, 0.1f, 3.0f, "%.2fx")) {
+                            if (ImGui::SliderFloat("##FullscreenSensitivityY", &mode.modeSensitivityY, 0.001f, 10.0f, "%.3fx")) {
                                 g_configIsDirty = true;
                             }
                         } else {
                             ImGui::Text("Sensitivity:");
                             ImGui::SetNextItemWidth(200);
-                            if (ImGui::SliderFloat("##FullscreenSensitivity", &mode.modeSensitivity, 0.1f, 3.0f, "%.2fx")) {
+                            if (ImGui::SliderFloat("##FullscreenSensitivity", &mode.modeSensitivity, 0.001f, 10.0f, "%.3fx")) {
                                 g_configIsDirty = true;
                             }
                             ImGui::SameLine();
@@ -365,6 +365,9 @@
                 if (Spinner("##EyeZoomCloneWidth", &g_config.eyezoom.cloneWidth, 2, 2, maxCloneWidth)) {
                     // Ensure value stays even
                     if (g_config.eyezoom.cloneWidth % 2 != 0) { g_config.eyezoom.cloneWidth = (g_config.eyezoom.cloneWidth / 2) * 2; }
+                    // Clamp overlay width to the new clone width
+                    int maxOverlay = g_config.eyezoom.cloneWidth / 2;
+                    if (g_config.eyezoom.overlayWidth > maxOverlay) g_config.eyezoom.overlayWidth = maxOverlay;
                     g_configIsDirty = true;
                 }
                 ImGui::NextColumn();
@@ -373,6 +376,16 @@
                 // Max value is the mode's game height
                 int maxCloneHeight = mode.height;
                 if (Spinner("##EyeZoomCloneHeight", &g_config.eyezoom.cloneHeight, 10, 1, maxCloneHeight)) g_configIsDirty = true;
+                ImGui::NextColumn();
+                ImGui::Text("Overlay Width (per side)");
+                ImGui::NextColumn();
+                {
+                    int maxOverlay = g_config.eyezoom.cloneWidth / 2;
+                    if (Spinner("##EyeZoomOverlayWidth", &g_config.eyezoom.overlayWidth, 1, 0, maxOverlay)) g_configIsDirty = true;
+                }
+                ImGui::SameLine();
+                HelpMarker("How many colored overlay boxes + numbers to draw on EACH side of the center line.\n"
+                           "cloneWidth controls how wide the clone samples; overlayWidth only controls how much of the numbered overlay is drawn.");
                 ImGui::Columns(1);
 
                 ImGui::Separator();
@@ -836,18 +849,18 @@
                         if (mode.separateXYSensitivity) {
                             ImGui::Text("X Sensitivity:");
                             ImGui::SetNextItemWidth(200);
-                            if (ImGui::SliderFloat("##EyeZoomSensitivityX", &mode.modeSensitivityX, 0.1f, 3.0f, "%.2fx")) {
+                            if (ImGui::SliderFloat("##EyeZoomSensitivityX", &mode.modeSensitivityX, 0.001f, 10.0f, "%.3fx")) {
                                 g_configIsDirty = true;
                             }
                             ImGui::Text("Y Sensitivity:");
                             ImGui::SetNextItemWidth(200);
-                            if (ImGui::SliderFloat("##EyeZoomSensitivityY", &mode.modeSensitivityY, 0.1f, 3.0f, "%.2fx")) {
+                            if (ImGui::SliderFloat("##EyeZoomSensitivityY", &mode.modeSensitivityY, 0.001f, 10.0f, "%.3fx")) {
                                 g_configIsDirty = true;
                             }
                         } else {
                             ImGui::Text("Sensitivity:");
                             ImGui::SetNextItemWidth(200);
-                            if (ImGui::SliderFloat("##EyeZoomSensitivity", &mode.modeSensitivity, 0.1f, 3.0f, "%.2fx")) {
+                            if (ImGui::SliderFloat("##EyeZoomSensitivity", &mode.modeSensitivity, 0.001f, 10.0f, "%.3fx")) {
                                 g_configIsDirty = true;
                             }
                             ImGui::SameLine();
@@ -1178,18 +1191,18 @@
                         if (mode.separateXYSensitivity) {
                             ImGui::Text("X Sensitivity:");
                             ImGui::SetNextItemWidth(200);
-                            if (ImGui::SliderFloat("##ThinSensitivityX", &mode.modeSensitivityX, 0.1f, 3.0f, "%.2fx")) {
+                            if (ImGui::SliderFloat("##ThinSensitivityX", &mode.modeSensitivityX, 0.001f, 10.0f, "%.3fx")) {
                                 g_configIsDirty = true;
                             }
                             ImGui::Text("Y Sensitivity:");
                             ImGui::SetNextItemWidth(200);
-                            if (ImGui::SliderFloat("##ThinSensitivityY", &mode.modeSensitivityY, 0.1f, 3.0f, "%.2fx")) {
+                            if (ImGui::SliderFloat("##ThinSensitivityY", &mode.modeSensitivityY, 0.001f, 10.0f, "%.3fx")) {
                                 g_configIsDirty = true;
                             }
                         } else {
                             ImGui::Text("Sensitivity:");
                             ImGui::SetNextItemWidth(200);
-                            if (ImGui::SliderFloat("##ThinSensitivity", &mode.modeSensitivity, 0.1f, 3.0f, "%.2fx")) {
+                            if (ImGui::SliderFloat("##ThinSensitivity", &mode.modeSensitivity, 0.001f, 10.0f, "%.3fx")) {
                                 g_configIsDirty = true;
                             }
                             ImGui::SameLine();
@@ -1519,18 +1532,18 @@
                         if (mode.separateXYSensitivity) {
                             ImGui::Text("X Sensitivity:");
                             ImGui::SetNextItemWidth(200);
-                            if (ImGui::SliderFloat("##WideSensitivityX", &mode.modeSensitivityX, 0.1f, 3.0f, "%.2fx")) {
+                            if (ImGui::SliderFloat("##WideSensitivityX", &mode.modeSensitivityX, 0.001f, 10.0f, "%.3fx")) {
                                 g_configIsDirty = true;
                             }
                             ImGui::Text("Y Sensitivity:");
                             ImGui::SetNextItemWidth(200);
-                            if (ImGui::SliderFloat("##WideSensitivityY", &mode.modeSensitivityY, 0.1f, 3.0f, "%.2fx")) {
+                            if (ImGui::SliderFloat("##WideSensitivityY", &mode.modeSensitivityY, 0.001f, 10.0f, "%.3fx")) {
                                 g_configIsDirty = true;
                             }
                         } else {
                             ImGui::Text("Sensitivity:");
                             ImGui::SetNextItemWidth(200);
-                            if (ImGui::SliderFloat("##WideSensitivity", &mode.modeSensitivity, 0.1f, 3.0f, "%.2fx")) {
+                            if (ImGui::SliderFloat("##WideSensitivity", &mode.modeSensitivity, 0.001f, 10.0f, "%.3fx")) {
                                 g_configIsDirty = true;
                             }
                             ImGui::SameLine();
@@ -2149,18 +2162,18 @@
                         if (mode.separateXYSensitivity) {
                             ImGui::Text("X Sensitivity:");
                             ImGui::SetNextItemWidth(200);
-                            if (ImGui::SliderFloat("##ModeSensitivityX", &mode.modeSensitivityX, 0.1f, 3.0f, "%.2fx")) {
+                            if (ImGui::SliderFloat("##ModeSensitivityX", &mode.modeSensitivityX, 0.001f, 10.0f, "%.3fx")) {
                                 g_configIsDirty = true;
                             }
                             ImGui::Text("Y Sensitivity:");
                             ImGui::SetNextItemWidth(200);
-                            if (ImGui::SliderFloat("##ModeSensitivityY", &mode.modeSensitivityY, 0.1f, 3.0f, "%.2fx")) {
+                            if (ImGui::SliderFloat("##ModeSensitivityY", &mode.modeSensitivityY, 0.001f, 10.0f, "%.3fx")) {
                                 g_configIsDirty = true;
                             }
                         } else {
                             ImGui::Text("Sensitivity:");
                             ImGui::SetNextItemWidth(200);
-                            if (ImGui::SliderFloat("##ModeSensitivity", &mode.modeSensitivity, 0.1f, 3.0f, "%.2fx")) {
+                            if (ImGui::SliderFloat("##ModeSensitivity", &mode.modeSensitivity, 0.001f, 10.0f, "%.3fx")) {
                                 g_configIsDirty = true;
                             }
                             ImGui::SameLine();
@@ -2231,6 +2244,33 @@
         if (ImGui::Button("Confirm Reset", ImVec2(120, 0))) {
             g_config.modes = GetDefaultModes();
             g_config.eyezoom = GetDefaultEyeZoomConfig();
+
+            // After resetting, apply dynamic sizing so percentage/expression defaults behave correctly.
+            // (Example: Wide mode uses height = 0.25, which must be converted to pixels.)
+            int screenW = GetCachedScreenWidth();
+            int screenH = GetCachedScreenHeight();
+            if (screenW < 1) screenW = 1;
+            if (screenH < 1) screenH = 1;
+
+            for (auto& mode : g_config.modes) {
+                bool widthIsRelative = mode.widthExpr.empty() && mode.relativeWidth >= 0.0f && mode.relativeWidth <= 1.0f;
+                bool heightIsRelative = mode.heightExpr.empty() && mode.relativeHeight >= 0.0f && mode.relativeHeight <= 1.0f;
+
+                if (widthIsRelative) {
+                    int w = static_cast<int>(mode.relativeWidth * screenW);
+                    if (w < 1) w = 1;
+                    mode.width = w;
+                }
+                if (heightIsRelative) {
+                    int h = static_cast<int>(mode.relativeHeight * screenH);
+                    if (h < 1) h = 1;
+                    mode.height = h;
+                }
+            }
+
+            // Evaluate expression-based dimensions (uses cached screen size).
+            RecalculateExpressionDimensions();
+
             g_configIsDirty = true;
             ImGui::CloseCurrentPopup();
         }
