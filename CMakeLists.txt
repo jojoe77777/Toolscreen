@@ -1,5 +1,16 @@
 cmake_minimum_required(VERSION 3.15)
 
+# Set policies to avoid warnings
+if(POLICY CMP0135)
+    cmake_policy(SET CMP0135 NEW)  # Use extraction timestamp for URL downloads
+endif()
+if(POLICY CMP0169)
+    cmake_policy(SET CMP0169 OLD)  # Allow FetchContent_Populate for custom builds
+endif()
+if(POLICY CMP0177)
+    cmake_policy(SET CMP0177 NEW)  # Normalize install paths
+endif()
+
 # Read version from version.h
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/src/version.h" VERSION_FILE)
 string(REGEX REPLACE ".*TOOLSCREEN_VERSION_MAJOR[ \t]+([0-9]+).*" "\\1" TOOLSCREEN_VERSION_MAJOR "${VERSION_FILE}")
@@ -13,11 +24,72 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-find_package(minhook CONFIG REQUIRED)
-find_package(GLEW REQUIRED)
-find_package(imgui CONFIG REQUIRED)
-find_package(tomlplusplus CONFIG REQUIRED)
-find_package(nlohmann_json CONFIG REQUIRED)
+include(FetchContent)
+
+FetchContent_Declare(
+    minhook
+    GIT_REPOSITORY https://github.com/TsudaKageyu/minhook.git
+    GIT_TAG master
+)
+FetchContent_Declare(
+    glew
+    URL https://github.com/nigels-com/glew/releases/download/glew-2.2.0/glew-2.2.0.zip
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+FetchContent_Declare(
+    imgui
+    GIT_REPOSITORY https://github.com/ocornut/imgui.git
+    GIT_TAG v1.91.9
+)
+FetchContent_Declare(
+    tomlplusplus
+    GIT_REPOSITORY https://github.com/marzer/tomlplusplus.git
+    GIT_TAG v3.4.0
+)
+FetchContent_Declare(
+    nlohmann_json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG v3.11.3
+)
+
+FetchContent_MakeAvailable(minhook tomlplusplus nlohmann_json)
+FetchContent_GetProperties(glew)
+if(NOT glew_POPULATED)
+    FetchContent_Populate(glew)
+    add_library(glew_static STATIC
+        ${glew_SOURCE_DIR}/src/glew.c
+    )
+    target_include_directories(glew_static PUBLIC ${glew_SOURCE_DIR}/include)
+    target_compile_definitions(glew_static PUBLIC GLEW_STATIC)
+    set_target_properties(glew_static PROPERTIES
+        MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+    )
+    add_library(GLEW::GLEW ALIAS glew_static)
+endif()
+FetchContent_GetProperties(imgui)
+if(NOT imgui_POPULATED)
+    FetchContent_Populate(imgui)
+    add_library(imgui STATIC
+        ${imgui_SOURCE_DIR}/imgui.cpp
+        ${imgui_SOURCE_DIR}/imgui_draw.cpp
+        ${imgui_SOURCE_DIR}/imgui_tables.cpp
+        ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+        ${imgui_SOURCE_DIR}/imgui_demo.cpp
+        ${imgui_SOURCE_DIR}/misc/cpp/imgui_stdlib.cpp
+        ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
+        ${imgui_SOURCE_DIR}/backends/imgui_impl_win32.cpp
+    )
+    target_include_directories(imgui PUBLIC 
+        ${imgui_SOURCE_DIR}
+        ${imgui_SOURCE_DIR}/backends
+        ${imgui_SOURCE_DIR}/misc/cpp
+    )
+    target_compile_definitions(imgui PUBLIC IMGUI_IMPL_OPENGL_LOADER_GLEW)
+    set_target_properties(imgui PROPERTIES
+        MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+    )
+endif()
+
 find_package(OpenGL REQUIRED)
 
 # Note: GLOB is convenient but CMake won't auto-detect new files.
@@ -43,9 +115,9 @@ target_include_directories(${PROJECT_NAME} PRIVATE src)
 
 # Link libraries
 target_link_libraries(${PROJECT_NAME} PRIVATE
-    minhook::minhook
+    minhook
     GLEW::GLEW
-    imgui::imgui
+    imgui
     tomlplusplus::tomlplusplus
     nlohmann_json::nlohmann_json
     OpenGL::GL
@@ -119,7 +191,7 @@ if(SEVENZIP_EXECUTABLE)
     )
 
     add_custom_target(jar ALL DEPENDS "${JAR_OUTPUT}")
-    install(FILES "${JAR_OUTPUT}" DESTINATION "${CMAKE_SOURCE_DIR}/..")
+    install(FILES "${JAR_OUTPUT}" DESTINATION "${CMAKE_CURRENT_SOURCE_DIR}/..")
     
     message(STATUS "JAR packaging enabled: ${JAR_NAME}")
 else()
