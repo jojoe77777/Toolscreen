@@ -1,6 +1,6 @@
 #include "version.h"
-#include "json.hpp"
 #include "utils.h"
+#include <nlohmann/json.hpp>
 #include <filesystem>
 #include <fstream>
 #include <iostream>

@@ -7,7 +7,7 @@
 // Uses tomlplusplus library for TOML parsing and generation.
 // ============================================================================
 
-#include "toml.hpp"
+#include <toml++/toml.h>
 #include <string>
 
 // Need full Color definition for ColorFromTomlArray return type and default parameter

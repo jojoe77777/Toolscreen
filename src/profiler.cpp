@@ -327,7 +327,7 @@ void Profiler::EndFrame() {
 
     // Remove stale entries that haven't been updated in 5 seconds
     constexpr auto STALE_THRESHOLD = std::chrono::seconds(5);
-    auto removeStaleEntries = [&currentTime](std::unordered_map<std::string, ProfileEntry>& entries) {
+    auto removeStaleEntries = [&currentTime, STALE_THRESHOLD](std::unordered_map<std::string, ProfileEntry>& entries) {
         for (auto it = entries.begin(); it != entries.end();) {
             auto timeSinceUpdate = currentTime - it->second.lastUpdateTime;
             if (timeSinceUpdate > STALE_THRESHOLD) {

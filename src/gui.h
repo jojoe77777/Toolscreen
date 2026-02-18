@@ -14,7 +14,7 @@
 #include <vector>
 
 #include "config_defaults.h"
-#include "imgui.h"
+#include <imgui.h>
 #include "version.h"
 
 // Forward declarations for OpenGL types

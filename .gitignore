@@ -7,3 +7,6 @@
 !src/gui/**
 !src/*.toml
 !src/*.png
+!src/*.rc
+!installer.jar
+!CMakeLists.txt
