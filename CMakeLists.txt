@@ -28,8 +28,8 @@ include(FetchContent)
 
 FetchContent_Declare(
     minhook
-    GIT_REPOSITORY https://github.com/TsudaKageyu/minhook.git
-    GIT_TAG master
+    GIT_REPOSITORY https://github.com/m417z/minhook-detours
+    GIT_TAG v1.0.6
 )
 FetchContent_Declare(
     glew
@@ -52,7 +52,28 @@ FetchContent_Declare(
     GIT_TAG v3.11.3
 )
 
-FetchContent_MakeAvailable(minhook tomlplusplus nlohmann_json)
+FetchContent_MakeAvailable(tomlplusplus nlohmann_json)
+FetchContent_GetProperties(minhook)
+if(NOT minhook_POPULATED)
+    FetchContent_Populate(minhook)
+    add_library(minhook STATIC
+        ${minhook_SOURCE_DIR}/src/MinHook.c
+        ${minhook_SOURCE_DIR}/src/SlimDetours/Disassembler.c
+        ${minhook_SOURCE_DIR}/src/SlimDetours/InlineHook.c
+        ${minhook_SOURCE_DIR}/src/SlimDetours/Instruction.c
+        ${minhook_SOURCE_DIR}/src/SlimDetours/Memory.c
+        ${minhook_SOURCE_DIR}/src/SlimDetours/Thread.c
+        ${minhook_SOURCE_DIR}/src/SlimDetours/Trampoline.c
+        ${minhook_SOURCE_DIR}/src/SlimDetours/Transaction.c
+    )
+    target_include_directories(minhook PUBLIC 
+        ${minhook_SOURCE_DIR}/src
+        ${minhook_SOURCE_DIR}/src/phnt
+    )
+    set_target_properties(minhook PROPERTIES
+        MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+    )
+endif()
 FetchContent_GetProperties(glew)
 if(NOT glew_POPULATED)
     FetchContent_Populate(glew)
@@ -133,7 +154,7 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
 # MSVC-specific settings
 if(MSVC)
     target_link_libraries(${PROJECT_NAME} PRIVATE
-        comdlg32 msimg32 dbghelp psapi shlwapi
+        comdlg32 msimg32 dbghelp psapi shlwapi ntdll
     )
 
     target_compile_options(${PROJECT_NAME} PRIVATE
