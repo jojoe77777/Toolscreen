@@ -57,6 +57,9 @@ Press <kbd>Ctrl</kbd> + <kbd>I</kbd> in fullscreen to open settings.
 
 Hover over the `(?)` icons for tooltips explaining each setting.
 
+## Boat Eye
+If you want to setup a boat eye sensitivity changing using Toolscreen, you can follow [the guide](https://gist.github.com/greenfrogee/88eca4b40db92e3330cff15463afeb64)
+
 ## Uninstalling
 
 Double-click the Toolscreen installer (`.jar` or `.exe`) and select **Uninstall**.
