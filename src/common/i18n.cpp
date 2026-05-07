@@ -32,6 +32,7 @@ const LPWSTR GetTranslationResourceName(const std::string& lang) {
     static const std::unordered_map<std::string, LPWSTR> langToResName = {
         {kPrimaryLocale, MAKEINTRESOURCEW(IDR_LANG_EN)},
         {"zh_CN", MAKEINTRESOURCEW(IDR_LANG_ZH_CN)},
+        {"zh_TW", MAKEINTRESOURCEW(IDR_LANG_ZH_TW)},
         {"pt_BR", MAKEINTRESOURCEW(IDR_LANG_PT_BR)},
     };
 

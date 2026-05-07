@@ -30,4 +30,5 @@
 #define IDR_NINJABRAIN_PRESET_NINJABRAINBOT 125
 #define IDR_MONOCRAFT_FONT     126
 #define IDR_LANG_PT_BR         127
+#define IDR_LANG_ZH_TW         128
  

@@ -16,6 +16,7 @@
 !lang/langs.json
 !lang/en.json
 !lang/zh_CN.json
+!lang/zh_TW.json
 !lang/pt_BR.json
 !tests/
 !tests/**

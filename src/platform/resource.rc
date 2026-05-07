@@ -92,6 +92,7 @@ IDR_MINECRAFT_FONT     RCDATA                  "../assets/fonts/Minecraft.ttf"
 IDR_OPENSANS_FONT      RCDATA                  "../assets/fonts/OpenSans-Regular.ttf"
 IDR_MONOCRAFT_FONT     RCDATA                  "../assets/fonts/Monocraft.ttf"
 IDR_LANG_PT_BR         RCDATA                  "../../lang/pt_BR.json"
+IDR_LANG_ZH_TW         RCDATA                  "../../lang/zh_TW.json"
 #endif    // English (United States) resources
 /////////////////////////////////////////////////////////////////////////////
 
