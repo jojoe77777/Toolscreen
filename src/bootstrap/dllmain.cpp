@@ -2220,7 +2220,6 @@ static void UpdateGuiCursorRestoreState(bool cursorVisibleAfterClose) {
     if (!g_showGui.load(std::memory_order_acquire)) { return; }
 
     g_wasCursorVisible.store(cursorVisibleAfterClose, std::memory_order_release);
-    g_forceVisibleCursorWhileGuiOpen.store(!cursorVisibleAfterClose, std::memory_order_release);
 }
 
 static void ApplyGlfwCursorMode_Impl(GLFWSETINPUTMODE next, void* window, int value) {
