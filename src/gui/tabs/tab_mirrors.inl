@@ -1250,8 +1250,8 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.mirrors"))) {
                 ImGui::TableSetupColumn(trc("label.name"), ImGuiTableColumnFlags_WidthStretch, 1.4f);
                 ImGui::TableSetupColumn(trc("label.width"), ImGuiTableColumnFlags_WidthFixed, 95.0f);
                 ImGui::TableSetupColumn(trc("label.height"), ImGuiTableColumnFlags_WidthFixed, 95.0f);
-                ImGui::TableSetupColumn(trc("label.x_offset"), ImGuiTableColumnFlags_WidthFixed, 90.0f);
-                ImGui::TableSetupColumn(trc("label.y_offset"), ImGuiTableColumnFlags_WidthFixed, 90.0f);
+                ImGui::TableSetupColumn(trc("label.x_offset"), ImGuiTableColumnFlags_WidthFixed, 125.0f);
+                ImGui::TableSetupColumn(trc("label.y_offset"), ImGuiTableColumnFlags_WidthFixed, 125.0f);
                 ImGui::TableSetupColumn("##remove", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFrameHeight() + 6.0f);
                 ImGui::TableHeadersRow();
 
