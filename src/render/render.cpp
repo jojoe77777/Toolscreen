@@ -9618,6 +9618,7 @@ void RenderNinjabrainOverlay(const NinjabrainOverlayConfig& nb, ImFont* font, co
 
             drawOverlayBackground(ox, oy, totalW, totalH, panelBgCol);
             drawOverlayBorder(ox, oy, totalW, totalH, borderCol);
+            drawBoatHeaderStateIcon(ox + totalW, oy, boatStateSize, 0.0f);
 
             const float contentLeft = ox + contentPadX + sidePadX;
             const float contentTop = oy + contentPadTop;
@@ -9784,6 +9785,7 @@ void RenderNinjabrainOverlay(const NinjabrainOverlayConfig& nb, ImFont* font, co
         }
         drawOverlayBackgroundGaps(ox, oy, totalW, totalH, panelBgCol, std::move(backgroundCoveredBands));
         drawOverlayBorder(ox, oy, totalW, totalH, borderCol);
+        drawBoatHeaderStateIcon(ox + totalW, oy, boatStateSize, 0.0f);
 
         const float surfaceLeft = ox;
         const float surfaceRight = ox + totalW;
