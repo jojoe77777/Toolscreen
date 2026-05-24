@@ -444,23 +444,23 @@ if (BeginSelectableSettingsNestedTabItem(trc("ninjabrain.title"))) {
             ImGui::Columns(1);
 
             if (ImGui::CollapsingHeader(trc("ninjabrain.colors"), kNinjabrainSectionFlags)) {
-                if (ImGui::ColorEdit3((std::string(trc("ninjabrain.bg_color")) + "##nb").c_str(), &nb.bgColor.r)) changed = true;
-                if (ImGui::ColorEdit3((std::string(trc("ninjabrain.header_fill")) + "##nb").c_str(), &nb.headerFillColor.r)) changed = true;
-                if (ImGui::ColorEdit3((std::string(trc("ninjabrain.throws_background")) + "##nb").c_str(), &nb.throwsBackgroundColor.r)) changed = true;
-                if (ImGui::ColorEdit3((std::string(trc("ninjabrain.border_color")) + "##nb").c_str(), &nb.borderColor.r)) changed = true;
-                if (ImGui::ColorEdit3((std::string(trc("ninjabrain.divider_color")) + "##nb").c_str(), &nb.dividerColor.r)) changed = true;
-                if (ImGui::ColorEdit3((std::string(trc("ninjabrain.header_divider_color")) + "##nb").c_str(), &nb.headerDividerColor.r)) changed = true;
-                if (ImGui::ColorEdit3((std::string(trc("ninjabrain.color_headers")) + "##nb").c_str(), &nb.textColor.r)) changed = true;
-                if (ImGui::ColorEdit3((std::string(trc("ninjabrain.color_data")) + "##nb").c_str(), &nb.dataColor.r)) changed = true;
-                if (ImGui::ColorEdit3((std::string(trc("ninjabrain.throws_text_color")) + "##nb").c_str(), &nb.throwsTextColor.r)) changed = true;
-                if (ImGui::ColorEdit3((std::string(trc("ninjabrain.divine_text_color")) + "##nb").c_str(), &nb.divineTextColor.r)) changed = true;
-                if (ImGui::ColorEdit3((std::string(trc("ninjabrain.coord_positive_color")) + "##nb").c_str(), &nb.coordPositiveColor.r)) changed = true;
-                if (ImGui::ColorEdit3((std::string(trc("ninjabrain.coord_negative_color")) + "##nb").c_str(), &nb.coordNegativeColor.r)) changed = true;
-                if (ImGui::ColorEdit3((std::string(trc("ninjabrain.subpixel_positive_color")) + "##nb").c_str(), &nb.subpixelPositiveColor.r)) changed = true;
-                if (ImGui::ColorEdit3((std::string(trc("ninjabrain.subpixel_negative_color")) + "##nb").c_str(), &nb.subpixelNegativeColor.r)) changed = true;
-                if (ImGui::ColorEdit3((std::string(trc("ninjabrain.certainty_color")) + "##nb").c_str(), &nb.certaintyColor.r)) changed = true;
-                if (ImGui::ColorEdit3((std::string(trc("ninjabrain.certainty_mid_color")) + "##nb").c_str(), &nb.certaintyMidColor.r)) changed = true;
-                if (ImGui::ColorEdit3((std::string(trc("ninjabrain.certainty_low_color")) + "##nb").c_str(), &nb.certaintyLowColor.r)) changed = true;
+                if (ImGui::ColorEdit4((std::string(trc("ninjabrain.bg_color")) + "##nb").c_str(), &nb.bgColor.r, ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf)) changed = true;
+                if (ImGui::ColorEdit4((std::string(trc("ninjabrain.header_fill")) + "##nb").c_str(), &nb.headerFillColor.r, ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf)) changed = true;
+                if (ImGui::ColorEdit4((std::string(trc("ninjabrain.throws_background")) + "##nb").c_str(), &nb.throwsBackgroundColor.r, ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf)) changed = true;
+                if (ImGui::ColorEdit4((std::string(trc("ninjabrain.border_color")) + "##nb").c_str(), &nb.borderColor.r, ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf)) changed = true;
+                if (ImGui::ColorEdit4((std::string(trc("ninjabrain.divider_color")) + "##nb").c_str(), &nb.dividerColor.r, ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf)) changed = true;
+                if (ImGui::ColorEdit4((std::string(trc("ninjabrain.header_divider_color")) + "##nb").c_str(), &nb.headerDividerColor.r, ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf)) changed = true;
+                if (ImGui::ColorEdit4((std::string(trc("ninjabrain.color_headers")) + "##nb").c_str(), &nb.textColor.r, ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf)) changed = true;
+                if (ImGui::ColorEdit4((std::string(trc("ninjabrain.color_data")) + "##nb").c_str(), &nb.dataColor.r, ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf)) changed = true;
+                if (ImGui::ColorEdit4((std::string(trc("ninjabrain.throws_text_color")) + "##nb").c_str(), &nb.throwsTextColor.r, ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf)) changed = true;
+                if (ImGui::ColorEdit4((std::string(trc("ninjabrain.divine_text_color")) + "##nb").c_str(), &nb.divineTextColor.r, ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf)) changed = true;
+                if (ImGui::ColorEdit4((std::string(trc("ninjabrain.coord_positive_color")) + "##nb").c_str(), &nb.coordPositiveColor.r, ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf)) changed = true;
+                if (ImGui::ColorEdit4((std::string(trc("ninjabrain.coord_negative_color")) + "##nb").c_str(), &nb.coordNegativeColor.r, ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf)) changed = true;
+                if (ImGui::ColorEdit4((std::string(trc("ninjabrain.subpixel_positive_color")) + "##nb").c_str(), &nb.subpixelPositiveColor.r, ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf)) changed = true;
+                if (ImGui::ColorEdit4((std::string(trc("ninjabrain.subpixel_negative_color")) + "##nb").c_str(), &nb.subpixelNegativeColor.r, ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf)) changed = true;
+                if (ImGui::ColorEdit4((std::string(trc("ninjabrain.certainty_color")) + "##nb").c_str(), &nb.certaintyColor.r, ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf)) changed = true;
+                if (ImGui::ColorEdit4((std::string(trc("ninjabrain.certainty_mid_color")) + "##nb").c_str(), &nb.certaintyMidColor.r, ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf)) changed = true;
+                if (ImGui::ColorEdit4((std::string(trc("ninjabrain.certainty_low_color")) + "##nb").c_str(), &nb.certaintyLowColor.r, ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf)) changed = true;
             }
 
             if (ImGui::CollapsingHeader(trc("ninjabrain.columns"), kNinjabrainSectionFlags)) {
