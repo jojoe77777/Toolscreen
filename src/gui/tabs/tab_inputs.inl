@@ -297,21 +297,22 @@ if (BeginSelectableSettingsTopTabItem(trc("tabs.inputs"))) {
                     ImGui::SameLine();
                     HelpMarker(trc("cursor_trail.tooltip.enabled"));
 
-                    if (ImGui::Checkbox(trc("cursor_trail.only_on_my_screen"), &trail.onlyOnMyScreen)) {
-                        if (trail.onlyOnMyScreen) trail.onlyOnObs = false;
-                        g_configIsDirty = true;
-                    }
-                    ImGui::SameLine();
-                    HelpMarker(trc("cursor_trail.tooltip.only_on_my_screen"));
-
-                    if (ImGui::Checkbox(trc("cursor_trail.only_on_obs"), &trail.onlyOnObs)) {
-                        if (trail.onlyOnObs) trail.onlyOnMyScreen = false;
-                        g_configIsDirty = true;
-                    }
-                    ImGui::SameLine();
-                    HelpMarker(trc("cursor_trail.tooltip.only_on_obs"));
-
                     if (trail.enabled) {
+                        if (ImGui::Checkbox(trc("cursor_trail.only_on_my_screen"), &trail.onlyOnMyScreen)) {
+                            if (trail.onlyOnMyScreen) trail.onlyOnObs = false;
+                            g_configIsDirty = true;
+                        }
+                        ImGui::SameLine();
+                        HelpMarker(trc("cursor_trail.tooltip.only_on_my_screen"));
+
+                        if (ImGui::Checkbox(trc("cursor_trail.only_on_obs"), &trail.onlyOnObs)) {
+                            if (trail.onlyOnObs) trail.onlyOnMyScreen = false;
+                            g_configIsDirty = true;
+                        }
+                        ImGui::SameLine();
+                        HelpMarker(trc("cursor_trail.tooltip.only_on_obs"));
+
+                    
                         const float sliderW = 300.0f;
 
                         ImGui::Text(trc("cursor_trail.lifetime_ms"));
