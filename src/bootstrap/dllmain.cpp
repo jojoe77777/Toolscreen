@@ -1310,6 +1310,9 @@ void APIENTRY hkglBindFramebuffer_Driver(GLenum target, GLuint framebuffer) {
 typedef void (*GLFWSETINPUTMODE)(void* window, int mode, int value);
 GLFWSETINPUTMODE oglfwSetInputMode = NULL;
 GLFWSETINPUTMODE g_oglfwSetInputModeThirdParty = NULL;
+typedef void (*GLFWSETCURSOR)(void* window, void* cursor);
+GLFWSETCURSOR oglfwSetCursor = NULL;
+std::atomic<bool> g_glfwCursorGrabbed{ false };
 std::atomic<void*> g_glfwSetInputModeThirdPartyHookTarget{ nullptr };
 
 typedef UINT(WINAPI* GETRAWINPUTDATAPROC)(HRAWINPUT hRawInput, UINT uiCommand, LPVOID pData, PUINT pcbSize, UINT cbSizeHeader);
@@ -1364,7 +1367,14 @@ BOOL WINAPI hkClipCursor_ThirdParty(const RECT* lpRect) {
 static HCURSOR SetCursorHook_Impl(SETCURSORPROC next, HCURSOR hCursor) {
     if (!next) return NULL;
 
-    if (g_gameVersion >= GameVersion(1, 13, 0)) { return next(hCursor); }
+    if (g_gameVersion >= GameVersion(1, 13, 0)) {
+        if (hCursor != NULL && !g_glfwCursorGrabbed.load(std::memory_order_acquire)) {
+            const std::string localGameState = g_gameStateBuffers[g_currentGameStateIndex.load(std::memory_order_acquire)];
+            const CursorTextures::CursorData* cursorData = CursorTextures::GetSelectedCursor(localGameState, 64);
+            if (cursorData && cursorData->hCursor) { return next(cursorData->hCursor); }
+        }
+        return next(hCursor);
+    }
 
     if (g_showGui.load()) {
         const std::string localGameState = g_gameStateBuffers[g_currentGameStateIndex.load(std::memory_order_acquire)];
@@ -2226,9 +2236,11 @@ static void ApplyGlfwCursorMode_Impl(GLFWSETINPUTMODE next, void* window, int va
     if (!next) return;
 
     if (value == GLFW_CURSOR_DISABLED) {
+        g_glfwCursorGrabbed.store(true, std::memory_order_release);
         g_capturingMousePos.store(CapturingState::DISABLED, std::memory_order_release);
         next(window, GLFW_CURSOR, value);
     } else if (value == GLFW_CURSOR_NORMAL) {
+        g_glfwCursorGrabbed.store(false, std::memory_order_release);
         g_capturingMousePos.store(CapturingState::NORMAL, std::memory_order_release);
         next(window, GLFW_CURSOR, value);
     } else {
@@ -2289,6 +2301,18 @@ void hkglfwSetInputMode(void* window, int mode, int value) { GlfwSetInputModeHoo
 void hkglfwSetInputMode_ThirdParty(void* window, int mode, int value) {
     GLFWSETINPUTMODE next = g_oglfwSetInputModeThirdParty ? g_oglfwSetInputModeThirdParty : oglfwSetInputMode;
     GlfwSetInputModeHook_Impl(next, window, mode, value);
+}
+
+void hkglfwSetCursor(void* window, void* cursor) {
+    if (cursor != nullptr && g_gameVersion >= GameVersion(1, 13, 0) && !g_glfwCursorGrabbed.load(std::memory_order_acquire)) {
+        const std::string localGameState = g_gameStateBuffers[g_currentGameStateIndex.load(std::memory_order_acquire)];
+        const CursorTextures::CursorData* cursorData = CursorTextures::GetSelectedCursor(localGameState, 64);
+        if (cursorData && cursorData->hCursor) {
+            SetCursor(cursorData->hCursor);
+            return;
+        }
+    }
+    if (oglfwSetCursor) { oglfwSetCursor(window, cursor); }
 }
 
 static UINT GetRawInputDataHook_Impl(GETRAWINPUTDATAPROC next, HRAWINPUT hRawInput, UINT uiCommand, LPVOID pData, PUINT pcbSize,
@@ -3510,6 +3534,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         HOOK(hUser32, GetRawInputData);
         if (hGlfw) {
             HOOK(hGlfw, glfwSetInputMode);
+            HOOK(hGlfw, glfwSetCursor);
         } else {
             LogCategory("init", "WARNING: glfw.dll not loaded; skipping glfwSetInputMode hook");
         }
