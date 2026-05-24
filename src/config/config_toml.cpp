@@ -2602,7 +2602,7 @@ void ConfigFromToml(const toml::table& tbl, Config& config) {
         c.alwaysShow           = GetOr(*nb, "alwaysShow",           false);
         c.alwaysShowBoat       = GetOr(*nb, "alwaysShowBoat",       false);
         c.showBoatStateInTopBar = GetOr(*nb, "showBoatStateInTopBar", false);
-        c.boatStateSize        = GetOr(*nb, "boatStateSize",        20.0f);
+        c.boatStateSize        = GetOr(*nb, "boatStateSize",        64.0f);
         c.boatStateMarginRight = GetOr(*nb, "boatStateMarginRight", 8.0f);
         c.angleDisplay         = GetOr(*nb, "angleDisplay",         1);
         c.fontAntialiasing     = GetOr(*nb, "fontAntialiasing",     true);
