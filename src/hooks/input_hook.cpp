@@ -1880,6 +1880,12 @@ InputHandlerResult HandleActivate(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lP
         ApplyConfineCursorToGameWindow();
         UpdateLowLevelKeyboardHookInstalledState();
 
+        if (IsCursorVisible() && g_gameVersion >= GameVersion(1, 13, 0)) {
+            EnsureSystemCursorVisible();
+            static HCURSOR s_arrowCursor = LoadCursorW(NULL, IDC_ARROW);
+            SetCursor(s_arrowCursor);
+        }
+
         int clientW = 0;
         int clientH = 0;
         if (TryGetClientSize(hWnd, clientW, clientH)) {
