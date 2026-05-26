@@ -30,6 +30,7 @@
 #include <windowsx.h>
 
 extern std::atomic<bool> g_showGui;
+extern std::atomic<bool> g_glfwCursorGrabbed;
 extern std::atomic<bool> g_guiNeedsRecenter;
 extern std::atomic<bool> g_wasCursorVisible;
 extern std::atomic<bool> g_isShuttingDown;
@@ -1179,10 +1180,14 @@ InputHandlerResult HandleSetCursor(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
         return { true, true };
     }
 
-    if (!IsCursorVisible() && !g_showGui.load()) {
+    const bool isModern = g_gameVersion >= GameVersion(1, 13, 0);
+    const bool cursorShouldHide = isModern ? g_glfwCursorGrabbed.load(std::memory_order_acquire) : !IsCursorVisible();
+    if (cursorShouldHide && !g_showGui.load()) {
         SetCursor(NULL);
         return { true, true };
     }
+
+    if (isModern) { EnsureSystemCursorVisible(); }
 
     const CursorTextures::CursorData* cursorData = CursorTextures::GetSelectedCursor(gameState, 64);
     if (cursorData && cursorData->hCursor) {
@@ -1879,12 +1884,6 @@ InputHandlerResult HandleActivate(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lP
         ApplyKeyRepeatSettings();
         ApplyConfineCursorToGameWindow();
         UpdateLowLevelKeyboardHookInstalledState();
-
-        if (IsCursorVisible() && g_gameVersion >= GameVersion(1, 13, 0)) {
-            EnsureSystemCursorVisible();
-            static HCURSOR s_arrowCursor = LoadCursorW(NULL, IDC_ARROW);
-            SetCursor(s_arrowCursor);
-        }
 
         int clientW = 0;
         int clientH = 0;
