@@ -273,6 +273,7 @@ std::atomic<int> g_currentGameStateIndex{ 0 };
 const ModeConfig* g_currentMode = nullptr;
 
 std::atomic<bool> g_gameWindowActive{ false };
+std::atomic<bool> g_pendingInitialInputStateApply{ false };
 
 std::thread g_monitorThread;
 std::thread g_imageMonitorThread;
@@ -317,6 +318,7 @@ void RenderSettingsGUI();
 void AttemptAggressiveGlViewportHook();
 void ApplyWindowsMouseSpeed();
 void ApplyKeyRepeatSettings();
+bool ApplyConfineCursorToGameWindow();
 
 void InvalidateTrackedGameTextureId(bool clearSwapThread, bool clearCachedTexture) {
     if (clearCachedTexture) {
@@ -487,6 +489,9 @@ bool SubclassGameWindow(HWND hwnd) {
             ApplyWindowsMouseSpeed();
             ApplyKeyRepeatSettings();
             ApplyConfineCursorToGameWindow();
+            g_pendingInitialInputStateApply.store(false, std::memory_order_release);
+        } else {
+            g_pendingInitialInputStateApply.store(true, std::memory_order_release);
         }
         Log("Successfully subclassed window: " + std::to_string(reinterpret_cast<uintptr_t>(hwnd)));
         return true;
@@ -3003,6 +3008,17 @@ static BOOL SwapBuffersHook_Impl(WGLSWAPBUFFERS next, HDC hDc) {
         if (shouldCheckSubclass && hwnd != NULL) {
             PROFILE_SCOPE_CAT("Window Subclassing", "SwapBuffers");
             SubclassGameWindow(hwnd);
+        }
+
+        if (g_pendingInitialInputStateApply.load(std::memory_order_acquire) && hwnd != NULL && IsWindowInForegroundTree(hwnd)) {
+            extern std::atomic<bool> g_isGameFocused;
+            g_gameWindowActive.store(true, std::memory_order_release);
+            g_isGameFocused.store(true, std::memory_order_release);
+            ApplyWindowsMouseSpeed();
+            ApplyKeyRepeatSettings();
+            ApplyConfineCursorToGameWindow();
+            g_pendingInitialInputStateApply.store(false, std::memory_order_release);
+            Log("Applied deferred initial input state (window became focused)");
         }
 
         {
