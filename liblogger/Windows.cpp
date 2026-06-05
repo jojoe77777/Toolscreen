@@ -39,7 +39,7 @@ std::mutex g_seenHashesMutex;
 std::unordered_set<std::string> g_seenHashes;
 
 #ifndef LIBLOGGER_VERSION_STR
-#define LIBLOGGER_VERSION_STR "1.0.1"
+#define LIBLOGGER_VERSION_STR "1.0.2"
 #endif
 
 // Version number
@@ -298,12 +298,14 @@ std::wstring CalculateSHA512(LPCWSTR filePath) {
         return L"[Hash Failed: Finish Hash]";
     }
 
-    std::wstringstream ss;
-    ss << std::hex << std::setfill(L'0');
+    static constexpr wchar_t kHexDigits[] = L"0123456789abcdef";
+    std::wstring result;
+    result.reserve(hashBuffer.size() * 2);
     for (BYTE byte : hashBuffer) {
-        ss << std::setw(2) << static_cast<unsigned int>(byte);
+        result.push_back(kHexDigits[byte >> 4]);
+        result.push_back(kHexDigits[byte & 0x0F]);
     }
-    return ss.str();
+    return result;
 }
 
 std::wstring GetSignerName(LPCWSTR filePath) {

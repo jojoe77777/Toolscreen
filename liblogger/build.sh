@@ -14,7 +14,7 @@ detect_liblogger_version() {
   local patch
 
   if [[ ! -f "${version_file}" ]]; then
-    echo "1.0.1"
+    echo "1.0.2"
     return 0
   fi
 
@@ -25,7 +25,7 @@ detect_liblogger_version() {
   if [[ -n "${major}" && -n "${minor}" && -n "${patch}" ]]; then
     echo "${major}.${minor}.${patch}"
   else
-    echo "1.0.1"
+    echo "1.0.2"
   fi
 }
 

@@ -50,7 +50,7 @@ using PtrJNI_GetCreatedJavaVMs = jint(JNICALL*)(JavaVM**, jsize, jsize*);
 
 static constexpr std::string_view kFairplayClassSignature = "Lexersolver/mcsrfairplay/natives/NativeCallback;";
 #ifndef LIBLOGGER_VERSION_STR
-#define LIBLOGGER_VERSION_STR "1.0.1"
+#define LIBLOGGER_VERSION_STR "1.0.2"
 #endif
 static constexpr std::string_view kLibLoggerVersion = LIBLOGGER_VERSION_STR;
 
@@ -362,13 +362,16 @@ static std::string CalculateSHA512(const std::string& filePath) {
 	unsigned char hash[SHA512_DIGEST_LENGTH];
 	SHA512_Final(hash, &sha512);
 
-	std::stringstream stream;
-	stream << std::hex << std::setfill('0');
+	static constexpr char kHexDigits[] = "0123456789abcdef";
+	std::string result;
+	result.reserve(SHA512_DIGEST_LENGTH * 2);
 	for (int index = 0; index < SHA512_DIGEST_LENGTH; ++index) {
-		stream << std::setw(2) << static_cast<unsigned int>(hash[index]);
+		const unsigned char byte = hash[index];
+		result.push_back(kHexDigits[byte >> 4]);
+		result.push_back(kHexDigits[byte & 0x0F]);
 	}
 
-	return stream.str();
+	return result;
 }
 
 static std::string GetSignerName() {
