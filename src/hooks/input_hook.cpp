@@ -5111,6 +5111,11 @@ LRESULT CALLBACK SubclassedWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
         return 0;
     }
 
+    if (uMsg == WM_TOOLSCREEN_SWITCH_MODE) {
+        ProcessPendingModeSwitch();
+        return 0;
+    }
+
     result = HandleInjectedMenuMaskKey(hWnd, uMsg, wParam, lParam);
     if (result.consumed) return result.result;
 

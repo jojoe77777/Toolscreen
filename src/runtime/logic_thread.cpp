@@ -6,6 +6,7 @@
 #include "render/render.h"
 #include "common/utils.h"
 #include "version.h"
+#include "hooks/input_hook.h"
 #include <Windows.h>
 #include <unordered_map>
 #include <unordered_set>
@@ -553,6 +554,17 @@ void ProcessPendingModeSwitch() {
     std::lock_guard<std::mutex> pendingLock(g_pendingModeSwitchMutex);
     if (!g_pendingModeSwitch.pending) { return; }
 
+    const HWND hwnd = g_minecraftHwnd.load(std::memory_order_acquire);
+    if (hwnd) {
+        const DWORD windowThreadId = GetWindowThreadProcessId(hwnd, nullptr);
+        const DWORD currentThreadId = GetCurrentThreadId();
+        if (windowThreadId != 0 && windowThreadId != currentThreadId) {
+            LogCategory("gui", "[GUI] Forwarding pending mode switch to window thread: " + g_pendingModeSwitch.modeId);
+            PostMessage(hwnd, WM_TOOLSCREEN_SWITCH_MODE, 0, 0);
+            return;
+        }
+    }
+
     if (g_pendingModeSwitch.isPreview && !g_pendingModeSwitch.previewFromModeId.empty()) {
         Log("[GUI] Processing preview mode switch: " + g_pendingModeSwitch.previewFromModeId + " -> " + g_pendingModeSwitch.modeId);
 
@@ -597,7 +609,21 @@ void CheckGameStateReset() {
 
             std::string targetMode = cfg.defaultMode;
             Log("[LogicThread] Reset all hotkey secondary modes to default due to wall/title/waiting state.");
-            SwitchToMode(targetMode, "game state reset", /*forceCut=*/true);
+            const HWND hwnd = g_minecraftHwnd.load(std::memory_order_acquire);
+            const DWORD windowThreadId = hwnd ? GetWindowThreadProcessId(hwnd, nullptr) : 0;
+            if (hwnd && windowThreadId != 0 && windowThreadId != GetCurrentThreadId()) {
+                std::lock_guard<std::mutex> pendingLock(g_pendingModeSwitchMutex);
+                if (!g_pendingModeSwitch.pending) {
+                    g_pendingModeSwitch.pending = true;
+                    g_pendingModeSwitch.modeId = targetMode;
+                    g_pendingModeSwitch.source = "game state reset";
+                    g_pendingModeSwitch.forceInstant = true;
+                    LogCategory("gui", "[LogicThread] Forwarding game state reset to window thread.");
+                    PostMessage(hwnd, WM_TOOLSCREEN_SWITCH_MODE, 0, 0);
+                }
+            } else {
+                SwitchToMode(targetMode, "game state reset", /*forceCut=*/true);
+            }
         }
     }
 
