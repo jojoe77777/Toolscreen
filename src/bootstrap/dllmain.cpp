@@ -1714,16 +1714,12 @@ static inline void ViewportHook_Impl(GLVIEWPORTPROC next, GLint x, GLint y, GLsi
     }
 
     GLint drawFBO = 0;
-    GLint currentTextureBinding = 0;
-
     glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &drawFBO);
-    glGetIntegerv(GL_TEXTURE_BINDING_2D, &currentTextureBinding);
-    const GLuint currentTexture = static_cast<GLuint>(currentTextureBinding);
 
     const bool isLegacyVersion = g_gameVersion < GameVersion(1, 17, 0);
-    const bool shouldBypassViewportHook = isLegacyVersion ?
-        (drawFBO != 0) :
-        (currentTexture != 0 || drawFBO != 0);
+    
+    const bool shouldBypassViewportHook = isLegacyVersion ? (drawFBO != 0) : false;
+    
     if (shouldBypassViewportHook) {
         return next(x, y, width, height);
     }
