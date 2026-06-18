@@ -5750,25 +5750,63 @@ void CaptureSameThreadVirtualCameraFrame() {
     slot->height = outH;
 }
 
-static GLuint ResolveModeBackgroundTextureId(const std::string& modeId, float outSourceRect[4] = nullptr) {
+struct ResolvedBackgroundTexture {
+    GLuint textureId = 0;
+    float sourceRect[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
+    int width = 0;
+    int height = 0;
+};
+
+static ResolvedBackgroundTexture ResolveModeBackgroundTexture(const std::string& modeId) {
+    ResolvedBackgroundTexture result;
     std::lock_guard<std::mutex> bgLock(g_backgroundTexturesMutex);
     auto bgTexIt = g_backgroundTextures.find(modeId);
-    if (bgTexIt == g_backgroundTextures.end()) {
-        if (outSourceRect) {
-            outSourceRect[0] = 0.0f;
-            outSourceRect[1] = 0.0f;
-            outSourceRect[2] = 1.0f;
-            outSourceRect[3] = 1.0f;
-        }
-        return 0;
-    }
+    if (bgTexIt == g_backgroundTextures.end()) { return result; }
 
     BackgroundTextureInstance& bgInst = bgTexIt->second;
     const auto animatedTexture = ResolveAnimatedTexture(bgInst);
-    if (outSourceRect) {
-        memcpy(outSourceRect, animatedTexture.sourceRect, sizeof(animatedTexture.sourceRect));
+    result.textureId = animatedTexture.textureId;
+    memcpy(result.sourceRect, animatedTexture.sourceRect, sizeof(result.sourceRect));
+    result.width = bgInst.width;
+    result.height = bgInst.height;
+    return result;
+}
+
+static GLuint ResolveModeBackgroundTextureId(const std::string& modeId, float outSourceRect[4] = nullptr, int* outWidth = nullptr,
+                                             int* outHeight = nullptr) {
+    const ResolvedBackgroundTexture resolved = ResolveModeBackgroundTexture(modeId);
+    if (outSourceRect) { memcpy(outSourceRect, resolved.sourceRect, sizeof(resolved.sourceRect)); }
+    if (outWidth) { *outWidth = resolved.width; }
+    if (outHeight) { *outHeight = resolved.height; }
+    return resolved.textureId;
+}
+
+static void ResolveBackgroundImageDestRect(const BackgroundConfig& bg, int imageW, int imageH, int areaW, int areaH, int& outLeft,
+                                           int& outBottom, int& outRight, int& outTop) {
+    outLeft = 0;
+    outBottom = 0;
+    outRight = areaW;
+    outTop = areaH;
+
+    if (imageW <= 0 || imageH <= 0 || areaW <= 0 || areaH <= 0 || bg.imageFit == "stretch") { return; }
+
+    int destW = areaW;
+    int destH = areaH;
+    if (bg.imageFit == "center") {
+        destW = imageW;
+        destH = imageH;
+    } else {
+        const float scaleX = static_cast<float>(areaW) / static_cast<float>(imageW);
+        const float scaleY = static_cast<float>(areaH) / static_cast<float>(imageH);
+        const float scale = (bg.imageFit == "fit") ? (std::min)(scaleX, scaleY) : (std::max)(scaleX, scaleY);
+        destW = (std::max)(1, static_cast<int>(std::lround(static_cast<float>(imageW) * scale)));
+        destH = (std::max)(1, static_cast<int>(std::lround(static_cast<float>(imageH) * scale)));
     }
-    return animatedTexture.textureId;
+
+    outLeft = (areaW - destW) / 2;
+    outBottom = (areaH - destH) / 2;
+    outRight = outLeft + destW;
+    outTop = outBottom + destH;
 }
 
 static void DrawFullscreenSolidColor(const Color& color) {
@@ -5849,15 +5887,76 @@ static void DrawFullscreenPassthroughTexture(GLuint textureId, const float sourc
     glDrawArrays(GL_TRIANGLES, 0, 6);
 }
 
+static void DrawBackgroundImageToSurface(const BackgroundConfig& bg, GLuint textureId, const float sourceRect[4], int imageW, int imageH,
+                                         int fullW, int fullH, float opacity) {
+    if (textureId == 0 || fullW <= 0 || fullH <= 0) { return; }
+
+    int dstLeft = 0;
+    int dstBottom = 0;
+    int dstRight = fullW;
+    int dstTop = fullH;
+    ResolveBackgroundImageDestRect(bg, imageW, imageH, fullW, fullH, dstLeft, dstBottom, dstRight, dstTop);
+
+    const int clippedLeft = (std::max)(0, dstLeft);
+    const int clippedBottom = (std::max)(0, dstBottom);
+    const int clippedRight = (std::min)(fullW, dstRight);
+    const int clippedTop = (std::min)(fullH, dstTop);
+    if (clippedRight <= clippedLeft || clippedTop <= clippedBottom) { return; }
+
+    const float dstW = static_cast<float>(dstRight - dstLeft);
+    const float dstH = static_cast<float>(dstTop - dstBottom);
+    if (dstW <= 0.0f || dstH <= 0.0f) { return; }
+
+    float clippedSourceRect[4] = {
+        sourceRect[0] + (static_cast<float>(clippedLeft - dstLeft) / dstW) * sourceRect[2],
+        sourceRect[1] + (static_cast<float>(clippedBottom - dstBottom) / dstH) * sourceRect[3],
+        (static_cast<float>(clippedRight - clippedLeft) / dstW) * sourceRect[2],
+        (static_cast<float>(clippedTop - clippedBottom) / dstH) * sourceRect[3],
+    };
+
+    glUseProgram(g_passthroughProgram);
+    glActiveTexture(GL_TEXTURE0);
+    BindTextureDirect(GL_TEXTURE_2D, textureId);
+    glUniform4f(g_passthroughShaderLocs.sourceRect, clippedSourceRect[0], clippedSourceRect[1], clippedSourceRect[2],
+                clippedSourceRect[3]);
+    glUniform1f(g_passthroughShaderLocs.opacity, opacity);
+    glUniform2f(g_passthroughShaderLocs.sourceTexelSize, 1.0f, 1.0f);
+    glUniform2f(g_passthroughShaderLocs.sourcePixelSize, 1.0f, 1.0f);
+    glUniform1i(g_passthroughShaderLocs.snapToSourcePixels, 0);
+    glBindVertexArray(g_fullscreenQuadVAO);
+
+    if (opacity < 1.0f) {
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    } else {
+        glDisable(GL_BLEND);
+    }
+
+    if (oglViewport) {
+        oglViewport(clippedLeft, clippedBottom, clippedRight - clippedLeft, clippedTop - clippedBottom);
+    } else {
+        glViewport(clippedLeft, clippedBottom, clippedRight - clippedLeft, clippedTop - clippedBottom);
+    }
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    if (oglViewport) {
+        oglViewport(0, 0, fullW, fullH);
+    } else {
+        glViewport(0, 0, fullW, fullH);
+    }
+}
+
 static void RenderSameThreadObsBackground(const ModeConfig* modeToRender, int fullW, int fullH) {
     if (!modeToRender || fullW <= 0 || fullH <= 0) { return; }
 
     const BackgroundConfig& bg = modeToRender->background;
     if (bg.selectedMode == "image") {
         float sourceRect[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
-        const GLuint backgroundTexture = ResolveModeBackgroundTextureId(modeToRender->id, sourceRect);
+        int imageW = 0;
+        int imageH = 0;
+        const GLuint backgroundTexture = ResolveModeBackgroundTextureId(modeToRender->id, sourceRect, &imageW, &imageH);
         if (backgroundTexture != 0) {
-            DrawFullscreenPassthroughTexture(backgroundTexture, sourceRect, 1.0f);
+            DrawFullscreenSolidColor(bg.color);
+            DrawBackgroundImageToSurface(bg, backgroundTexture, sourceRect, imageW, imageH, fullW, fullH, 1.0f);
             return;
         }
     }
@@ -5871,11 +5970,12 @@ static void RenderSameThreadObsBackground(const ModeConfig* modeToRender, int fu
 }
 
 static void RenderSameThreadObsBackgroundConfig(const BackgroundConfig& bg, GLuint backgroundTexture, const float sourceRect[4], int fullW,
-                                               int fullH) {
+                                               int fullH, int imageW = 0, int imageH = 0) {
     if (fullW <= 0 || fullH <= 0) { return; }
 
     if (bg.selectedMode == "image" && backgroundTexture != 0) {
-        DrawFullscreenPassthroughTexture(backgroundTexture, sourceRect, 1.0f);
+        DrawFullscreenSolidColor(bg.color);
+        DrawBackgroundImageToSurface(bg, backgroundTexture, sourceRect, imageW, imageH, fullW, fullH, 1.0f);
         return;
     }
 
@@ -6001,23 +6101,29 @@ bool RenderSameThreadObsFrame(const ModeConfig* modeToRender, const GLState& s, 
 
     GLuint obsBackgroundTexture = 0;
     float obsBackgroundSourceRect[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
+    int obsBackgroundImageW = 0;
+    int obsBackgroundImageH = 0;
     {
         PROFILE_SCOPE_CAT("Resolve OBS Background Texture", "OBS");
         if (useFromBackground) {
             if (fromBackground.selectedMode == "image") {
-                obsBackgroundTexture = ResolveModeBackgroundTextureId(fromModeId, obsBackgroundSourceRect);
+                obsBackgroundTexture =
+                    ResolveModeBackgroundTextureId(fromModeId, obsBackgroundSourceRect, &obsBackgroundImageW, &obsBackgroundImageH);
             }
         } else if (modeToRender->background.selectedMode == "image") {
-            obsBackgroundTexture = ResolveModeBackgroundTextureId(modeToRender->id, obsBackgroundSourceRect);
+            obsBackgroundTexture =
+                ResolveModeBackgroundTextureId(modeToRender->id, obsBackgroundSourceRect, &obsBackgroundImageW, &obsBackgroundImageH);
         }
     }
 
     {
         PROFILE_SCOPE_CAT("Render OBS Background", "OBS");
         if (useFromBackground) {
-            RenderSameThreadObsBackgroundConfig(fromBackground, obsBackgroundTexture, obsBackgroundSourceRect, fullW, fullH);
+            RenderSameThreadObsBackgroundConfig(fromBackground, obsBackgroundTexture, obsBackgroundSourceRect, fullW, fullH,
+                                                obsBackgroundImageW, obsBackgroundImageH);
         } else {
-            RenderSameThreadObsBackgroundConfig(modeToRender->background, obsBackgroundTexture, obsBackgroundSourceRect, fullW, fullH);
+            RenderSameThreadObsBackgroundConfig(modeToRender->background, obsBackgroundTexture, obsBackgroundSourceRect, fullW, fullH,
+                                                obsBackgroundImageW, obsBackgroundImageH);
         }
     }
 
@@ -6905,6 +7011,8 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
         BackgroundConfig fromBackground;
         BorderConfig fromBorder;
         GLuint fromBgTex = 0;
+        int fromBgW = 0;
+        int fromBgH = 0;
         float fromBgSourceRect[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
         bool useFromBackground = false;
 
@@ -6926,11 +7034,15 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
                     const auto animatedTexture = ResolveAnimatedTexture(bgInst);
                     fromBgTex = animatedTexture.textureId;
                     memcpy(fromBgSourceRect, animatedTexture.sourceRect, sizeof(fromBgSourceRect));
+                    fromBgW = bgInst.width;
+                    fromBgH = bgInst.height;
                 }
             }
         }
 
         GLuint bgTex = 0;
+        int bgW = 0;
+        int bgH = 0;
         float bgSourceRect[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
         {
             PROFILE_SCOPE_CAT("Background Texture Lookup", "Rendering");
@@ -6941,27 +7053,36 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
                 const auto animatedTexture = ResolveAnimatedTexture(bgInst);
                 bgTex = animatedTexture.textureId;
                 memcpy(bgSourceRect, animatedTexture.sourceRect, sizeof(bgSourceRect));
+                bgW = bgInst.width;
+                bgH = bgInst.height;
             }
         }
 
-        auto drawTexturedRegion = [&](int rx, int ry_gl, int rw, int rh, const float sourceRect[4]) {
+        auto drawTexturedDestRegionClipped = [&](int clipX, int clipYGl, int clipW, int clipH, int dstLeft, int dstBottom,
+                                                 int dstRight, int dstTop, const float sourceRect[4]) {
+            if (clipW <= 0 || clipH <= 0 || dstRight <= dstLeft || dstTop <= dstBottom) return;
+
+            const int rx = (std::max)(clipX, dstLeft);
+            const int ryGl = (std::max)(clipYGl, dstBottom);
+            const int rr = (std::min)(clipX + clipW, dstRight);
+            const int rt = (std::min)(clipYGl + clipH, dstTop);
+            const int rw = rr - rx;
+            const int rh = rt - ryGl;
             if (rw <= 0 || rh <= 0) return;
-            glScissor(rx, ry_gl, rw, rh);
 
-            float baseU1 = static_cast<float>(rx) / fullW;
-            float baseU2 = static_cast<float>(rx + rw) / fullW;
-            float baseV1 = static_cast<float>(ry_gl) / fullH;
-            float baseV2 = static_cast<float>(ry_gl + rh) / fullH;
+            glScissor(rx, ryGl, rw, rh);
 
-            float u1 = sourceRect[0] + baseU1 * sourceRect[2];
-            float u2 = sourceRect[0] + baseU2 * sourceRect[2];
-            float v1 = sourceRect[1] + baseV1 * sourceRect[3];
-            float v2 = sourceRect[1] + baseV2 * sourceRect[3];
+            const float dstW = static_cast<float>(dstRight - dstLeft);
+            const float dstH = static_cast<float>(dstTop - dstBottom);
+            float u1 = sourceRect[0] + (static_cast<float>(rx - dstLeft) / dstW) * sourceRect[2];
+            float u2 = sourceRect[0] + (static_cast<float>(rr - dstLeft) / dstW) * sourceRect[2];
+            float v1 = sourceRect[1] + (static_cast<float>(ryGl - dstBottom) / dstH) * sourceRect[3];
+            float v2 = sourceRect[1] + (static_cast<float>(rt - dstBottom) / dstH) * sourceRect[3];
 
-            float nx1 = baseU1 * 2.0f - 1.0f;
-            float nx2 = baseU2 * 2.0f - 1.0f;
-            float ny1 = baseV1 * 2.0f - 1.0f;
-            float ny2 = baseV2 * 2.0f - 1.0f;
+            float nx1 = (static_cast<float>(rx) / fullW) * 2.0f - 1.0f;
+            float nx2 = (static_cast<float>(rr) / fullW) * 2.0f - 1.0f;
+            float ny1 = (static_cast<float>(ryGl) / fullH) * 2.0f - 1.0f;
+            float ny2 = (static_cast<float>(rt) / fullH) * 2.0f - 1.0f;
 
             float quad[] = { nx1, ny1, u1, v1, nx2, ny1, u2, v1, nx2, ny2, u2, v2, nx1, ny1, u1, v1, nx2, ny2, u2, v2, nx1, ny2, u1, v2 };
             glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(quad), quad);
@@ -7001,7 +7122,8 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
             glDrawArrays(GL_TRIANGLES, 0, 6);
         };
 
-        auto renderBackgroundImage = [&](GLuint texId, const float sourceRect[4], float opacity) {
+        auto renderBackgroundImage = [&](const BackgroundConfig& bg, GLuint texId, const float sourceRect[4], int imageW, int imageH,
+                                         float opacity) {
             if (texId == 0) return;
 
             PROFILE_SCOPE_CAT("Scissor Background Image", "Rendering");
@@ -7052,10 +7174,18 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
             int vpBottom_gl = finalY_gl + letterboxExtendY;
             int vpTop_gl = finalY_gl + finalH - letterboxExtendY;
 
-            drawTexturedRegion(0, 0, fullW, vpBottom_gl, sourceRect);
-            drawTexturedRegion(0, vpTop_gl, fullW, fullH - vpTop_gl, sourceRect);
-            drawTexturedRegion(0, vpBottom_gl, vpLeft, vpTop_gl - vpBottom_gl, sourceRect);
-            drawTexturedRegion(vpRight, vpBottom_gl, fullW - vpRight, vpTop_gl - vpBottom_gl, sourceRect);
+            int dstLeft = 0;
+            int dstBottom = 0;
+            int dstRight = fullW;
+            int dstTop = fullH;
+            ResolveBackgroundImageDestRect(bg, imageW, imageH, fullW, fullH, dstLeft, dstBottom, dstRight, dstTop);
+
+            drawTexturedDestRegionClipped(0, 0, fullW, vpBottom_gl, dstLeft, dstBottom, dstRight, dstTop, sourceRect);
+            drawTexturedDestRegionClipped(0, vpTop_gl, fullW, fullH - vpTop_gl, dstLeft, dstBottom, dstRight, dstTop, sourceRect);
+            drawTexturedDestRegionClipped(0, vpBottom_gl, vpLeft, vpTop_gl - vpBottom_gl, dstLeft, dstBottom, dstRight, dstTop,
+                                          sourceRect);
+            drawTexturedDestRegionClipped(vpRight, vpBottom_gl, fullW - vpRight, vpTop_gl - vpBottom_gl, dstLeft, dstBottom,
+                                          dstRight, dstTop, sourceRect);
 
             glDisable(GL_SCISSOR_TEST);
 
@@ -7162,7 +7292,8 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
         if (useFromBackground) {
             PROFILE_SCOPE_CAT("Render From Background", "Rendering");
             if (fromBackground.selectedMode == "image" && fromBgTex != 0) {
-                renderBackgroundImage(fromBgTex, fromBgSourceRect, 1.0f);
+                renderBackgroundColor(fromBackground.color, 1.0f);
+                renderBackgroundImage(fromBackground, fromBgTex, fromBgSourceRect, fromBgW, fromBgH, 1.0f);
             } else if (fromBackground.selectedMode == "gradient" && fromBackground.gradientStops.size() >= 2) {
                 renderBackgroundGradient(fromBackground, 1.0f);
             } else {
@@ -7173,7 +7304,8 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
         if (!useFromBackground) {
             PROFILE_SCOPE_CAT("Render To Background", "Rendering");
             if (modeToRender->background.selectedMode == "image" && bgTex != 0) {
-                renderBackgroundImage(bgTex, bgSourceRect, 1.0f);
+                renderBackgroundColor(modeToRender->background.color, 1.0f);
+                renderBackgroundImage(modeToRender->background, bgTex, bgSourceRect, bgW, bgH, 1.0f);
             } else if (modeToRender->background.selectedMode == "gradient" && modeToRender->background.gradientStops.size() >= 2) {
                 renderBackgroundGradient(modeToRender->background, 1.0f);
             } else {
