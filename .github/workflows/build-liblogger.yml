@@ -62,7 +62,7 @@ jobs:
       - name: Configure liblogger build preset
         shell: pwsh
         run: |
-          cmake -S . -B "out/build-liblogger/windows-${{ matrix.artifact_arch }}" -G "Visual Studio 17 2022" -A "${{ matrix.vs_arch }}" -DTOOLSCREEN_ENABLE_JAR_PACKAGING=OFF -DTOOLSCREEN_BUILD_LIBLOGGER_FROM_SOURCE=ON
+          cmake -S . -B "out/build-liblogger/windows-${{ matrix.artifact_arch }}" -A "${{ matrix.vs_arch }}" -DTOOLSCREEN_ENABLE_JAR_PACKAGING=OFF -DTOOLSCREEN_BUILD_LIBLOGGER_FROM_SOURCE=ON
 
       - name: Build liblogger DLL
         shell: cmd

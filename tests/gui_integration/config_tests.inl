@@ -511,6 +511,70 @@ browserOverlayIds = ["Browser One"]
                       runMode);
 }
 
+void RunConfigMigrateVersionAppliesTest(TestRunMode runMode = TestRunMode::Automated) {
+    (void)runMode;
+
+    Config config;
+    config.configVersion = 2;
+    config.fpsLimit = 144;
+    config.limitCaptureFramerate = true;
+
+    Expect(MigrateConfigToCurrentVersion(config), "Expected an old-version config to report a migration.");
+    Expect(config.configVersion == GetConfigVersion(), "Expected the config version to be stamped to current.");
+    Expect(config.fpsLimit == 0, "Expected the v3 migration to reset fpsLimit.");
+    Expect(!config.limitCaptureFramerate, "Expected the v3 migration to clear limitCaptureFramerate.");
+
+    config.fpsLimit = 144;
+    Expect(!MigrateConfigToCurrentVersion(config), "Expected an already-current config to need no migration.");
+    Expect(config.fpsLimit == 144, "Expected a no-op migration to leave fields untouched.");
+    Expect(config.configVersion == GetConfigVersion(), "Expected the version to remain current after a no-op migration.");
+}
+
+void RunConfigDowngradeSourcesCompatTest(TestRunMode runMode = TestRunMode::Automated) {
+    (void)runMode;
+
+    Config config;
+    ModeConfig mode;
+    mode.id = "Downgrade Mode";
+    mode.width = 800;
+    mode.height = 600;
+    AddModeSource(mode, ModeSourceType::Mirror, "Mirror One");
+    AddModeSource(mode, ModeSourceType::Image, "Image One");
+    AddModeSource(mode, ModeSourceType::Mirror, "Mirror Two");
+    AddModeSource(mode, ModeSourceType::MirrorGroup, "Group One");
+    AddModeSource(mode, ModeSourceType::WindowOverlay, "Window One");
+    AddModeSource(mode, ModeSourceType::BrowserOverlay, "Browser One");
+    config.modes.push_back(mode);
+
+    toml::table serialized;
+    ConfigToToml(config, serialized);
+
+    auto modeArr = serialized.get_as<toml::array>("mode");
+    Expect(modeArr != nullptr && modeArr->size() == 1, "Expected exactly one serialized mode.");
+    toml::table* modeTbl = modeArr->get(0)->as_table();
+    Expect(modeTbl != nullptr, "Expected the serialized mode to be a table.");
+
+    const auto legacyList = [&](const char* key) {
+        std::vector<std::string> ids;
+        if (auto arr = modeTbl->get_as<toml::array>(key)) {
+            for (auto& elem : *arr) {
+                if (auto val = elem.value<std::string>()) { ids.push_back(*val); }
+            }
+        }
+        return ids;
+    };
+    ExpectVectorEquals(legacyList("mirrorIds"), std::vector<std::string>{ "Mirror One", "Mirror Two" },
+                       "Expected sources to also serialize legacy mirrorIds in order for downgrade.");
+    ExpectVectorEquals(legacyList("mirrorGroupIds"), std::vector<std::string>{ "Group One" },
+                       "Expected sources to also serialize legacy mirrorGroupIds for downgrade.");
+    ExpectVectorEquals(legacyList("imageIds"), std::vector<std::string>{ "Image One" },
+                       "Expected sources to also serialize legacy imageIds for downgrade.");
+    ExpectVectorEquals(legacyList("windowOverlayIds"), std::vector<std::string>{ "Window One" },
+                       "Expected sources to also serialize legacy windowOverlayIds for downgrade.");
+    ExpectVectorEquals(legacyList("browserOverlayIds"), std::vector<std::string>{ "Browser One" },
+                       "Expected sources to also serialize legacy browserOverlayIds for downgrade.");
+}
+
 void RunConfigLoadModePercentageDimensionsDetectedTest(TestRunMode runMode = TestRunMode::Automated) {
     int expectedWidth = 1;
     int expectedHeight = 1;

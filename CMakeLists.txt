@@ -1001,6 +1001,8 @@ set(TOOLSCREEN_GUI_INTEGRATION_TEST_CASES
     config-load-clamp-global-values
     config-load-mode-default-dimensions-restored
     config-load-mode-source-lists-loaded
+    config-downgrade-sources-compat
+    config-migrate-version-applies
     config-load-mode-percentage-dimensions-detected
     config-load-mode-typed-sources-loaded
     config-load-mode-source-helpers
@@ -1046,6 +1048,8 @@ set(TOOLSCREEN_GUI_INTEGRATION_TEST_CASES
     key-rebind-runtime-custom-modifier-output-uses-synthetic-key
     key-rebind-runtime-wndproc-keeps-synthetic-modifier-held
     key-rebind-runtime-disabled-rebind-ignored
+    key-rebind-runtime-cursor-state-keyup-passthrough
+    key-rebind-runtime-held-output-released-on-rebind-change
     key-rebind-runtime-cursor-state-priority-and-fallback
     key-rebind-gui-keyboard-layout-full-bind-and-trigger
     key-rebind-gui-keyboard-layout-split-bind-and-trigger
