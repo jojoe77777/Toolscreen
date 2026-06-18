@@ -4,6 +4,7 @@
 #include "common/mode_dimensions.h"
 #include "common/profiler.h"
 #include "common/utils.h"
+#include "config/config_migration.h"
 #include "config/config_toml.h"
 #include "features/browser_overlay.h"
 #include "features/ninjabrain_client.h"

@@ -1321,10 +1321,10 @@ void RunKeyRebindRuntimeDisabledRebindIgnoredTest(TestRunMode runMode = TestRunM
 void RunKeyRebindRuntimeCursorStateKeyupPassthroughTest(TestRunMode runMode = TestRunMode::Automated) {
     DummyWindow window(kWindowWidth, kWindowHeight, runMode == TestRunMode::Visual);
 
-    KeyRebind cursorFreeRebind = MakeEnabledRebind(VK_SPACE, VK_BACK);
-    cursorFreeRebind.cursorState = kKeyRebindCursorStateCursorFree;
+    KeyRebind cursorGrabbedRebind = MakeEnabledRebind(VK_SPACE, VK_BACK);
+    cursorGrabbedRebind.cursorState = kKeyRebindCursorStateCursorGrabbed;
 
-    PrepareRebindRuntimeCase("key_rebind_runtime_cursor_state_keyup_passthrough", { cursorFreeRebind });
+    PrepareRebindRuntimeCase("key_rebind_runtime_cursor_state_keyup_passthrough", { cursorGrabbedRebind });
     ScopedRebindMessageCapture capture(window.hwnd());
 
     ScopedKeyboardStateOverride keyboardState;
@@ -1332,57 +1332,87 @@ void RunKeyRebindRuntimeCursorStateKeyupPassthroughTest(TestRunMode runMode = Te
     keyboardState.SetToggle(VK_CAPITAL, false);
     keyboardState.Apply();
 
+    ScopedCursorVisibilityOverride cursorVisible(true);
+
     const LPARAM spaceDownLParam = BuildTestKeyboardMessageLParam(VK_SPACE, true);
     const LPARAM spaceUpLParam = BuildTestKeyboardMessageLParam(VK_SPACE, false);
 
-    {
-        ScopedCursorVisibilityOverride cursorHidden(false);
-
-        const InputHandlerResult keyDownResult =
-            HandleKeyRebinding(window.hwnd(), WM_KEYDOWN, VK_SPACE, spaceDownLParam);
-        Expect(!keyDownResult.consumed,
-            "Expected spacebar keydown to pass through when cursor is grabbed and rebind is cursor-free only.");
-        Expect(GetUnreboundKeyDownCountForTest() == 1,
-            "Expected the unrebound keydown to be tracked for passthrough.");
-    }
+    const InputHandlerResult keyDownResult =
+        HandleKeyRebinding(window.hwnd(), WM_KEYDOWN, VK_SPACE, spaceDownLParam);
+    Expect(!keyDownResult.consumed,
+        "Expected spacebar keydown to pass through when the cursor is free and the rebind is cursor-grabbed only.");
+    Expect(GetUnreboundKeyDownCountForTest() == 1,
+        "Expected the unrebound keydown to be tracked for passthrough.");
 
     capture.Clear();
 
-    {
-        ScopedCursorVisibilityOverride cursorVisible(true);
+    KeyRebind cursorFreeRebind = MakeEnabledRebind(VK_SPACE, VK_BACK);
+    cursorFreeRebind.cursorState = kKeyRebindCursorStateCursorFree;
+    g_config.keyRebinds.rebinds = { cursorFreeRebind };
+    PublishConfigSnapshot();
 
-        const InputHandlerResult keyUpResult =
-            HandleKeyRebinding(window.hwnd(), WM_KEYUP, VK_SPACE, spaceUpLParam);
-        Expect(!keyUpResult.consumed,
-            "Expected spacebar keyup to pass through when its keydown was not rebound, even though a cursor-free rebind now matches.");
-        Expect(GetUnreboundKeyDownCountForTest() == 0,
-            "Expected the passthrough tracking to be cleared after keyup.");
-    }
+    const InputHandlerResult keyUpResult =
+        HandleKeyRebinding(window.hwnd(), WM_KEYUP, VK_SPACE, spaceUpLParam);
+    Expect(!keyUpResult.consumed,
+        "Expected spacebar keyup to pass through when its keydown was not rebound, even though a rebind now matches.");
+    Expect(GetUnreboundKeyDownCountForTest() == 0,
+        "Expected the passthrough tracking to be cleared after keyup.");
 
     capture.Clear();
 
-    {
-        ScopedCursorVisibilityOverride cursorVisible(true);
+    const InputHandlerResult reboundDownResult =
+        HandleKeyRebinding(window.hwnd(), WM_KEYDOWN, VK_SPACE, spaceDownLParam);
+    Expect(reboundDownResult.consumed,
+        "Expected spacebar keydown to be consumed when the rebind matches.");
+    Expect(capture.messages.size() == 1,
+        "Expected the cursor-free rebind to forward exactly one WM_KEYDOWN message.");
+    ExpectCapturedMessage(capture, 0, WM_KEYDOWN, VK_BACK, "Cursor-free rebind WM_KEYDOWN");
 
-        const InputHandlerResult reboundDownResult =
-            HandleKeyRebinding(window.hwnd(), WM_KEYDOWN, VK_SPACE, spaceDownLParam);
-        Expect(reboundDownResult.consumed,
-            "Expected spacebar keydown to be consumed when cursor is free and the rebind matches.");
-        Expect(capture.messages.size() == 1,
-            "Expected the cursor-free rebind to forward exactly one WM_KEYDOWN message.");
-        ExpectCapturedMessage(capture, 0, WM_KEYDOWN, VK_BACK, "Cursor-free rebind WM_KEYDOWN");
+    capture.Clear();
+    const InputHandlerResult reboundUpResult =
+        HandleKeyRebinding(window.hwnd(), WM_KEYUP, VK_SPACE, spaceUpLParam);
+    Expect(reboundUpResult.consumed,
+        "Expected spacebar keyup to be consumed when its keydown was rebound.");
+    Expect(capture.messages.size() == 1,
+        "Expected the cursor-free rebind to forward exactly one WM_KEYUP message.");
+    ExpectCapturedMessage(capture, 0, WM_KEYUP, VK_BACK, "Cursor-free rebind WM_KEYUP");
+    Expect(GetUnreboundKeyDownCountForTest() == 0,
+        "Expected no passthrough tracking after a fully rebound key down+up cycle.");
+}
 
-        capture.Clear();
-        const InputHandlerResult reboundUpResult =
-            HandleKeyRebinding(window.hwnd(), WM_KEYUP, VK_SPACE, spaceUpLParam);
-        Expect(reboundUpResult.consumed,
-            "Expected spacebar keyup to be consumed when its keydown was rebound.");
-        Expect(capture.messages.size() == 1,
-            "Expected the cursor-free rebind to forward exactly one WM_KEYUP message.");
-        ExpectCapturedMessage(capture, 0, WM_KEYUP, VK_BACK, "Cursor-free rebind WM_KEYUP");
-        Expect(GetUnreboundKeyDownCountForTest() == 0,
-            "Expected no passthrough tracking after a fully rebound key down+up cycle.");
-    }
+void RunKeyRebindRuntimeHeldOutputReleasedOnRebindChangeTest(TestRunMode runMode = TestRunMode::Automated) {
+    DummyWindow window(kWindowWidth, kWindowHeight, runMode == TestRunMode::Visual);
+
+    KeyRebind initialRebind = MakeEnabledRebind('A', VK_F3);
+    PrepareRebindRuntimeCase("key_rebind_runtime_held_output_released_on_rebind_change", { initialRebind });
+    ScopedRebindMessageCapture capture(window.hwnd());
+
+    ScopedKeyboardStateOverride keyboardState;
+    keyboardState.SetKeyDown(VK_SHIFT, false);
+    keyboardState.SetToggle(VK_CAPITAL, false);
+    keyboardState.Apply();
+
+    ScopedCursorVisibilityOverride cursorVisible(true);
+
+    const LPARAM downLParam = BuildTestKeyboardMessageLParam('A', true);
+    const LPARAM upLParam = BuildTestKeyboardMessageLParam('A', false);
+
+    const InputHandlerResult downResult = HandleKeyRebinding(window.hwnd(), WM_KEYDOWN, 'A', downLParam);
+    Expect(downResult.consumed, "Expected the rebind to consume the keydown.");
+    Expect(capture.messages.size() == 1, "Expected exactly one forwarded WM_KEYDOWN.");
+    ExpectCapturedMessage(capture, 0, WM_KEYDOWN, VK_F3, "Held-output rebind WM_KEYDOWN");
+
+    capture.Clear();
+
+    KeyRebind changedRebind = MakeEnabledRebind('A', VK_BACK);
+    g_config.keyRebinds.rebinds = { changedRebind };
+    PublishConfigSnapshot();
+
+    const InputHandlerResult upResult = HandleKeyRebinding(window.hwnd(), WM_KEYUP, 'A', upLParam);
+    Expect(upResult.consumed, "Expected the keyup to be consumed while a rebound output is held.");
+    Expect(capture.messages.size() == 1, "Expected exactly one forwarded WM_KEYUP.");
+    ExpectCapturedMessage(capture, 0, WM_KEYUP, VK_F3,
+        "Release must key-up the output asserted on keydown (F3), not the output the now-active rebind resolves to.");
 }
 
 void RunKeyRebindRuntimeCursorStatePriorityAndFallbackTest(TestRunMode runMode = TestRunMode::Automated) {

@@ -193,7 +193,7 @@ static void UntrackHeldShiftRebindOutput(DWORD sourceVk);
 static void ReconcileHeldShiftRebindOutputs(HWND hWnd);
 static void ReleaseAllHeldShiftRebindOutputs(HWND hWnd);
 static void TrackHeldKeyRebindOutput(uint64_t sourceId, const HeldRebindOutput& out);
-static void UntrackHeldKeyRebindOutput(uint64_t sourceId);
+static bool ReleaseTrackedHeldKeyRebindOutput(HWND hWnd, uint64_t sourceId, LRESULT& outResult);
 static void ReleaseAllHeldKeyRebindOutputs(HWND hWnd);
 static UINT GetScanCodeWithExtendedFlagFromLParam(LPARAM lParam);
 static bool IsNonCharKeyVk(DWORD vk);
@@ -4377,7 +4377,10 @@ static InputHandlerResult ExecuteMatchedKeyRebind(HWND hWnd, UINT uMsg, WPARAM w
                 TrackHeldKeyRebindOutput(heldKeySourceId, { msgVk, outputScanCode, outputHasAltContext });
             }
         } else {
-            UntrackHeldKeyRebindOutput(heldKeySourceId);
+            LRESULT releasedResult = 0;
+            if (ReleaseTrackedHeldKeyRebindOutput(hWnd, heldKeySourceId, releasedResult)) {
+                return { true, releasedResult };
+            }
         }
     }
 
@@ -4400,10 +4403,10 @@ static void UntrackHeldShiftRebindOutput(DWORD sourceVk) {
     s_heldShiftRebindOutputs.erase(sourceVk);
 }
 
-static void InjectHeldShiftRebindOutputKeyUp(HWND hWnd, const HeldRebindOutput& out) {
+static LRESULT InjectHeldShiftRebindOutputKeyUp(HWND hWnd, const HeldRebindOutput& out) {
     const UINT keyUpMsg = out.altContext ? WM_SYSKEYUP : WM_KEYUP;
     const LPARAM lp = BuildKeyboardMessageLParam(out.outputScanCode, false, out.altContext, 1, true, true);
-    (void)CallWindowProc(g_originalWndProc, hWnd, keyUpMsg, out.msgVk, lp);
+    return CallWindowProc(g_originalWndProc, hWnd, keyUpMsg, out.msgVk, lp);
 }
 
 static void ReconcileHeldShiftRebindOutputs(HWND hWnd) {
@@ -4447,10 +4450,18 @@ static void TrackHeldKeyRebindOutput(uint64_t sourceId, const HeldRebindOutput& 
     s_heldKeyRebindOutputs[sourceId] = out;
 }
 
-static void UntrackHeldKeyRebindOutput(uint64_t sourceId) {
-    if (sourceId == 0) { return; }
-    std::lock_guard<std::mutex> lock(s_heldKeyRebindOutputsMutex);
-    s_heldKeyRebindOutputs.erase(sourceId);
+static bool ReleaseTrackedHeldKeyRebindOutput(HWND hWnd, uint64_t sourceId, LRESULT& outResult) {
+    if (sourceId == 0) { return false; }
+    HeldRebindOutput out;
+    {
+        std::lock_guard<std::mutex> lock(s_heldKeyRebindOutputsMutex);
+        auto it = s_heldKeyRebindOutputs.find(sourceId);
+        if (it == s_heldKeyRebindOutputs.end()) { return false; }
+        out = it->second;
+        s_heldKeyRebindOutputs.erase(it);
+    }
+    outResult = InjectHeldShiftRebindOutputKeyUp(hWnd, out);
+    return true;
 }
 
 static void ReleaseAllHeldKeyRebindOutputs(HWND hWnd) {

@@ -62,6 +62,8 @@ const auto& GetTestCaseDefinitions() {
         {"config-load-clamp-global-values-system-key-repeat", &RunConfigLoadClampGlobalValuesSystemKeyRepeatTest},
         {"config-load-mode-default-dimensions-restored", &RunConfigLoadModeDefaultDimensionsRestoredTest},
         {"config-load-mode-source-lists-loaded", &RunConfigLoadModeSourceListsLoadedTest},
+        {"config-downgrade-sources-compat", &RunConfigDowngradeSourcesCompatTest},
+        {"config-migrate-version-applies", &RunConfigMigrateVersionAppliesTest},
         {"config-load-mode-percentage-dimensions-detected", &RunConfigLoadModePercentageDimensionsDetectedTest},
         {"config-load-mode-typed-sources-loaded", &RunConfigLoadModeTypedSourcesLoadedTest},
         {"config-load-mode-source-helpers", &RunConfigModeSourceHelpersTest},
@@ -113,7 +115,8 @@ const auto& GetTestCaseDefinitions() {
         {"key-rebind-runtime-wndproc-keeps-synthetic-modifier-held", &RunKeyRebindRuntimeWndProcKeepsSyntheticModifierHeldTest},
         {"key-rebind-runtime-modifier-source-dual-shift-release", &RunKeyRebindRuntimeModifierSourceDualShiftReleaseTest},
         {"key-rebind-runtime-disabled-rebind-ignored", &RunKeyRebindRuntimeDisabledRebindIgnoredTest},
-        {"key-rebind-runtime-cursor-state-keyup-passthrough", &RunKeyRebindRuntimeCursorStateKeyupPassthroughTest, true},
+        {"key-rebind-runtime-cursor-state-keyup-passthrough", &RunKeyRebindRuntimeCursorStateKeyupPassthroughTest},
+        {"key-rebind-runtime-held-output-released-on-rebind-change", &RunKeyRebindRuntimeHeldOutputReleasedOnRebindChangeTest},
         {"key-rebind-runtime-cursor-state-priority-and-fallback", &RunKeyRebindRuntimeCursorStatePriorityAndFallbackTest},
         {"key-rebind-gui-keyboard-layout-full-bind-and-trigger", &RunKeyRebindGuiKeyboardLayoutFullBindAndTriggerTest},
         {"key-rebind-gui-keyboard-layout-split-bind-and-trigger", &RunKeyRebindGuiKeyboardLayoutSplitBindAndTriggerTest},
@@ -260,7 +263,7 @@ bool GroupIncludesTestCaseName(const TestGroupDefinition& testGroup, std::string
 
 const auto& GetTestGroupDefinitions() {
     static const std::vector<TestGroupDefinition> testGroups = {
-        {"config", {"config-default-", "config-roundtrip", "config-load-", "config-publish-"},
+        {"config", {"config-default-", "config-roundtrip", "config-load-", "config-publish-", "config-downgrade-", "config-migrate-"},
             {"fullscreen-relative-external-resize-skips-stale-resend", "fullscreen-relative-os-wmsize-overrides-computed-dimensions",
              "fullscreen-relative-display-dimensions-follow-window-resize",
              "fullscreen-relative-gui-publish-preserves-recalculated-size"}},

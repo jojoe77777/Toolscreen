@@ -1431,13 +1431,27 @@ void ModeConfigToToml(const ModeConfig& cfg, toml::table& out) {
     out.insert("background", bgTbl);
 
     toml::array sourcesArr;
+    toml::array legacyMirrorIds, legacyMirrorGroupIds, legacyImageIds, legacyWindowOverlayIds, legacyBrowserOverlayIds;
     for (const auto& source : cfg.sources) {
         if (source.id.empty()) continue;
         toml::table sourceTbl;
         ModeSourceRefToToml(source, sourceTbl);
         sourcesArr.push_back(sourceTbl);
+        switch (source.type) {
+            case ModeSourceType::Mirror: legacyMirrorIds.push_back(source.id); break;
+            case ModeSourceType::MirrorGroup: legacyMirrorGroupIds.push_back(source.id); break;
+            case ModeSourceType::Image: legacyImageIds.push_back(source.id); break;
+            case ModeSourceType::WindowOverlay: legacyWindowOverlayIds.push_back(source.id); break;
+            case ModeSourceType::BrowserOverlay: legacyBrowserOverlayIds.push_back(source.id); break;
+            default: break;
+        }
     }
     out.insert("sources", sourcesArr);
+    out.insert("mirrorIds", legacyMirrorIds);
+    out.insert("mirrorGroupIds", legacyMirrorGroupIds);
+    out.insert("imageIds", legacyImageIds);
+    out.insert("windowOverlayIds", legacyWindowOverlayIds);
+    out.insert("browserOverlayIds", legacyBrowserOverlayIds);
 
     toml::table stretchTbl;
     StretchConfigToToml(cfg.stretch, stretchTbl);

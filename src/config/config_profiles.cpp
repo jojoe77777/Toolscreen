@@ -1,3 +1,4 @@
+#include "config_migration.h"
 #include "config_toml.h"
 #include "common/i18n.h"
 #include "common/utils.h"
@@ -308,7 +309,11 @@ static bool LoadProfileConfigFromPath(const std::wstring& path, Config& profileC
     if (!std::filesystem::exists(std::filesystem::path(path))) {
         return false;
     }
-    return LoadConfigFromTomlFile(path, profileConfig);
+    if (!LoadConfigFromTomlFile(path, profileConfig)) {
+        return false;
+    }
+    MigrateConfigToCurrentVersion(profileConfig);
+    return true;
 }
 
 static std::vector<std::string> ListProfilesOnDiskLocked() {
