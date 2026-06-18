@@ -24,7 +24,7 @@ if (BeginSelectableSettingsTopTabItem(trc("tabs.modes"))) {
     SliderCtrlClickTip();
     const std::string g_currentModeId = GetPublishedCurrentModeId();
 
-    auto renderBackgroundImageFitCombo = [&](ModeConfig& mode, const std::string& idSuffix) {
+    auto renderBackgroundImageOptions = [&](ModeConfig& mode, const std::string& idSuffix) {
         const char* fitLabels[] = { trc("modes.image_fit.fill"), trc("modes.image_fit.fit"), trc("modes.image_fit.stretch"),
                                     trc("modes.image_fit.center") };
         const char* fitValues[] = { "fill", "fit", "stretch", "center" };
@@ -40,6 +40,11 @@ if (BeginSelectableSettingsTopTabItem(trc("tabs.modes"))) {
         ImGui::SetNextItemWidth(160);
         if (ImGui::Combo((tr("modes.image_fit") + "##" + idSuffix).c_str(), &currentFit, fitLabels, IM_ARRAYSIZE(fitLabels))) {
             mode.background.imageFit = fitValues[currentFit];
+            g_configIsDirty = true;
+        }
+
+        ImGui::SetNextItemWidth(160);
+        if (ImGui::ColorEdit3((tr("modes.background_color") + "##" + idSuffix).c_str(), &mode.background.color.r)) {
             g_configIsDirty = true;
         }
     };
@@ -1218,7 +1223,7 @@ if (BeginSelectableSettingsTopTabItem(trc("tabs.modes"))) {
                             }
                         }
 
-                        renderBackgroundImageFitCombo(mode, "eyezoom_bg_fit");
+                        renderBackgroundImageOptions(mode, "eyezoom_bg_fit");
 
                         std::string bgError = GetImageError("eyezoom_bg");
                         if (!bgError.empty()) { ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "%s", bgError.c_str()); }
@@ -1512,7 +1517,7 @@ if (BeginSelectableSettingsTopTabItem(trc("tabs.modes"))) {
                             }
                         }
 
-                        renderBackgroundImageFitCombo(mode, "preemptive_bg_fit");
+                        renderBackgroundImageOptions(mode, "preemptive_bg_fit");
 
                         std::string bgError = GetImageError("preemptive_bg");
                         if (!bgError.empty()) { ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "%s", bgError.c_str()); }
@@ -1857,7 +1862,7 @@ if (BeginSelectableSettingsTopTabItem(trc("tabs.modes"))) {
                                 }
                             }
                         }
-                        renderBackgroundImageFitCombo(mode, "thin_bg_fit");
+                        renderBackgroundImageOptions(mode, "thin_bg_fit");
                         std::string thinBgError = GetImageError(thinErrorKey);
                         if (!thinBgError.empty()) { ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "%s", thinBgError.c_str()); }
                     }
@@ -2167,7 +2172,7 @@ if (BeginSelectableSettingsTopTabItem(trc("tabs.modes"))) {
                                 }
                             }
                         }
-                        renderBackgroundImageFitCombo(mode, "wide_bg_fit");
+                        renderBackgroundImageOptions(mode, "wide_bg_fit");
                         std::string wideBgError = GetImageError(wideErrorKey);
                         if (!wideBgError.empty()) { ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "%s", wideBgError.c_str()); }
                     }
@@ -2598,7 +2603,7 @@ if (BeginSelectableSettingsTopTabItem(trc("tabs.modes"))) {
                             }
                         }
 
-                        renderBackgroundImageFitCombo(mode, "custom_bg_fit_" + mode.id);
+                        renderBackgroundImageOptions(mode, "custom_bg_fit_" + mode.id);
 
                         std::string bgError = GetImageError(modeErrorKey);
                         if (!bgError.empty()) { ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "%s", bgError.c_str()); }

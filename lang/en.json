@@ -574,6 +574,7 @@
     "modes.add_new_mode": "Add New Mode",
     "modes.add_source": "[Add Source]",
     "modes.background": "Background",
+    "modes.background_color": "Background Color",
     "modes.bg_image_path": "Path",
     "modes.border_settings": "Border Settings",
     "modes.border_width": "Width:",

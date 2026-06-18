@@ -576,6 +576,7 @@
     "modes.add_new_mode": "添加新模式",
     "modes.add_source": "[添加源]",
     "modes.background": "背景",
+    "modes.background_color": "背景颜色",
     "modes.bg_image_path": "路径",
     "modes.border_settings": "边框设置",
     "modes.border_width": "宽度：",

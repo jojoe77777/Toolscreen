@@ -574,6 +574,7 @@
     "modes.add_new_mode": "Adicionar Novo Modo",
     "modes.add_source": "[Adicionar Fonte]",
     "modes.background": "Fundo",
+    "modes.background_color": "Cor de fundo",
     "modes.bg_image_path": "Caminho",
     "modes.border_settings": "Configurações de Borda",
     "modes.border_width": "Largura:",
