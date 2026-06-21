@@ -221,6 +221,46 @@ if (BeginSelectableSettingsNestedTabItem(trc("ninjabrain.title"))) {
         ImGui::Spacing();
 
         ImGui::SeparatorText(trc("ninjabrain.rendering"));
+
+        {
+            const ImVec4 visibleGreen = ImVec4(0.20f, 1.00f, 0.20f, 1.00f);
+            const ImVec4 hiddenRed = ImVec4(1.00f, 0.20f, 0.20f, 1.00f);
+
+            std::string ninjabrainOverlayKeyStr = GetKeyComboString(g_config.ninjabrainOverlayHotkey);
+            std::string ninjabrainOverlayNodeLabel =
+                tr("hotkeys.toggle_ninjabrain_overlay_prefix") +
+                (ninjabrainOverlayKeyStr.empty() ? trc("hotkeys.none") : ninjabrainOverlayKeyStr);
+
+            const bool ninjabrainOverlayVisible = g_ninjabrainOverlayVisible.load(std::memory_order_acquire);
+
+            bool ninjabrainOverlayNodeOpen =
+                ImGui::TreeNodeEx("##ninjabrain_overlay_toggle_node_overlays", ImGuiTreeNodeFlags_SpanAvailWidth, "%s", ninjabrainOverlayNodeLabel.c_str());
+
+            ImGui::SameLine();
+            ImGui::TextDisabled("%s", trc("label.status"));
+            ImGui::SameLine();
+            ImGui::TextColored(ninjabrainOverlayVisible ? visibleGreen : hiddenRed, "%s",
+                               ninjabrainOverlayVisible ? trc("label.shown") : trc("label.hidden"));
+            if (ninjabrainOverlayNodeOpen) {
+                const bool isBindingNinjabrainOverlay = (s_mainHotkeyToBind == -994);
+                const char* ninjabrainOverlayButtonLabel =
+                    isBindingNinjabrainOverlay ? trc("hotkeys.press_keys")
+                                               : (ninjabrainOverlayKeyStr.empty() ? trc("hotkeys.none") : ninjabrainOverlayKeyStr.c_str());
+                if (ImGui::Button(ninjabrainOverlayButtonLabel)) {
+                    s_mainHotkeyToBind = -994;
+                    s_altHotkeyToBind = { -1, -1 };
+                    s_exclusionToBind = { -1, -1 };
+                    MarkHotkeyBindingActive();
+                }
+                ImGui::SameLine();
+                ImGui::TextDisabled(trc("label.question_mark"));
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("%s", trc("tooltip.toggle_ninjabrain_overlay.advanced"));
+                }
+                ImGui::TreePop();
+            }
+        }
+
         float overlayOpacityPercent = std::clamp(nb.overlayOpacity, 0.0f, 1.0f) * 100.0f;
         ImGui::SetNextItemWidth(kNinjabrainCompactSliderWidth);
         if (ImGui::SliderFloat((std::string(trc("ninjabrain.opacity")) + "##nb").c_str(), &overlayOpacityPercent, 0.0f, 100.0f, "%.0f%%")) {
