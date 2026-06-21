@@ -1,5 +1,6 @@
 ﻿#include "gui.h"
 #include "gui_internal.h"
+#include "imgui_internal.h"
 #include "common/font_assets.h"
 #include "config/config_toml.h"
 #include "common/mode_dimensions.h"
@@ -51,6 +52,7 @@
 #include <shared_mutex>
 #include <stdexcept>
 #include <string>
+#include <vector>
 #include <string_view>
 #include <thread>
 #include <unordered_set>
@@ -961,7 +963,73 @@ void SetNextSettingsModalCentered(ImGuiCond condition = ImGuiCond_Always) {
         s_forcedSettingsInputsSubTabLabel = GetConfigInputsSubTabLabel(searchMatch->inputsSubTab);
     }
 
-    void RenderConfigGuiSearchBar(bool basicModeEnabled) {
+    ImTextureID ResolveHeaderIconTexture(GLuint& glTexture, HGLRC& lastContext, int resourceId) {
+        if (GetRenderBackend() == RenderBackend::Vulkan) {
+            uintptr_t texture = 0;
+            return VulkanRenderer::GetBundledGuiTexture(resourceId, texture) ? static_cast<ImTextureID>(texture) : ImTextureID(0);
+        }
+
+        const HGLRC currentContext = wglGetCurrentContext();
+        if (currentContext != lastContext) {
+            glTexture = 0;
+            lastContext = currentContext;
+        }
+        LoadEmbeddedResourceTexture(glTexture, resourceId);
+        return static_cast<ImTextureID>(glTexture);
+    }
+
+    const char* const kHeaderEllipsis = "...";
+
+    std::string EllipsizeToWidth(const std::string& text, float maxWidth) {
+        if (ImGui::CalcTextSize(text.c_str()).x <= maxWidth) {
+            return text;
+        }
+
+        std::vector<size_t> cutPoints;
+        for (size_t i = 0; i <= text.size(); ++i) {
+            if (i == text.size() || (static_cast<unsigned char>(text[i]) & 0xC0) != 0x80) {
+                cutPoints.push_back(i);
+            }
+        }
+
+        size_t low = 0;
+        size_t high = cutPoints.size() - 1;
+        while (low < high) {
+            const size_t middle = (low + high + 1) / 2;
+            const std::string candidate = text.substr(0, cutPoints[middle]) + kHeaderEllipsis;
+            if (ImGui::CalcTextSize(candidate.c_str()).x <= maxWidth) {
+                low = middle;
+            } else {
+                high = middle - 1;
+            }
+        }
+        return text.substr(0, cutPoints[low]) + kHeaderEllipsis;
+    }
+
+    const std::string& GetHeaderProfileDisplayName(const std::string& name, float maxWidth) {
+        static std::string s_cachedName;
+        static std::string s_cachedResult;
+        static float s_cachedMaxWidth = -1.0f;
+        static float s_cachedFontSize = -1.0f;
+        static const ImFont* s_cachedFont = nullptr;
+
+        const float fontSize = ImGui::GetFontSize();
+        const ImFont* font = ImGui::GetFont();
+        if (name != s_cachedName || maxWidth != s_cachedMaxWidth || fontSize != s_cachedFontSize || font != s_cachedFont) {
+            s_cachedResult = EllipsizeToWidth(name, maxWidth);
+            s_cachedName = name;
+            s_cachedMaxWidth = maxWidth;
+            s_cachedFontSize = fontSize;
+            s_cachedFont = font;
+        }
+        return s_cachedResult;
+    }
+
+    constexpr float kSearchBarWidthFraction = 0.3f;
+    constexpr float kSearchBarMinWidth = 160.0f;
+    constexpr float kSearchBarMaxWidth = 360.0f;
+
+    void RenderConfigGuiSearchBar(bool basicModeEnabled, float totalWidth) {
 #ifdef TOOLSCREEN_GUI_INTEGRATION_TESTS
         std::string requestedQuery;
         if (ConsumeGuiTestConfigSearchQueryRequest(requestedQuery)) {
@@ -984,7 +1052,7 @@ void SetNextSettingsModalCentered(ImGuiCond condition = ImGuiCond_Always) {
             s_configGuiSearchState.focusInput = false;
         }
 
-        ImGui::SetNextItemWidth((std::max)(220.0f, ImGui::GetContentRegionAvail().x - clearButtonWidth));
+        ImGui::SetNextItemWidth((std::max)(ImGui::GetFrameHeight(), totalWidth - clearButtonWidth));
         const bool changed = ImGui::InputTextWithHint("##ConfigGuiSearch", trc("config.search_hint"), &s_configGuiSearchState.query);
         RecordConfigSearchSectionInteractionRect("config.search_bar");
 
@@ -3020,8 +3088,12 @@ void RenderSettingsGUI() {
 
     std::string windowTitle = "Toolscreen v" + GetToolscreenVersionString() + " by jojoe77777";
 
+    const float titleBarExtraPad = 6.0f * scaleFactor;
+    const ImVec2 baseFramePadding = ImGui::GetStyle().FramePadding;
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(baseFramePadding.x, baseFramePadding.y + titleBarExtraPad));
     bool windowOpen = true;
     const bool windowVisible = ImGui::Begin(windowTitle.c_str(), &windowOpen, ImGuiWindowFlags_NoCollapse);
+    ImGui::PopStyleVar();
     if (!windowOpen) {
         CloseSettingsGuiWindow();
     }
@@ -3029,25 +3101,43 @@ void RenderSettingsGUI() {
     if (windowVisible && windowOpen) {
         bool openProfileManagerPopup = false;
         ImVec2 profileManagerPopupAnchor(0.0f, 0.0f);
+        const ImRect titleBarRect = ImGui::GetCurrentWindow()->TitleBarRect();
 
         {
             PROFILE_SCOPE_CAT("Settings Header Controls", "ImGui");
 
-            static std::chrono::steady_clock::time_point s_lastScreenshotTime{};
-            auto now = std::chrono::steady_clock::now();
-            bool showCopied = std::chrono::duration_cast<std::chrono::seconds>(now - s_lastScreenshotTime).count() < 3;
-
-            const char* buttonLabel = showCopied ? trc("button.screenshot.copied") : trc("button.screenshot");
-            float buttonWidth = ImGui::CalcTextSize(buttonLabel).x + ImGui::GetStyle().FramePadding.x * 2.0f;
             float iconSize = ImGui::GetFrameHeight();
             float margin = ImGui::GetStyle().ItemSpacing.x;
-            const float topBarY = 30.0f * scaleFactor;
-            const float screenshotButtonX = ImGui::GetWindowContentRegionMax().x - buttonWidth;
-            const float discordButtonX = screenshotButtonX - margin - iconSize;
-            const float languageButtonX = discordButtonX - margin - iconSize;
-            const float profileButtonX = languageButtonX - margin - iconSize;
-            const float editorButtonX = profileButtonX - margin - iconSize;
+
+            const std::string activeProfileName = g_profilesConfig.activeProfile;
+            std::string currentLangName = g_config.lang;
+            for (const auto& [langCode, langNameVal] : GetLangs().items()) {
+                if (langCode == g_config.lang) { currentLangName = langNameVal.get<std::string>(); break; }
+            }
+
+            const float pillH = iconSize;
+            const float pillPadX = margin;
+            const float langPillW = pillH;
+
+            const ImGuiStyle& titleStyle = ImGui::GetStyle();
+            const float closeButtonReserve = titleStyle.FramePadding.x + ImGui::GetFontSize() + titleStyle.ItemInnerSpacing.x;
+            const float titleBarRightX = titleBarRect.Max.x - closeButtonReserve - margin;
+            const float titleTextW = ImGui::CalcTextSize(windowTitle.c_str(), nullptr, true).x;
+            const float titleBarLeftLimit = titleBarRect.Min.x + titleStyle.FramePadding.x + titleTextW + margin;
+            const float profilePillChromeW = pillH + pillPadX * 0.5f + pillPadX;
+            const float profileNameMaxW = (std::max)(
+                0.0f, titleBarRightX - titleBarLeftLimit - langPillW - iconSize * 2.0f - margin * 3.0f - profilePillChromeW);
+            const std::string& profileDisplayName = GetHeaderProfileDisplayName(activeProfileName, profileNameMaxW);
+            const float profileNameW = ImGui::CalcTextSize(profileDisplayName.c_str()).x;
+            const float profilePillW = profilePillChromeW + profileNameW;
+            const float titleBarPillY = titleBarRect.Min.y + (titleBarRect.GetHeight() - pillH) * 0.5f;
+            const float profilePillX = titleBarRightX - profilePillW;
+            const float discordIconX = profilePillX - margin - iconSize;
+            const float langPillX = discordIconX - margin - langPillW;
+            const float editorIconX = langPillX - margin - iconSize;
+
             ImVec2 savedCursor = ImGui::GetCursorPos();
+            ImGui::PushClipRect(titleBarRect.Min, titleBarRect.Max, false);
 
             {
                 float activeColor[3] = { kDefaultProfileColor[0], kDefaultProfileColor[1], kDefaultProfileColor[2] };
@@ -3060,33 +3150,54 @@ void RenderSettingsGUI() {
                     }
                 }
 
-                ImGui::SetCursorPos(ImVec2(profileButtonX, topBarY));
-                ImGui::InvisibleButton("##profileManagerIcon", ImVec2(iconSize, iconSize));
+                const ImVec4 tabColor = ImGui::GetStyle().Colors[ImGuiCol_Tab];
+                ImDrawList* drawList = ImGui::GetWindowDrawList();
+
+                ImGui::SetCursorScreenPos(ImVec2(profilePillX, titleBarPillY));
+                const bool profileActivated = ImGui::InvisibleButton("##profileManagerIcon", ImVec2(profilePillW, pillH));
 
                 const bool hovered = ImGui::IsItemHovered();
                 const bool held = ImGui::IsItemActive();
-                const ImVec2 iconMin = ImGui::GetItemRectMin();
-                const ImVec2 iconMax = ImGui::GetItemRectMax();
+                const ImVec2 pillMin = ImGui::GetItemRectMin();
+                const ImVec2 pillMax = ImGui::GetItemRectMax();
+
+                const float radius = pillH * 0.5f;
+                const ImVec2 circleCenter(pillMin.x + radius, pillMin.y + radius);
+
                 const float colorBoost = held ? 0.18f : (hovered ? 0.10f : 0.0f);
-                const ImVec4 fillColor((std::min)(1.0f, activeColor[0] + colorBoost),
-                                       (std::min)(1.0f, activeColor[1] + colorBoost),
-                                       (std::min)(1.0f, activeColor[2] + colorBoost), 1.0f);
-                const ImU32 fillColorU32 = ImGui::ColorConvertFloat4ToU32(fillColor);
-                const ImU32 borderColorU32 = ImGui::ColorConvertFloat4ToU32(
-                    hovered ? ImGui::GetStyle().Colors[ImGuiCol_ButtonHovered] : ImGui::GetStyle().Colors[ImGuiCol_Border]);
-                ImDrawList* drawList = ImGui::GetWindowDrawList();
-                drawList->AddRectFilled(iconMin, iconMax, fillColorU32, 5.0f * scaleFactor);
-                drawList->AddRect(iconMin, iconMax, borderColorU32, 5.0f * scaleFactor);
+                const ImU32 circleColor = ImGui::ColorConvertFloat4ToU32(ImVec4(
+                    (std::min)(1.0f, activeColor[0] + colorBoost),
+                    (std::min)(1.0f, activeColor[1] + colorBoost),
+                    (std::min)(1.0f, activeColor[2] + colorBoost), 1.0f));
+                drawList->AddCircleFilled(circleCenter, radius, circleColor);
+                drawList->AddCircle(circleCenter, radius, ImGui::ColorConvertFloat4ToU32(
+                    hovered ? ImGui::GetStyle().Colors[ImGuiCol_ButtonHovered] : ImGui::GetStyle().Colors[ImGuiCol_Border]));
 
-                                const std::string glyph = GetProfileButtonGlyph(g_profilesConfig.activeProfile);
-                                const ImVec2 glyphSize = ImGui::CalcTextSize(glyph.c_str());
-                drawList->AddText(ImVec2(iconMin.x + (iconSize - glyphSize.x) * 0.5f,
-                                         iconMin.y + (iconSize - glyphSize.y) * 0.5f),
-                                                                    IM_COL32(255, 255, 255, 255), glyph.c_str());
+                const std::string glyph = GetProfileButtonGlyph(g_profilesConfig.activeProfile);
+                const ImVec2 glyphSize = ImGui::CalcTextSize(glyph.c_str());
+                drawList->AddText(ImVec2(circleCenter.x - glyphSize.x * 0.5f, circleCenter.y - glyphSize.y * 0.5f),
+                                  IM_COL32(255, 255, 255, 255), glyph.c_str());
 
-                if (ImGui::IsItemClicked()) {
+                const float boxX = pillMin.x + pillH + pillPadX * 0.5f;
+                const ImVec2 boxMin(boxX, pillMin.y);
+                const ImVec2 boxMax(pillMax.x, pillMax.y);
+                const ImU32 boxColor = ImGui::ColorConvertFloat4ToU32(ImVec4(
+                    (std::min)(1.0f, tabColor.x + colorBoost),
+                    (std::min)(1.0f, tabColor.y + colorBoost),
+                    (std::min)(1.0f, tabColor.z + colorBoost), tabColor.w));
+                drawList->AddRectFilled(boxMin, boxMax, boxColor, 4.0f * scaleFactor);
+                drawList->AddRect(boxMin, boxMax, ImGui::ColorConvertFloat4ToU32(
+                    hovered ? ImGui::GetStyle().Colors[ImGuiCol_ButtonHovered] : ImGui::GetStyle().Colors[ImGuiCol_Border]),
+                    4.0f * scaleFactor);
+
+                const ImVec2 nameSize = ImGui::CalcTextSize(profileDisplayName.c_str());
+                drawList->AddText(
+                    ImVec2(boxMin.x + (boxMax.x - boxMin.x - nameSize.x) * 0.5f, boxMin.y + (pillH - nameSize.y) * 0.5f),
+                    IM_COL32(255, 255, 255, 255), profileDisplayName.c_str());
+
+                if (profileActivated) {
                     openProfileManagerPopup = true;
-                    profileManagerPopupAnchor = ImVec2(iconMin.x, iconMax.y + margin);
+                    profileManagerPopupAnchor = ImVec2(pillMin.x, pillMax.y + margin);
                 }
                 if (hovered) {
                     ImGui::SetTooltip("%s", tr("profiles.header_button", g_profilesConfig.activeProfile).c_str());
@@ -3096,39 +3207,46 @@ void RenderSettingsGUI() {
             {
                 static GLuint s_languageTexture = 0;
                 static HGLRC s_languageLastCtx = NULL;
-                ImTextureID languageTexture = 0;
-                if (GetRenderBackend() == RenderBackend::Vulkan) {
-                    uintptr_t texture = 0;
-                    if (VulkanRenderer::GetBundledGuiTexture(
-                            IDR_LANGUAGE_PNG, texture)) {
-                        languageTexture = static_cast<ImTextureID>(texture);
-                    }
-                } else {
-                    HGLRC currentCtx = wglGetCurrentContext();
-                    if (currentCtx != s_languageLastCtx) {
-                        s_languageTexture = 0;
-                        s_languageLastCtx = currentCtx;
-                    }
-                    LoadEmbeddedResourceTexture(
-                        s_languageTexture, IDR_LANGUAGE_PNG);
-                    languageTexture =
-                        static_cast<ImTextureID>(s_languageTexture);
-                }
+                const ImTextureID languageTexture = ResolveHeaderIconTexture(s_languageTexture, s_languageLastCtx, IDR_LANGUAGE_PNG);
 
-                float iconSize = ImGui::GetFrameHeight();
-                ImGui::SetCursorPos(ImVec2(languageButtonX, topBarY));
                 if (languageTexture != 0) {
-                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.1f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1, 1, 1, 0.2f));
-                    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
-                    if (ImGui::ImageButton("##language", languageTexture, ImVec2(iconSize, iconSize))) {
+                    float iconSize = ImGui::GetFrameHeight();
+                    const ImVec4 tabColor = ImGui::GetStyle().Colors[ImGuiCol_Tab];
+                    ImDrawList* langDrawList = ImGui::GetWindowDrawList();
+
+                    ImGui::SetCursorScreenPos(ImVec2(langPillX, titleBarPillY));
+                    const bool langActivated = ImGui::InvisibleButton("##languagePill", ImVec2(langPillW, pillH));
+                    const bool langHovered = ImGui::IsItemHovered();
+                    const bool langHeld = ImGui::IsItemActive();
+                    const ImVec2 langPillMin = ImGui::GetItemRectMin();
+                    const ImVec2 langPillMax = ImGui::GetItemRectMax();
+
+                    if (langActivated) {
                         ImGui::OpenPopup("##LanguagePopup");
                     }
-                    ImGui::PopStyleVar();
-                    ImGui::PopStyleColor(3);
-                } else if (ImGui::Button("L##language", ImVec2(iconSize, iconSize))) {
-                    ImGui::OpenPopup("##LanguagePopup");
+
+                    const float colorBoost = langHeld ? 0.18f : (langHovered ? 0.10f : 0.0f);
+
+                    if (langHovered || langHeld) {
+                        const ImU32 langHighlightColor = ImGui::ColorConvertFloat4ToU32(ImVec4(
+                            (std::min)(1.0f, tabColor.x + colorBoost),
+                            (std::min)(1.0f, tabColor.y + colorBoost),
+                            (std::min)(1.0f, tabColor.z + colorBoost), tabColor.w));
+                        langDrawList->AddRectFilled(langPillMin, langPillMax, langHighlightColor, 4.0f * scaleFactor);
+                    }
+
+                    const ImVec2 imgMin(langPillMin.x, langPillMin.y);
+                    const ImVec2 imgMax(langPillMin.x + iconSize, langPillMin.y + iconSize);
+                    langDrawList->AddImage(languageTexture, imgMin, imgMax);
+
+                    if (langHovered) {
+                        ImGui::SetTooltip("%s", currentLangName.c_str());
+                    }
+                } else {
+                    ImGui::SetCursorScreenPos(ImVec2(langPillX, titleBarPillY));
+                    if (ImGui::Button("L##language", ImVec2(langPillW, pillH))) {
+                        ImGui::OpenPopup("##LanguagePopup");
+                    }
                 }
 
                 if (ImGui::BeginPopup("##LanguagePopup")) {
@@ -3153,82 +3271,17 @@ void RenderSettingsGUI() {
                 }
             }
 
-            {
-                static GLuint s_discordTexture = 0;
-                static HGLRC s_discordLastCtx = NULL;
-                ImTextureID discordTexture = 0;
-                if (GetRenderBackend() == RenderBackend::Vulkan) {
-                    uintptr_t texture = 0;
-                    if (VulkanRenderer::GetBundledGuiTexture(
-                            IDR_DISCORD_PNG, texture)) {
-                        discordTexture = static_cast<ImTextureID>(texture);
-                    }
-                } else {
-                    HGLRC currentCtx = wglGetCurrentContext();
-                    if (currentCtx != s_discordLastCtx) {
-                        s_discordTexture = 0;
-                        s_discordLastCtx = currentCtx;
-                    }
-                    LoadEmbeddedResourceTexture(
-                        s_discordTexture, IDR_DISCORD_PNG);
-                    discordTexture =
-                        static_cast<ImTextureID>(s_discordTexture);
-                }
-
-                float iconSize = ImGui::GetFrameHeight();
-                ImGui::SetCursorPos(ImVec2(discordButtonX, topBarY));
-                if (discordTexture != 0) {
-                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.1f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1, 1, 1, 0.2f));
-                    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
-                    if (ImGui::ImageButton("##discord", discordTexture, ImVec2(iconSize, iconSize))) {
-                        ShellExecuteW(NULL, L"open", DISCORD_URL, NULL, NULL, SW_SHOWNORMAL);
-                    }
-                    ImGui::PopStyleVar();
-                    ImGui::PopStyleColor(3);
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip(trc("tooltip.join_discord"));
-                    }
-                } else if (ImGui::Button("D##discord", ImVec2(iconSize, iconSize))) {
-                    ShellExecuteW(NULL, L"open", DISCORD_URL, NULL, NULL, SW_SHOWNORMAL);
-                }
-            }
-
-            ImGui::SetCursorPos(ImVec2(screenshotButtonX, topBarY));
-
-            if (ImGui::Button(buttonLabel)) {
-                g_screenshotRequested = true;
-                s_lastScreenshotTime = std::chrono::steady_clock::now();
-            }
-
             static GLuint s_editorTexture = 0;
             static HGLRC s_editorLastCtx = NULL;
-            ImTextureID editorTexture = 0;
-            if (GetRenderBackend() == RenderBackend::Vulkan) {
-                uintptr_t texture = 0;
-                if (VulkanRenderer::GetBundledGuiTexture(
-                        IDR_EDITOR_PNG, texture)) {
-                    editorTexture = static_cast<ImTextureID>(texture);
-                }
-            } else {
-                HGLRC editorCtx = wglGetCurrentContext();
-                if (editorCtx != s_editorLastCtx) {
-                    s_editorTexture = 0;
-                    s_editorLastCtx = editorCtx;
-                }
-                LoadEmbeddedResourceTexture(
-                    s_editorTexture, IDR_EDITOR_PNG);
-                editorTexture = static_cast<ImTextureID>(s_editorTexture);
-            }
+            const ImTextureID editorTexture = ResolveHeaderIconTexture(s_editorTexture, s_editorLastCtx, IDR_EDITOR_PNG);
             if (editorTexture != 0) {
                 const bool editorOn = g_overlayEditorMode.load(std::memory_order_relaxed);
-                ImGui::SetCursorPos(ImVec2(editorButtonX, topBarY));
+                ImGui::SetCursorScreenPos(ImVec2(editorIconX, titleBarPillY));
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.1f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1, 1, 1, 0.2f));
                 ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
-                const ImVec4 tint = editorOn ? ImVec4(1.0f, 0.59f, 0.16f, 1.0f) : ImVec4(0.62f, 0.62f, 0.62f, 0.9f);
+                const ImVec4 tint = editorOn ? ImVec4(0.20f, 1.00f, 0.20f, 1.0f) : ImVec4(0.62f, 0.62f, 0.62f, 0.9f);
                 if (ImGui::ImageButton("##EditorToggle", editorTexture, ImVec2(iconSize, iconSize),
                                        ImVec2(0, 0), ImVec2(1, 1), ImVec4(0, 0, 0, 0), tint)) {
                     g_overlayEditorMode.store(!editorOn, std::memory_order_relaxed);
@@ -3240,12 +3293,36 @@ void RenderSettingsGUI() {
                 }
             } else {
                 const bool editorOn = g_overlayEditorMode.load(std::memory_order_relaxed);
-                ImGui::SetCursorPos(ImVec2(editorButtonX, topBarY));
+                ImGui::SetCursorScreenPos(ImVec2(editorIconX, titleBarPillY));
                 if (ImGui::Button(editorOn ? "E*##EditorToggle" : "E##EditorToggle", ImVec2(iconSize, iconSize))) {
                     g_overlayEditorMode.store(!editorOn, std::memory_order_relaxed);
                 }
             }
 
+            {
+                static GLuint s_discordTexture = 0;
+                static HGLRC s_discordLastCtx = NULL;
+                const ImTextureID discordTexture = ResolveHeaderIconTexture(s_discordTexture, s_discordLastCtx, IDR_DISCORD_PNG);
+                ImGui::SetCursorScreenPos(ImVec2(discordIconX, titleBarPillY));
+                if (discordTexture != 0) {
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.1f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1, 1, 1, 0.2f));
+                    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
+                    if (ImGui::ImageButton("##discord", discordTexture, ImVec2(iconSize, iconSize))) {
+                        ShellExecuteW(NULL, L"open", DISCORD_URL, NULL, NULL, SW_SHOWNORMAL);
+                    }
+                    ImGui::PopStyleVar();
+                    ImGui::PopStyleColor(3);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("%s", trc("tooltip.join_discord"));
+                    }
+                } else if (ImGui::Button("D##discord", ImVec2(iconSize, iconSize))) {
+                    ShellExecuteW(NULL, L"open", DISCORD_URL, NULL, NULL, SW_SHOWNORMAL);
+                }
+            }
+
+            ImGui::PopClipRect();
             ImGui::SetCursorPos(savedCursor);
         }
 
@@ -3260,6 +3337,14 @@ void RenderSettingsGUI() {
                 g_config.basicModeEnabled = false;
                 g_configIsDirty = true;
             }
+
+            ImGui::SameLine();
+            const float searchBarRightX = ImGui::GetWindowContentRegionMax().x;
+            const float searchBarWidth = (std::clamp)(ImGui::GetWindowWidth() * kSearchBarWidthFraction,
+                                                      kSearchBarMinWidth * scaleFactor, kSearchBarMaxWidth * scaleFactor);
+            const float searchBarX = (std::max)(ImGui::GetCursorPosX(), searchBarRightX - searchBarWidth);
+            ImGui::SetCursorPosX(searchBarX);
+            RenderConfigGuiSearchBar(g_config.basicModeEnabled, searchBarRightX - searchBarX);
         }
 
         {
@@ -3316,11 +3401,11 @@ void RenderSettingsGUI() {
             }
 
             ImGui::SetNextWindowPos(s_profilePopupAnchor, ImGuiCond_Appearing);
-            ImGui::SetNextWindowSize(ImVec2(720.0f * windowScaleFactor, 400.0f * windowScaleFactor), ImGuiCond_Appearing);
+            ImGui::SetNextWindowSize(ImVec2(720.0f * windowScaleFactor, 488.0f * windowScaleFactor), ImGuiCond_Appearing);
             if (ImGui::BeginPopup("##ProfileManagerPopup")) {
                 ImGui::TextUnformatted(tr("profiles.header_button", g_profilesConfig.activeProfile).c_str());
                 ImGui::Separator();
-                ImGui::BeginChild("##profileManagerPanel", ImVec2(0.0f, 330.0f * scaleFactor), false);
+                ImGui::BeginChild("##profileManagerPanel", ImVec2(0.0f, 0.0f), false);
                 ImGui::TextWrapped("%s", trc("profiles.manage_hint"));
                 ImGui::Spacing();
 
@@ -3331,7 +3416,15 @@ void RenderSettingsGUI() {
                     ImGui::TableNextColumn();
                     ImGui::BeginChild("##profileManagerListPane", ImVec2(0.0f, 0.0f), false);
                     ImGui::SeparatorText(trc("profiles.list_title"));
-                    if (ImGui::BeginListBox("##profileManagerListBox", ImVec2(-FLT_MIN, 180.0f * scaleFactor))) {
+                    
+                    float newProfileSectionHeight = ImGui::GetTextLineHeightWithSpacing() * 2.0f
+                        + ImGui::GetFrameHeightWithSpacing() * 2.0f
+                        + ImGui::GetTextLineHeightWithSpacing()
+                        + ImGui::GetStyle().ItemSpacing.y * 3.0f;
+                    float listHeight = ImGui::GetContentRegionAvail().y - newProfileSectionHeight;
+                    if (listHeight < 60.0f * scaleFactor) listHeight = 60.0f * scaleFactor;
+                    
+                    if (ImGui::BeginListBox("##profileManagerListBox", ImVec2(-FLT_MIN, listHeight))) {
                         for (const auto& pm : g_profilesConfig.profiles) {
                             bool selected = (pm.name == g_profilesConfig.activeProfile);
                             std::string label = pm.name;
@@ -3350,8 +3443,11 @@ void RenderSettingsGUI() {
                     }
 
                     ImGui::Spacing();
+                    ImGui::Spacing();
+                    ImGui::Separator();
                     ImGui::SeparatorText(trc("profiles.new_popup"));
                     ImGui::TextUnformatted(trc("label.name"));
+                    ImGui::SetNextItemWidth(-FLT_MIN);
                     ImGui::InputText("##newProfileNameInline", &s_newProfileName);
                     const bool newNameValid = IsValidProfileName(s_newProfileName);
                     if (!s_newProfileName.empty() && !newNameValid) {
@@ -3369,9 +3465,9 @@ void RenderSettingsGUI() {
                     ImGui::EndChild();
 
                     ImGui::TableNextColumn();
-                    ImGui::BeginChild("##profileManagerEditorPane", ImVec2(0.0f, 0.0f), false);
+                    ImGui::BeginChild("##profileManagerEditorPane", ImVec2(0.0f, 0.0f), false, ImGuiWindowFlags_HorizontalScrollbar);
                     ImGui::SeparatorText(trc("profiles.rename_popup"));
-                    ImGui::TextUnformatted(tr("profiles.header_button", g_profilesConfig.activeProfile).c_str());
+                    ImGui::TextWrapped("%s", tr("profiles.header_button", g_profilesConfig.activeProfile).c_str());
                     ImGui::TextUnformatted(trc("label.name"));
                     ImGui::InputText("##renameProfileNameInline", &s_renameBuffer);
 
@@ -3518,8 +3614,6 @@ void RenderSettingsGUI() {
 
         {
             PROFILE_SCOPE_CAT("Settings Tabs", "ImGui");
-
-            RenderConfigGuiSearchBar(g_config.basicModeEnabled);
 
             if (!g_scrollToMirrorName.empty() || !g_scrollToMirrorGroupName.empty() || !g_scrollToImageName.empty() || !g_scrollToWindowOverlayName.empty()) {
                 if (g_config.basicModeEnabled) { g_config.basicModeEnabled = false; g_configIsDirty = true; }
