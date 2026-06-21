@@ -907,6 +907,7 @@ struct NinjabrainOverlayConfig {
     bool onlyOnObs = false;
     bool hideIfStale = false;
     int hideIfStaleDelaySeconds = 30;
+    bool showOnNbbReset = false;
     bool showEyeOverlay = true;
     int shownPredictions = 5;
     bool showAllPreds = false;

@@ -432,7 +432,14 @@ if (BeginSelectableSettingsNestedTabItem(trc("ninjabrain.title"))) {
 
             ImGui::Columns(1);
 
-            if (ImGui::Checkbox((std::string(trc("ninjabrain.always_show")) + "##nb").c_str(), &nb.alwaysShow)) changed = true;
+            if (ImGui::Checkbox((std::string(trc("ninjabrain.show_on_nbb_reset")) + "##nb").c_str(), &nb.showOnNbbReset)) {
+                if (nb.showOnNbbReset) nb.alwaysShow = false;
+                changed = true;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s", trc("ninjabrain.tooltip_show_on_nbb_reset"));
+            }
+                        if (ImGui::Checkbox((std::string(trc("ninjabrain.always_show")) + "##nb").c_str(), &nb.alwaysShow)) { if (nb.alwaysShow) nb.showOnNbbReset = false; changed = true; }
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("%s", trc("ninjabrain.tooltip_always_show"));
             }

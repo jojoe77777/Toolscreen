@@ -2391,6 +2391,7 @@ void ConfigToToml(const Config& config, toml::table& out) {
         nb.insert("onlyOnObs",            o.onlyOnObs);
         nb.insert("hideIfStale",          o.hideIfStale);
         nb.insert("hideIfStaleDelaySeconds", o.hideIfStaleDelaySeconds);
+        nb.insert("showOnNbbReset",       o.showOnNbbReset);
         { toml::array arr; for (auto& m : o.allowedModes) arr.push_back(m); nb.insert("allowedModes", arr); }
         toml::array colArr;
         for (auto& col : o.columns) {
@@ -2721,6 +2722,7 @@ void ConfigFromToml(const toml::table& tbl, Config& config) {
         c.onlyOnObs            = GetOr(*nb, "onlyOnObs",            false);
         c.hideIfStale          = GetOr(*nb, "hideIfStale",          false);
         c.hideIfStaleDelaySeconds = GetOr(*nb, "hideIfStaleDelaySeconds", 10);
+        c.showOnNbbReset       = GetOr(*nb, "showOnNbbReset",       false);
         if (c.layoutStyle != "compact" && c.layoutStyle != "classicWindow") { c.layoutStyle = "compact"; }
         if (c.apiBaseUrl.empty()) { c.apiBaseUrl = ConfigDefaults::CONFIG_NINJABRAIN_API_BASE_URL; }
         if (c.titleText.empty()) { c.titleText = "Ninjabrain Bot"; }
