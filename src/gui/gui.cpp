@@ -2994,8 +2994,13 @@ void RenderSettingsGUI() {
             float iconSize = ImGui::GetFrameHeight();
             float margin = ImGui::GetStyle().ItemSpacing.x;
             const float topBarY = 30.0f * scaleFactor;
+            const std::string activeProfileName = g_profilesConfig.activeProfile;
+            const float pillH = iconSize;
+            const float pillPadX = margin;
+            const float profileNameW = ImGui::CalcTextSize(activeProfileName.c_str()).x;
+            const float profilePillW = pillH + pillPadX * 0.5f + profileNameW + pillPadX;
             const float languageButtonX = ImGui::GetWindowContentRegionMax().x - iconSize;
-            const float profileButtonX = languageButtonX - margin - iconSize;
+            const float profileButtonX = languageButtonX - margin - profilePillW;
             const float editorButtonX = profileButtonX - margin - iconSize;
             ImVec2 savedCursor = ImGui::GetCursorPos();
 
@@ -3010,33 +3015,54 @@ void RenderSettingsGUI() {
                     }
                 }
 
+                const ImVec4 tabColor = ImGui::GetStyle().Colors[ImGuiCol_Tab];
+                ImDrawList* drawList = ImGui::GetWindowDrawList();
+
                 ImGui::SetCursorPos(ImVec2(profileButtonX, topBarY));
-                ImGui::InvisibleButton("##profileManagerIcon", ImVec2(iconSize, iconSize));
+                ImGui::InvisibleButton("##profileManagerIcon", ImVec2(profilePillW, pillH));
 
                 const bool hovered = ImGui::IsItemHovered();
                 const bool held = ImGui::IsItemActive();
-                const ImVec2 iconMin = ImGui::GetItemRectMin();
-                const ImVec2 iconMax = ImGui::GetItemRectMax();
-                const float colorBoost = held ? 0.18f : (hovered ? 0.10f : 0.0f);
-                const ImVec4 fillColor((std::min)(1.0f, activeColor[0] + colorBoost),
-                                       (std::min)(1.0f, activeColor[1] + colorBoost),
-                                       (std::min)(1.0f, activeColor[2] + colorBoost), 1.0f);
-                const ImU32 fillColorU32 = ImGui::ColorConvertFloat4ToU32(fillColor);
-                const ImU32 borderColorU32 = ImGui::ColorConvertFloat4ToU32(
-                    hovered ? ImGui::GetStyle().Colors[ImGuiCol_ButtonHovered] : ImGui::GetStyle().Colors[ImGuiCol_Border]);
-                ImDrawList* drawList = ImGui::GetWindowDrawList();
-                drawList->AddRectFilled(iconMin, iconMax, fillColorU32, 5.0f * scaleFactor);
-                drawList->AddRect(iconMin, iconMax, borderColorU32, 5.0f * scaleFactor);
+                const ImVec2 pillMin = ImGui::GetItemRectMin();
+                const ImVec2 pillMax = ImGui::GetItemRectMax();
 
-                                const std::string glyph = GetProfileButtonGlyph(g_profilesConfig.activeProfile);
-                                const ImVec2 glyphSize = ImGui::CalcTextSize(glyph.c_str());
-                drawList->AddText(ImVec2(iconMin.x + (iconSize - glyphSize.x) * 0.5f,
-                                         iconMin.y + (iconSize - glyphSize.y) * 0.5f),
-                                                                    IM_COL32(255, 255, 255, 255), glyph.c_str());
+                const float radius = pillH * 0.5f;
+                const ImVec2 circleCenter(pillMin.x + radius, pillMin.y + radius);
+
+                const float colorBoost = held ? 0.18f : (hovered ? 0.10f : 0.0f);
+                const ImU32 circleColor = ImGui::ColorConvertFloat4ToU32(ImVec4(
+                    (std::min)(1.0f, activeColor[0] + colorBoost),
+                    (std::min)(1.0f, activeColor[1] + colorBoost),
+                    (std::min)(1.0f, activeColor[2] + colorBoost), 1.0f));
+                drawList->AddCircleFilled(circleCenter, radius, circleColor);
+                drawList->AddCircle(circleCenter, radius, ImGui::ColorConvertFloat4ToU32(
+                    hovered ? ImGui::GetStyle().Colors[ImGuiCol_ButtonHovered] : ImGui::GetStyle().Colors[ImGuiCol_Border]));
+
+                const std::string glyph = GetProfileButtonGlyph(g_profilesConfig.activeProfile);
+                const ImVec2 glyphSize = ImGui::CalcTextSize(glyph.c_str());
+                drawList->AddText(ImVec2(circleCenter.x - glyphSize.x * 0.5f, circleCenter.y - glyphSize.y * 0.5f),
+                                  IM_COL32(255, 255, 255, 255), glyph.c_str());
+
+                const float boxX = pillMin.x + pillH + pillPadX * 0.5f;
+                const ImVec2 boxMin(boxX, pillMin.y);
+                const ImVec2 boxMax(pillMax.x, pillMax.y);
+                const ImU32 boxColor = ImGui::ColorConvertFloat4ToU32(ImVec4(
+                    (std::min)(1.0f, tabColor.x + colorBoost),
+                    (std::min)(1.0f, tabColor.y + colorBoost),
+                    (std::min)(1.0f, tabColor.z + colorBoost), tabColor.w));
+                drawList->AddRectFilled(boxMin, boxMax, boxColor, 4.0f * scaleFactor);
+                drawList->AddRect(boxMin, boxMax, ImGui::ColorConvertFloat4ToU32(
+                    hovered ? ImGui::GetStyle().Colors[ImGuiCol_ButtonHovered] : ImGui::GetStyle().Colors[ImGuiCol_Border]),
+                    4.0f * scaleFactor);
+
+                const ImVec2 nameSize = ImGui::CalcTextSize(activeProfileName.c_str());
+                drawList->AddText(
+                    ImVec2(boxMin.x + (boxMax.x - boxMin.x - nameSize.x) * 0.5f, boxMin.y + (pillH - nameSize.y) * 0.5f),
+                    IM_COL32(255, 255, 255, 255), activeProfileName.c_str());
 
                 if (ImGui::IsItemClicked()) {
                     openProfileManagerPopup = true;
-                    profileManagerPopupAnchor = ImVec2(iconMin.x, iconMax.y + margin);
+                    profileManagerPopupAnchor = ImVec2(pillMin.x, pillMax.y + margin);
                 }
                 if (hovered) {
                     ImGui::SetTooltip("%s", tr("profiles.header_button", g_profilesConfig.activeProfile).c_str());
