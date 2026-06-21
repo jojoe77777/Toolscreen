@@ -2991,18 +2991,10 @@ void RenderSettingsGUI() {
         {
             PROFILE_SCOPE_CAT("Settings Header Controls", "ImGui");
 
-            static std::chrono::steady_clock::time_point s_lastScreenshotTime{};
-            auto now = std::chrono::steady_clock::now();
-            bool showCopied = std::chrono::duration_cast<std::chrono::seconds>(now - s_lastScreenshotTime).count() < 3;
-
-            const char* buttonLabel = showCopied ? trc("button.screenshot.copied") : trc("button.screenshot");
-            float buttonWidth = ImGui::CalcTextSize(buttonLabel).x + ImGui::GetStyle().FramePadding.x * 2.0f;
             float iconSize = ImGui::GetFrameHeight();
             float margin = ImGui::GetStyle().ItemSpacing.x;
             const float topBarY = 30.0f * scaleFactor;
-            const float screenshotButtonX = ImGui::GetWindowContentRegionMax().x - buttonWidth;
-            const float discordButtonX = screenshotButtonX - margin - iconSize;
-            const float languageButtonX = discordButtonX - margin - iconSize;
+            const float languageButtonX = ImGui::GetWindowContentRegionMax().x - iconSize;
             const float profileButtonX = languageButtonX - margin - iconSize;
             const float editorButtonX = profileButtonX - margin - iconSize;
             ImVec2 savedCursor = ImGui::GetCursorPos();
@@ -3096,42 +3088,6 @@ void RenderSettingsGUI() {
                         ImGui::EndPopup(); 
                     }
                 }
-            }
-
-            {
-                static GLuint s_discordTexture = 0;
-                static HGLRC s_discordLastCtx = NULL;
-                HGLRC currentCtx = wglGetCurrentContext();
-                if (currentCtx != s_discordLastCtx) {
-                    s_discordTexture = 0;
-                    s_discordLastCtx = currentCtx;
-                }
-
-                LoadEmbeddedResourceTexture(s_discordTexture, IDR_DISCORD_PNG);
-
-                if (s_discordTexture != 0) {
-                    float iconSize = ImGui::GetFrameHeight();
-                    ImGui::SetCursorPos(ImVec2(discordButtonX, topBarY));
-                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.1f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1, 1, 1, 0.2f));
-                    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
-                    if (ImGui::ImageButton("##discord", (ImTextureID)(intptr_t)s_discordTexture, ImVec2(iconSize, iconSize))) {
-                        ShellExecuteW(NULL, L"open", DISCORD_URL, NULL, NULL, SW_SHOWNORMAL);
-                    }
-                    ImGui::PopStyleVar();
-                    ImGui::PopStyleColor(3);
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip(trc("tooltip.join_discord"));
-                    }
-                }
-            }
-
-            ImGui::SetCursorPos(ImVec2(screenshotButtonX, topBarY));
-
-            if (ImGui::Button(buttonLabel)) {
-                g_screenshotRequested = true;
-                s_lastScreenshotTime = std::chrono::steady_clock::now();
             }
 
             static GLuint s_editorTexture = 0;

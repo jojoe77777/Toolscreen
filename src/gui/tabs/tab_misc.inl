@@ -10,6 +10,14 @@ if (BeginSelectableSettingsTopTabItem(trc("tabs.misc"))) {
     HelpMarker(trc("tooltip.view_licenses"));
 
     ImGui::Spacing();
+
+    if (ImGui::Button(trc("button.join_discord"))) {
+        ShellExecuteW(NULL, L"open", DISCORD_URL, NULL, NULL, SW_SHOWNORMAL);
+    }
+    ImGui::SameLine();
+    HelpMarker(trc("tooltip.join_discord"));
+
+    ImGui::Spacing();
     ImGui::SeparatorText(trc("label.toolscreen"));
     if (ImGui::Button(trc("button.open_config"))) {
         if (g_toolscreenPath.empty()) {
