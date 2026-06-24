@@ -4555,6 +4555,15 @@ InputHandlerResult HandleKeyRebinding(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
         return { false, 0 };
     }
 
+    if (rawVkCode >= 0 && rawVkCode < 256) {
+        g_keystrokesState.keysDown[rawVkCode].store(isKeyDown);
+    }
+
+    if (isKeyDown && ImGui::GetCurrentContext() && rawVkCode >= 0 && rawVkCode < 256) {
+        std::lock_guard<std::mutex> lock(g_keystrokesState.clicksMutex);
+        g_keystrokesState.keyClicks[rawVkCode].push_back(ImGui::GetTime());
+    }
+
     vkCode = rawVkCode;
     if (!isMouseButton && (uMsg == WM_KEYDOWN || uMsg == WM_SYSKEYDOWN || uMsg == WM_KEYUP || uMsg == WM_SYSKEYUP)) {
         vkCode = ResolveEffectiveKeyboardVkForMessage(uMsg, wParam, lParam);

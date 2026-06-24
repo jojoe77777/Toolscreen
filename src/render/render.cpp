@@ -4839,6 +4839,29 @@ static bool ShouldRenderCursorTrailForRequest(const SameThreadOverlayState& requ
     return true;
 }
 
+static bool ShouldRenderKeystrokesOverlayForRequest(const SameThreadOverlayState& request) {
+    auto configSnapshot = GetConfigSnapshot();
+    if (!configSnapshot) { return false; }
+
+    const auto& ks = configSnapshot->keystrokes;
+    if (!ks.enabled) { return false; }
+    if (request.excludeOnlyOnMyScreen && ks.onlyOnMyScreen) { return false; }
+    if (!request.excludeOnlyOnMyScreen && ks.onlyOnObs) { return false; }
+
+    if (!ks.allowedModes.empty()) {
+        bool modeAllowed = false;
+        for (const auto& m : ks.allowedModes) {
+            if (m == request.modeId) {
+                modeAllowed = true;
+                break;
+            }
+        }
+        if (!modeAllowed) return false;
+    }
+
+    return true;
+}
+
 #ifdef TOOLSCREEN_GUI_INTEGRATION_TESTS
 const char* GetNinjabrainOverlayRenderEligibilityFailureForIntegrationTest(const std::string& modeId,
                                                                            bool excludeOnlyOnMyScreen) {
@@ -4853,7 +4876,7 @@ static bool HasSameThreadOverlayWork(const SameThreadOverlayState& request, cons
     if (request.modeHasMirrors || request.modeHasImages || request.modeHasWindowOverlays || request.modeHasBrowserOverlays ||
         request.shouldRenderGui || request.showCursorTrail ||
         request.showPerformanceOverlay || request.showProfiler || request.showTextureGrid || request.showEyeZoom ||
-        request.showWelcomeToast || request.showRebindIndicator || renderNinjabrainOverlay) {
+        request.showWelcomeToast || request.showRebindIndicator || renderNinjabrainOverlay || ShouldRenderKeystrokesOverlayForRequest(request)) {
         return true;
     }
 
@@ -4930,9 +4953,9 @@ RECT NormalizeDragRect(POINT a, POINT b) {
 }
 }  // namespace
 
-static void RenderSameThreadImGui(const SameThreadOverlayState& request, bool renderNinjabrainOverlay) {
+static void RenderSameThreadImGui(const SameThreadOverlayState& request, bool renderNinjabrainOverlay, bool renderKeystrokesOverlay) {
     const bool shouldRenderAnyImGui = request.shouldRenderGui || request.showPerformanceOverlay || request.showProfiler ||
-                                      request.showTextureGrid || request.showEyeZoom || renderNinjabrainOverlay;
+                                      request.showTextureGrid || request.showEyeZoom || renderNinjabrainOverlay || renderKeystrokesOverlay;
     if (!shouldRenderAnyImGui) return;
 
     std::lock_guard<std::recursive_mutex> imguiLock(GetImGuiContextMutex());
@@ -5001,6 +5024,15 @@ static void RenderSameThreadImGui(const SameThreadOverlayState& request, bool re
         auto nbCfg = GetConfigSnapshot();
         if (nbCfg) {
             RenderNinjabrainOverlay(nbCfg->ninjabrainOverlay, GetNinjabrainFont(), request.modeId, request.shouldRenderGui);
+        }
+    }
+
+    // Keystrokes overlay (rendered in ImGui space)
+    if (renderKeystrokesOverlay) {
+        PROFILE_SCOPE_CAT("ImGui Keystrokes Overlay", "ImGui");
+        auto ksCfg = GetConfigSnapshot();
+        if (ksCfg) {
+            RenderKeystrokesOverlay(ksCfg->keystrokes, request.modeId, request.shouldRenderGui);
         }
     }
 
@@ -5402,7 +5434,8 @@ static bool RenderSameThreadOverlayPass(const SameThreadOverlayState& request, c
         RenderEditorSelectionHandles(s, request.fullW, request.fullH, editorMode);
     }
 
-    RenderSameThreadImGui(request, renderNinjabrainOverlay);
+    const bool renderKeystrokesOverlay = ShouldRenderKeystrokesOverlayForRequest(request);
+    RenderSameThreadImGui(request, renderNinjabrainOverlay, renderKeystrokesOverlay);
     if (request.showWelcomeToast) {
         PROFILE_SCOPE_CAT("Render Welcome Toast", "Rendering");
         RenderWelcomeToast(request.welcomeToastIsFullscreen);
@@ -10097,6 +10130,8 @@ ModeTransitionState GetModeTransitionState() {
     return state;
 }
 
+KeystrokesState g_keystrokesState;
+
 
 
 
@@ -10342,7 +10377,6 @@ static void EnsureNinjabrainOverlayIconsLoaded()
 
     BindTextureDirect(GL_TEXTURE_2D, previousTexture);
 }
-#include <algorithm>
 
 void RenderNinjabrainOverlay(const NinjabrainOverlayConfig& nb, ImFont* font, const std::string& modeId,
                              bool renderBehindImGuiWindows)
@@ -12263,4 +12297,121 @@ void RenderNinjabrainOverlay(const NinjabrainOverlayConfig& nb, ImFont* font, co
             throwsTextCol);
     }
 
+}
+
+void RenderKeystrokesOverlay(const KeystrokesConfig& ks, const std::string& modeId, bool renderBehindImGuiWindows) {
+    if (!ks.enabled) return;
+    
+    bool modeAllowed = ks.allowedModes.empty();
+    if (!modeAllowed) {
+        for (const auto& m : ks.allowedModes) if (m == modeId) { modeAllowed = true; break; }
+    }
+    if (!modeAllowed) return;
+    
+    bool stateAllowed = ks.allowedStates.empty();
+    if (!stateAllowed) {
+        const std::string currentGameState = g_gameStateBuffers[g_currentGameStateIndex.load(std::memory_order_acquire)];
+        const bool cursorVisible = IsCursorVisible();
+        for (const auto& s : ks.allowedStates) {
+            if (s == currentGameState) { stateAllowed = true; break; }
+            if (s == "any,cursor_free" && cursorVisible) { stateAllowed = true; break; }
+            if (s == "any,cursor_grabbed" && !cursorVisible) { stateAllowed = true; break; }
+            if (s == "inworld,cursor_free" && currentGameState.find("inworld") != std::string::npos && cursorVisible) { stateAllowed = true; break; }
+            if (s == "inworld,cursor_grabbed" && currentGameState.find("inworld") != std::string::npos && !cursorVisible) { stateAllowed = true; break; }
+        }
+    }
+    if (!stateAllowed) return;
+
+    ImDrawList* drawList = renderBehindImGuiWindows ? ImGui::GetBackgroundDrawList() : ImGui::GetForegroundDrawList();
+    if (!drawList) return;
+
+    float x = (float)ks.x;
+    float y = (float)ks.y;
+    float scale = ks.scale;
+    float opacity = ks.opacity;
+
+    auto getCol = [&](const Color& c) {
+        return IM_COL32((int)(c.r * 255), (int)(c.g * 255), (int)(c.b * 255), (int)(c.a * 255 * opacity));
+    };
+
+    ImU32 pBg = getCol(ks.pressedBgColor);
+    ImU32 uBg = getCol(ks.unpressedBgColor);
+    ImU32 pTxt = getCol(ks.pressedTextColor);
+    ImU32 uTxt = getCol(ks.unpressedTextColor);
+
+    float keySize = 60.0f * scale;
+    float gap = 4.0f * scale;
+    float fontSize = 24.0f * scale;
+    float rounding = 4.0f * scale;
+
+    auto drawKey = [&](float kx, float ky, float kw, float kh, const char* label, bool pressed) {
+        ImU32 bg = pressed ? pBg : uBg;
+        ImU32 txt = pressed ? pTxt : uTxt;
+        drawList->AddRectFilled(ImVec2(kx, ky), ImVec2(kx + kw, ky + kh), bg, rounding);
+        
+        if (!label || label[0] == '\0') return;
+
+        ImFont* font = ImGui::GetFont();
+        const char* s = label;
+        const char* end = s + strlen(label);
+        
+        ImVec2 totalSize = font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, label);
+        float curY = ky + (kh - totalSize.y) * 0.5f;
+
+        while (s < end) {
+            const char* line_end = strchr(s, '\n');
+            if (!line_end) line_end = end;
+            
+            ImVec2 lineSize = font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, s, line_end);
+            drawList->AddText(font, fontSize, ImVec2(kx + (kw - lineSize.x) * 0.5f, curY), txt, s, line_end);
+            
+            curY += fontSize;
+            s = (line_end < end) ? line_end + 1 : end;
+        }
+    };
+
+    for (const auto& k : ks.keys) {
+        bool pressed = (k.vk >= 0 && k.vk < 256) ? g_keystrokesState.keysDown[k.vk].load() : false;
+        
+        float kx = x + (float)k.x * scale;
+        float ky = y + (float)k.y * scale;
+        float kw = (float)k.w * scale;
+        float kh = (float)k.h * scale;
+
+        int cps = -1;
+        if (k.showCps && k.vk >= 0 && k.vk < 256) {
+            double now = ImGui::GetTime();
+            std::lock_guard<std::mutex> lock(g_keystrokesState.clicksMutex);
+            auto& clicks = g_keystrokesState.keyClicks[k.vk];
+            while (!clicks.empty() && now - clicks.front() > 1.0) clicks.erase(clicks.begin());
+            cps = (int)clicks.size();
+        }
+
+        if (k.isSpacebar) {
+            ImU32 bg = pressed ? pBg : uBg;
+            ImU32 txt = pressed ? pTxt : uTxt;
+            drawList->AddRectFilled(ImVec2(kx, ky), ImVec2(kx + kw, ky + kh), bg, rounding);
+            
+            float lineH = 4.0f * scale;
+            float lineW = kw * 0.7f;
+            float lx = kx + (kw - lineW) * 0.5f;
+            float ly = ky + (kh - lineH) * 0.5f;
+            drawList->AddRectFilled(ImVec2(lx, ly), ImVec2(lx + lineW, ly + lineH), txt, lineH * 0.5f);
+
+            if (cps != -1) {
+                char buf[32];
+                snprintf(buf, sizeof(buf), "%d CPS", cps);
+                ImFont* font = ImGui::GetFont();
+                ImVec2 lineSize = font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, buf);
+                drawList->AddText(font, fontSize, ImVec2(kx + (kw - lineSize.x) * 0.5f, ky + (kh - lineSize.y) * 0.5f), txt, buf);
+            }
+        } else {
+            std::string labelToDraw = k.label;
+            if (cps != -1) {
+                if (!labelToDraw.empty()) labelToDraw += "\n";
+                labelToDraw += std::to_string(cps) + " CPS";
+            }
+            drawKey(kx, ky, kw, kh, labelToDraw.c_str(), pressed);
+        }
+    }
 }

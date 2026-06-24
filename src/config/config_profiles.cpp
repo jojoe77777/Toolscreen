@@ -540,6 +540,9 @@ void ApplyProfileFields(const Config& src, Config& dst, const ProfileSectionSele
     if (sections.ninjabrainOverlay) {
         dst.ninjabrainOverlay = src.ninjabrainOverlay;
     }
+    if (sections.keystrokes) {
+        dst.keystrokes = src.keystrokes;
+    }
     if (sections.modes) {
         dst.modes = src.modes;
         dst.eyezoom = src.eyezoom;

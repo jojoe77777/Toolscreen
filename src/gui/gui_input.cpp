@@ -53,6 +53,7 @@ static std::map<std::string, std::chrono::steady_clock::time_point> g_imageError
 
 int s_mainHotkeyToBind = -1;
 int s_sensHotkeyToBind = -1;
+int s_keystrokeKeyToBind = -1;
 ExclusionBindState s_exclusionToBind = { -1, -1 };
 AltBindState s_altHotkeyToBind = { -1, -1 };
 
@@ -66,7 +67,7 @@ static std::atomic<bool> s_rebindBindingUiActive{ false };
 static inline uint64_t NowMs_TickCount64() { return static_cast<uint64_t>(::GetTickCount64()); }
 
 bool IsHotkeyBindingActive_UiState() {
-    return s_mainHotkeyToBind != -1 || s_sensHotkeyToBind != -1 || s_exclusionToBind.hotkey_idx != -1 || s_altHotkeyToBind.hotkey_idx != -1;
+    return s_mainHotkeyToBind != -1 || s_sensHotkeyToBind != -1 || s_keystrokeKeyToBind != -1 || s_exclusionToBind.hotkey_idx != -1 || s_altHotkeyToBind.hotkey_idx != -1;
 }
 
 void RegisterBindingInputEvent(UINT uMsg, WPARAM wParam, LPARAM lParam) {

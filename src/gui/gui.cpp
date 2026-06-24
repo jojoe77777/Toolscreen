@@ -1,4 +1,4 @@
-﻿#include "gui.h"
+#include "gui.h"
 #include "gui_internal.h"
 #include "common/font_assets.h"
 #include "config/config_toml.h"
@@ -161,6 +161,7 @@ enum class ConfigNestedTabId {
     WindowOverlays,
     BrowserOverlays,
     Ninjabrain,
+    Keystrokes,
 };
 
 enum class ConfigInputsSubTabId {
@@ -388,6 +389,8 @@ void SetNextSettingsModalCentered(ImGuiCond condition = ImGuiCond_Always) {
             return trc("tabs.browser_overlays");
         case ConfigNestedTabId::Ninjabrain:
             return trc("ninjabrain.title");
+        case ConfigNestedTabId::Keystrokes:
+            return trc("keystrokes.title");
         }
 
         return nullptr;
@@ -530,6 +533,15 @@ void SetNextSettingsModalCentered(ImGuiCond condition = ImGuiCond_Always) {
                 "blind",
                 "throws",
                 "presets"
+            });
+        case ConfigNestedTabId::Keystrokes:
+            return MatchesSearchTerms(query, {
+                trc("keystrokes.wasd"),
+                trc("keystrokes.cps"),
+                trc("keystrokes.space"),
+                trc("keystrokes.color"),
+                trc("keystrokes.scale"),
+                trc("keystrokes.opacity")
             });
         }
 
@@ -801,7 +813,8 @@ void SetNextSettingsModalCentered(ImGuiCond condition = ImGuiCond_Always) {
                    MatchesConfigNestedTabSearch(ConfigNestedTabId::Images, query) ||
                    MatchesConfigNestedTabSearch(ConfigNestedTabId::WindowOverlays, query) ||
                    MatchesConfigNestedTabSearch(ConfigNestedTabId::BrowserOverlays, query) ||
-                   MatchesConfigNestedTabSearch(ConfigNestedTabId::Ninjabrain, query);
+                   MatchesConfigNestedTabSearch(ConfigNestedTabId::Ninjabrain, query) ||
+                   MatchesConfigNestedTabSearch(ConfigNestedTabId::Keystrokes, query);
         case ConfigTopTabId::Inputs:
             return MatchesConfigInputsSubTabSearch(ConfigInputsSubTabId::Mouse, query) ||
                    MatchesConfigInputsSubTabSearch(ConfigInputsSubTabId::Keyboard, query);
@@ -2709,14 +2722,17 @@ void RenderSettingsGUI() {
                 else if (s_mainHotkeyToBind >= 0) excludeLabel = "Mode Hotkey #" + std::to_string(s_mainHotkeyToBind + 1);
                 else if (s_sensHotkeyToBind != -1) excludeLabel = "Sensitivity Hotkey #" + std::to_string(s_sensHotkeyToBind + 1);
                 else if (s_altHotkeyToBind.hotkey_idx != -1) excludeLabel = "Mode Hotkey #" + std::to_string(s_altHotkeyToBind.hotkey_idx + 1) + " Alt #" + std::to_string(s_altHotkeyToBind.alt_idx + 1);
+                else if (s_keystrokeKeyToBind != -1) excludeLabel = "Keystroke Key #" + std::to_string(s_keystrokeKeyToBind + 1);
 
-                std::string conflict = FindHotkeyConflict(keys, excludeLabel);
-                if (!conflict.empty()) {
-                    s_hotkeyConflictMessage = "Already assigned to " + conflict;
-                    s_bindingKeys.clear();
-                    s_bindingKeySet.clear();
-                    s_hadKeysPressed = false;
-                    return;
+                if (s_keystrokeKeyToBind == -1) {
+                    std::string conflict = FindHotkeyConflict(keys, excludeLabel);
+                    if (!conflict.empty()) {
+                        s_hotkeyConflictMessage = "Already assigned to " + conflict;
+                        s_bindingKeys.clear();
+                        s_bindingKeySet.clear();
+                        s_hadKeysPressed = false;
+                        return;
+                    }
                 }
             }
             s_hotkeyConflictMessage.clear();
@@ -2741,6 +2757,11 @@ void RenderSettingsGUI() {
             } else if (s_sensHotkeyToBind != -1) {
                 g_config.sensitivityHotkeys[s_sensHotkeyToBind].keys = keys;
                 s_sensHotkeyToBind = -1;
+            } else if (s_keystrokeKeyToBind != -1) {
+                if (!keys.empty()) {
+                    g_config.keystrokes.keys[s_keystrokeKeyToBind].vk = keys.back();
+                }
+                s_keystrokeKeyToBind = -1;
             } else if (s_altHotkeyToBind.hotkey_idx != -1) {
                 g_config.hotkeys[s_altHotkeyToBind.hotkey_idx].altSecondaryModes[s_altHotkeyToBind.alt_idx].keys = keys;
                 s_altHotkeyToBind = { -1, -1 };

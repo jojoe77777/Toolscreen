@@ -43,6 +43,7 @@ extern std::atomic<bool> g_supportersFetchEverFailed;
 extern std::atomic<bool> g_supporterTierTexturesDirty;
 extern int s_mainHotkeyToBind;
 extern int s_sensHotkeyToBind;
+extern int s_keystrokeKeyToBind;
 extern ExclusionBindState s_exclusionToBind;
 extern AltBindState s_altHotkeyToBind;
 
