@@ -178,6 +178,7 @@ struct GradientConfig {
 struct BackgroundConfig {
     std::string selectedMode = "color";
     std::string image;
+    std::string imageFit = ConfigDefaults::BACKGROUND_IMAGE_FIT;
     Color color;
 
     std::vector<GradientColorStop> gradientStops;

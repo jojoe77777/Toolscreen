@@ -1944,6 +1944,7 @@ void PopulateRichConfigFixture() {
     primaryMode.manualWidth = 1280;
     primaryMode.manualHeight = 720;
     primaryMode.background.selectedMode = "gradient";
+    primaryMode.background.imageFit = "fit";
     primaryMode.background.gradientStops = {
         { { 0.15f, 0.2f, 0.35f, 1.0f }, 0.0f },
         { { 0.7f, 0.4f, 0.2f, 1.0f }, 1.0f },
@@ -2104,6 +2105,7 @@ void VerifyRichModes() {
         Expect(primaryMode.manualWidth == 1280, "Expected primary mode manualWidth to roundtrip.");
         Expect(primaryMode.manualHeight == 720, "Expected primary mode manualHeight to roundtrip.");
         Expect(primaryMode.background.selectedMode == "gradient", "Expected primary mode background mode to roundtrip.");
+        Expect(primaryMode.background.imageFit == "fit", "Expected primary mode background image fit to roundtrip.");
         Expect(primaryMode.background.gradientStops.size() == 2, "Expected primary mode gradient stops to roundtrip.");
         ExpectColorNear(primaryMode.background.gradientStops[0].color, { 0.15f, 0.2f, 0.35f, 1.0f },
                   "Expected primary mode first gradient color to roundtrip.");
@@ -2553,4 +2555,3 @@ void RunVisualLoop(DummyWindow& window, std::string_view testCaseName, RenderFra
 #include "gui_integration/render_tests.inl"
 #include "gui_integration/ui_and_log_tests.inl"
 #include "gui_integration/runner.inl"
-
