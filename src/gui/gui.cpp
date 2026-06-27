@@ -1,5 +1,6 @@
 ﻿#include "gui.h"
 #include "gui_internal.h"
+#include "imgui_internal.h"
 #include "common/font_assets.h"
 #include "config/config_toml.h"
 #include "common/mode_dimensions.h"
@@ -971,7 +972,7 @@ void SetNextSettingsModalCentered(ImGuiCond condition = ImGuiCond_Always) {
         s_forcedSettingsInputsSubTabLabel = GetConfigInputsSubTabLabel(searchMatch->inputsSubTab);
     }
 
-    void RenderConfigGuiSearchBar(bool basicModeEnabled) {
+    void RenderConfigGuiSearchBar(bool basicModeEnabled, float totalWidth) {
 #ifdef TOOLSCREEN_GUI_INTEGRATION_TESTS
         std::string requestedQuery;
         if (ConsumeGuiTestConfigSearchQueryRequest(requestedQuery)) {
@@ -994,7 +995,7 @@ void SetNextSettingsModalCentered(ImGuiCond condition = ImGuiCond_Always) {
             s_configGuiSearchState.focusInput = false;
         }
 
-        ImGui::SetNextItemWidth((std::max)(220.0f, ImGui::GetContentRegionAvail().x - clearButtonWidth));
+        ImGui::SetNextItemWidth((std::max)(160.0f, totalWidth - clearButtonWidth));
         const bool changed = ImGui::InputTextWithHint("##ConfigGuiSearch", trc("config.search_hint"), &s_configGuiSearchState.query);
         RecordConfigSearchSectionInteractionRect("config.search_bar");
 
@@ -2978,8 +2979,12 @@ void RenderSettingsGUI() {
 
     std::string windowTitle = "Toolscreen v" + GetToolscreenVersionString() + " by jojoe77777";
 
+    const float titleBarExtraPad = 6.0f * scaleFactor;
+    const ImVec2 baseFramePadding = ImGui::GetStyle().FramePadding;
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(baseFramePadding.x, baseFramePadding.y + titleBarExtraPad));
     bool windowOpen = true;
     const bool windowVisible = ImGui::Begin(windowTitle.c_str(), &windowOpen, ImGuiWindowFlags_NoCollapse);
+    ImGui::PopStyleVar();
     if (!windowOpen) {
         CloseSettingsGuiWindow();
     }
@@ -2987,22 +2992,36 @@ void RenderSettingsGUI() {
     if (windowVisible && windowOpen) {
         bool openProfileManagerPopup = false;
         ImVec2 profileManagerPopupAnchor(0.0f, 0.0f);
+        const ImRect titleBarRect = ImGui::GetCurrentWindow()->TitleBarRect();
 
         {
             PROFILE_SCOPE_CAT("Settings Header Controls", "ImGui");
 
             float iconSize = ImGui::GetFrameHeight();
             float margin = ImGui::GetStyle().ItemSpacing.x;
-            const float topBarY = 30.0f * scaleFactor;
+
             const std::string activeProfileName = g_profilesConfig.activeProfile;
+            std::string currentLangName = g_config.lang;
+            for (const auto& [langCode, langNameVal] : GetLangs().items()) {
+                if (langCode == g_config.lang) { currentLangName = langNameVal.get<std::string>(); break; }
+            }
+
             const float pillH = iconSize;
             const float pillPadX = margin;
             const float profileNameW = ImGui::CalcTextSize(activeProfileName.c_str()).x;
             const float profilePillW = pillH + pillPadX * 0.5f + profileNameW + pillPadX;
-            const float languageButtonX = ImGui::GetWindowContentRegionMax().x - iconSize;
-            const float profileButtonX = languageButtonX - margin - profilePillW;
-            const float editorButtonX = profileButtonX - margin - iconSize;
+            const float langPillW = pillH;
+
+            const ImGuiStyle& titleStyle = ImGui::GetStyle();
+            const float closeButtonReserve = titleStyle.FramePadding.x + ImGui::GetFontSize() + titleStyle.ItemInnerSpacing.x;
+            const float titleBarRightX = titleBarRect.Max.x - closeButtonReserve - margin;
+            const float titleBarPillY = titleBarRect.Min.y + (titleBarRect.GetHeight() - pillH) * 0.5f;
+            const float profilePillX = titleBarRightX - profilePillW;
+            const float langPillX = profilePillX - margin - langPillW;
+            const float editorIconX = langPillX - margin - iconSize;
+
             ImVec2 savedCursor = ImGui::GetCursorPos();
+            ImGui::PushClipRect(titleBarRect.Min, titleBarRect.Max, false);
 
             {
                 float activeColor[3] = { kDefaultProfileColor[0], kDefaultProfileColor[1], kDefaultProfileColor[2] };
@@ -3018,7 +3037,7 @@ void RenderSettingsGUI() {
                 const ImVec4 tabColor = ImGui::GetStyle().Colors[ImGuiCol_Tab];
                 ImDrawList* drawList = ImGui::GetWindowDrawList();
 
-                ImGui::SetCursorPos(ImVec2(profileButtonX, topBarY));
+                ImGui::SetCursorScreenPos(ImVec2(profilePillX, titleBarPillY));
                 ImGui::InvisibleButton("##profileManagerIcon", ImVec2(profilePillW, pillH));
 
                 const bool hovered = ImGui::IsItemHovered();
@@ -3082,16 +3101,37 @@ void RenderSettingsGUI() {
 
                 if (s_languageTexture != 0) {
                     float iconSize = ImGui::GetFrameHeight();
-                    ImGui::SetCursorPos(ImVec2(languageButtonX, topBarY));
-                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.1f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1, 1, 1, 0.2f));
-                    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
-                    if (ImGui::ImageButton("##language", (ImTextureID)(intptr_t)s_languageTexture, ImVec2(iconSize, iconSize))) {
+                    const ImVec4 tabColor = ImGui::GetStyle().Colors[ImGuiCol_Tab];
+                    ImDrawList* langDrawList = ImGui::GetWindowDrawList();
+
+                    ImGui::SetCursorScreenPos(ImVec2(langPillX, titleBarPillY));
+                    ImGui::InvisibleButton("##languagePill", ImVec2(langPillW, pillH));
+                    const bool langHovered = ImGui::IsItemHovered();
+                    const bool langHeld = ImGui::IsItemActive();
+                    const ImVec2 langPillMin = ImGui::GetItemRectMin();
+                    const ImVec2 langPillMax = ImGui::GetItemRectMax();
+
+                    if (ImGui::IsItemClicked()) {
                         ImGui::OpenPopup("##LanguagePopup");
                     }
-                    ImGui::PopStyleVar();
-                    ImGui::PopStyleColor(3);
+
+                    const float colorBoost = langHeld ? 0.18f : (langHovered ? 0.10f : 0.0f);
+
+                    if (langHovered || langHeld) {
+                        const ImU32 langHighlightColor = ImGui::ColorConvertFloat4ToU32(ImVec4(
+                            (std::min)(1.0f, tabColor.x + colorBoost),
+                            (std::min)(1.0f, tabColor.y + colorBoost),
+                            (std::min)(1.0f, tabColor.z + colorBoost), tabColor.w));
+                        langDrawList->AddRectFilled(langPillMin, langPillMax, langHighlightColor, 4.0f * scaleFactor);
+                    }
+
+                    const ImVec2 imgMin(langPillMin.x, langPillMin.y);
+                    const ImVec2 imgMax(langPillMin.x + iconSize, langPillMin.y + iconSize);
+                    langDrawList->AddImage((ImTextureID)(intptr_t)s_languageTexture, imgMin, imgMax);
+
+                    if (langHovered) {
+                        ImGui::SetTooltip("%s", currentLangName.c_str());
+                    }
 
                     if (ImGui::BeginPopup("##LanguagePopup")) {
                         PROFILE_SCOPE_CAT("Settings Language Popup", "ImGui");
@@ -3116,30 +3156,33 @@ void RenderSettingsGUI() {
                 }
             }
 
-            static GLuint s_editorTexture = 0;
-            static HGLRC s_editorLastCtx = NULL;
-            HGLRC editorCtx = wglGetCurrentContext();
-            if (editorCtx != s_editorLastCtx) { s_editorTexture = 0; s_editorLastCtx = editorCtx; }
-            LoadEmbeddedResourceTexture(s_editorTexture, IDR_EDITOR_PNG);
-            if (s_editorTexture != 0) {
-                const bool editorOn = g_overlayEditorMode.load(std::memory_order_relaxed);
-                ImGui::SetCursorPos(ImVec2(editorButtonX, topBarY));
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.1f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1, 1, 1, 0.2f));
-                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
-                const ImVec4 tint = editorOn ? ImVec4(1.0f, 0.59f, 0.16f, 1.0f) : ImVec4(0.62f, 0.62f, 0.62f, 0.9f);
-                if (ImGui::ImageButton("##EditorToggle", (ImTextureID)(intptr_t)s_editorTexture, ImVec2(iconSize, iconSize),
-                                       ImVec2(0, 0), ImVec2(1, 1), ImVec4(0, 0, 0, 0), tint)) {
-                    g_overlayEditorMode.store(!editorOn, std::memory_order_relaxed);
-                }
-                ImGui::PopStyleVar();
-                ImGui::PopStyleColor(3);
-                if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("%s", trc(editorOn ? "editor.tooltip_on" : "editor.tooltip_off"));
+            {
+                static GLuint s_editorTexture = 0;
+                static HGLRC s_editorLastCtx = NULL;
+                HGLRC editorCtx = wglGetCurrentContext();
+                if (editorCtx != s_editorLastCtx) { s_editorTexture = 0; s_editorLastCtx = editorCtx; }
+                LoadEmbeddedResourceTexture(s_editorTexture, IDR_EDITOR_PNG);
+                if (s_editorTexture != 0) {
+                    const bool editorOn = g_overlayEditorMode.load(std::memory_order_relaxed);
+                    ImGui::SetCursorScreenPos(ImVec2(editorIconX, titleBarPillY));
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.1f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1, 1, 1, 0.2f));
+                    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
+                    const ImVec4 tint = editorOn ? ImVec4(0.20f, 1.00f, 0.20f, 1.0f) : ImVec4(0.62f, 0.62f, 0.62f, 0.9f);
+                    if (ImGui::ImageButton("##EditorToggle", (ImTextureID)(intptr_t)s_editorTexture, ImVec2(iconSize, iconSize),
+                                           ImVec2(0, 0), ImVec2(1, 1), ImVec4(0, 0, 0, 0), tint)) {
+                        g_overlayEditorMode.store(!editorOn, std::memory_order_relaxed);
+                    }
+                    ImGui::PopStyleVar();
+                    ImGui::PopStyleColor(3);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("%s", trc(editorOn ? "editor.tooltip_on" : "editor.tooltip_off"));
+                    }
                 }
             }
 
+            ImGui::PopClipRect();
             ImGui::SetCursorPos(savedCursor);
         }
 
@@ -3154,6 +3197,11 @@ void RenderSettingsGUI() {
                 g_config.basicModeEnabled = false;
                 g_configIsDirty = true;
             }
+
+            const float searchBarWidth = ImGui::GetWindowWidth() * 0.3f;
+            ImGui::SameLine();
+            ImGui::SetCursorPosX(ImGui::GetWindowContentRegionMax().x - searchBarWidth);
+            RenderConfigGuiSearchBar(g_config.basicModeEnabled, searchBarWidth);
         }
 
         {
@@ -3397,8 +3445,6 @@ void RenderSettingsGUI() {
 
         {
             PROFILE_SCOPE_CAT("Settings Tabs", "ImGui");
-
-            RenderConfigGuiSearchBar(g_config.basicModeEnabled);
 
             if (!g_scrollToMirrorName.empty() || !g_scrollToMirrorGroupName.empty() || !g_scrollToImageName.empty() || !g_scrollToWindowOverlayName.empty()) {
                 if (g_config.basicModeEnabled) { g_config.basicModeEnabled = false; g_configIsDirty = true; }
