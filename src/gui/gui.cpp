@@ -3258,11 +3258,11 @@ void RenderSettingsGUI() {
             }
 
             ImGui::SetNextWindowPos(s_profilePopupAnchor, ImGuiCond_Appearing);
-            ImGui::SetNextWindowSize(ImVec2(720.0f * windowScaleFactor, 400.0f * windowScaleFactor), ImGuiCond_Appearing);
+            ImGui::SetNextWindowSize(ImVec2(720.0f * windowScaleFactor, 488.0f * windowScaleFactor), ImGuiCond_Appearing);
             if (ImGui::BeginPopup("##ProfileManagerPopup")) {
                 ImGui::TextUnformatted(tr("profiles.header_button", g_profilesConfig.activeProfile).c_str());
                 ImGui::Separator();
-                ImGui::BeginChild("##profileManagerPanel", ImVec2(0.0f, 330.0f * scaleFactor), false);
+                ImGui::BeginChild("##profileManagerPanel", ImVec2(0.0f, 0.0f), false);
                 ImGui::TextWrapped("%s", trc("profiles.manage_hint"));
                 ImGui::Spacing();
 
@@ -3273,7 +3273,15 @@ void RenderSettingsGUI() {
                     ImGui::TableNextColumn();
                     ImGui::BeginChild("##profileManagerListPane", ImVec2(0.0f, 0.0f), false);
                     ImGui::SeparatorText(trc("profiles.list_title"));
-                    if (ImGui::BeginListBox("##profileManagerListBox", ImVec2(-FLT_MIN, 180.0f * scaleFactor))) {
+                    
+                    float newProfileSectionHeight = ImGui::GetTextLineHeightWithSpacing() * 2.0f
+                        + ImGui::GetFrameHeightWithSpacing() * 2.0f
+                        + ImGui::GetTextLineHeightWithSpacing()
+                        + ImGui::GetStyle().ItemSpacing.y * 3.0f;
+                    float listHeight = ImGui::GetContentRegionAvail().y - newProfileSectionHeight;
+                    if (listHeight < 60.0f * scaleFactor) listHeight = 60.0f * scaleFactor;
+                    
+                    if (ImGui::BeginListBox("##profileManagerListBox", ImVec2(-FLT_MIN, listHeight))) {
                         for (const auto& pm : g_profilesConfig.profiles) {
                             bool selected = (pm.name == g_profilesConfig.activeProfile);
                             std::string label = pm.name;
@@ -3292,8 +3300,11 @@ void RenderSettingsGUI() {
                     }
 
                     ImGui::Spacing();
+                    ImGui::Spacing();
+                    ImGui::Separator();
                     ImGui::SeparatorText(trc("profiles.new_popup"));
                     ImGui::TextUnformatted(trc("label.name"));
+                    ImGui::SetNextItemWidth(-FLT_MIN);
                     ImGui::InputText("##newProfileNameInline", &s_newProfileName);
                     const bool newNameValid = IsValidProfileName(s_newProfileName);
                     if (!s_newProfileName.empty() && !newNameValid) {
@@ -3311,9 +3322,9 @@ void RenderSettingsGUI() {
                     ImGui::EndChild();
 
                     ImGui::TableNextColumn();
-                    ImGui::BeginChild("##profileManagerEditorPane", ImVec2(0.0f, 0.0f), false);
+                    ImGui::BeginChild("##profileManagerEditorPane", ImVec2(0.0f, 0.0f), false, ImGuiWindowFlags_HorizontalScrollbar);
                     ImGui::SeparatorText(trc("profiles.rename_popup"));
-                    ImGui::TextUnformatted(tr("profiles.header_button", g_profilesConfig.activeProfile).c_str());
+                    ImGui::TextWrapped("%s", tr("profiles.header_button", g_profilesConfig.activeProfile).c_str());
                     ImGui::TextUnformatted(trc("label.name"));
                     ImGui::InputText("##renameProfileNameInline", &s_renameBuffer);
 
