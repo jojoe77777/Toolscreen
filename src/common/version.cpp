@@ -52,7 +52,7 @@ GameVersion ParseMinecraftVersionFromMMCPack(const std::wstring& mmcPackPath) {
                         if (component.contains("version") && component["version"].is_string()) {
                             std::string versionStr = component["version"].get<std::string>();
 
-                            std::regex versionRegex(R"((\d+)\.(\d+)(?:\.(\d+))?)");
+                            std::regex versionRegex(R"((\d+)\.(\d+)(?:\.(\d+))?(?:-([A-Za-z0-9._-]+))?)");
                             std::smatch match;
 
                             if (std::regex_search(versionStr, match, versionRegex)) {
@@ -60,6 +60,7 @@ GameVersion ParseMinecraftVersionFromMMCPack(const std::wstring& mmcPackPath) {
                                     result.major = std::stoi(match[1].str());
                                     result.minor = std::stoi(match[2].str());
                                     result.patch = (match.size() > 3 && match[3].matched) ? std::stoi(match[3].str()) : 0;
+                                    result.prerelease = match.size() > 4 && match[4].matched;
                                     result.valid = true;
 
                                     std::ostringstream oss;
@@ -118,7 +119,8 @@ GameVersion GetGameVersionFromCommandLine() {
     std::wstring cmdLineStr(cmdLine);
     Log(L"Command line: " + cmdLineStr);
 
-    std::wregex versionRegex(L"--version[=\\s]+(\\d+)\\.(\\d+)(?:\\.(\\d+))?");
+    std::wregex versionRegex(
+        L"(?:--version[=\\s]+|-Dtoolscreen\\.minecraftVersion=)(\\d+)\\.(\\d+)(?:\\.(\\d+))?(?:-([A-Za-z0-9._-]+))?");
     std::wsmatch match;
 
     if (std::regex_search(cmdLineStr, match, versionRegex)) {
@@ -126,10 +128,12 @@ GameVersion GetGameVersionFromCommandLine() {
             result.major = std::stoi(match[1].str());
             result.minor = std::stoi(match[2].str());
             result.patch = (match.size() > 3 && match[3].matched) ? std::stoi(match[3].str()) : 0;
+            result.prerelease = match.size() > 4 && match[4].matched;
             result.valid = true;
 
             std::ostringstream oss;
             oss << "Detected game version: " << result.major << "." << result.minor << "." << result.patch;
+            if (result.prerelease) { oss << " (pre-release)"; }
             Log(oss.str());
         } catch (const std::exception& e) { Log(std::string("Failed to parse version numbers: ") + e.what()); }
     } else {
@@ -145,10 +149,15 @@ bool IsVersionInRange(const GameVersion& version, const GameVersion& minVer, con
 }
 
 bool IsResolutionChangeSupported(const GameVersion& version) {
-    if (!version.valid) {
-        return true;
-    }
+    if (!version.valid) { return false; }
 
     GameVersion minSupportedVersion(1, 13, 0);
     return version >= minSupportedVersion;
+}
+
+bool IsMinecraft26_2FinalOrNewer(const GameVersion& version) {
+    if (!version.valid) { return false; }
+
+    const bool is26_2Prerelease = version.major == 26 && version.minor == 2 && version.patch == 0 && version.prerelease;
+    return !is26_2Prerelease && version >= GameVersion(26, 2, 0);
 }

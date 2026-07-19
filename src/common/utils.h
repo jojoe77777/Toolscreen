@@ -386,6 +386,8 @@ BOOL ClipCursorDirect(const RECT* lpRect);
 bool ApplyConfineCursorToGameWindow();
 void ApplyDeferredGuiCursorModeAfterClose();
 void FinalizeGuiCursorStateAfterClose();
+void InvokeCapturedGlfwResizeCallbacks(int width, int height);
+void ClearCapturedGlfwResizeCallbacks();
 
 UINT GetToolscreenBorderlessToggleMessageId();
 void RememberRequestedWindowClientResize(int width, int height);

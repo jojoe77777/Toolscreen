@@ -1250,6 +1250,7 @@ InputHandlerResult HandleDestroy(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
     if (uMsg != WM_DESTROY) { return { false, 0 }; }
     PROFILE_SCOPE("HandleDestroy");
 
+    ClearCapturedGlfwResizeCallbacks();
     ResetLocalKeyRepeatState(hWnd);
     ResetShiftHotkeyPollingState(hWnd);
     ReleaseActiveLowLevelRebindKeys(hWnd);
@@ -5119,6 +5120,11 @@ LRESULT CALLBACK SubclassedWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
     if (uMsg == WM_TOOLSCREEN_APPLY_FOCUS_REGAIN_SIZE) {
         s_deferredFocusRegainWmSizePending.store(false, std::memory_order_relaxed);
         ResendCurrentModeWmSize(hWnd, "input_hook:focus_regain_deferred");
+        return 0;
+    }
+
+    if (uMsg == WM_TOOLSCREEN_INVOKE_GLFW_RESIZE_CALLBACKS) {
+        InvokeCapturedGlfwResizeCallbacks(static_cast<int>(wParam), static_cast<int>(lParam));
         return 0;
     }
 

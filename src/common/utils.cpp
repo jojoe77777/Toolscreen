@@ -3416,6 +3416,7 @@ bool CenterWindowedRestoreOnCurrentMonitor(HWND hwnd, const char* source) {
 
 bool RequestWindowClientResize(HWND hwnd, int width, int height, const char* source) {
     if (!hwnd || !IsWindow(hwnd) || width <= 0 || height <= 0) { return false; }
+    if (!IsResolutionChangeSupported(g_gameVersion)) { return false; }
 
     static std::mutex s_resizeRequestMutex;
     static HWND s_lastHwnd = nullptr;
@@ -3437,6 +3438,16 @@ bool RequestWindowClientResize(HWND hwnd, int width, int height, const char* sou
         Log("[WINDOW] Failed to post WM_SIZE resize request (" + src + "): " + std::to_string(width) + "x" + std::to_string(height) +
             ", error=" + std::to_string(err));
         return false;
+    }
+
+    if (IsMinecraft26_2FinalOrNewer(g_gameVersion)) {
+        if (!PostMessage(hwnd, WM_TOOLSCREEN_INVOKE_GLFW_RESIZE_CALLBACKS, static_cast<WPARAM>(width), static_cast<LPARAM>(height))) {
+            DWORD err = GetLastError();
+            std::string src = source ? source : "unknown";
+            Log("[WINDOW] Failed to post GLFW resize callback request (" + src + "): " + std::to_string(width) + "x" +
+                std::to_string(height) + ", error=" + std::to_string(err));
+            return false;
+        }
     }
 
     s_lastHwnd = hwnd;

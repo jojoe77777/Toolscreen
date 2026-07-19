@@ -1340,8 +1340,21 @@ GLFWSETINPUTMODE oglfwSetInputMode = NULL;
 GLFWSETINPUTMODE g_oglfwSetInputModeThirdParty = NULL;
 typedef void (*GLFWSETCURSOR)(void* window, void* cursor);
 GLFWSETCURSOR oglfwSetCursor = NULL;
+typedef void (*GLFWWINDOWSIZEFUN)(void* window, int width, int height);
+typedef GLFWWINDOWSIZEFUN (*GLFWSETWINDOWSIZECALLBACK)(void* window, GLFWWINDOWSIZEFUN callback);
+GLFWSETWINDOWSIZECALLBACK oglfwSetWindowSizeCallback = NULL;
+typedef void (*GLFWFRAMEBUFFERSIZEFUN)(void* window, int width, int height);
+typedef GLFWFRAMEBUFFERSIZEFUN (*GLFWSETFRAMEBUFFERSIZECALLBACK)(void* window, GLFWFRAMEBUFFERSIZEFUN callback);
+GLFWSETFRAMEBUFFERSIZECALLBACK oglfwSetFramebufferSizeCallback = NULL;
+typedef void* (*GLFWGETCURRENTCONTEXTPROC)();
+GLFWGETCURRENTCONTEXTPROC glfwGetCurrentContextProc = NULL;
 std::atomic<bool> g_glfwCursorGrabbed{ false };
 std::atomic<void*> g_glfwSetInputModeThirdPartyHookTarget{ nullptr };
+std::atomic<void*> g_latestGlfwWindow{ nullptr };
+std::atomic<GLFWWINDOWSIZEFUN> g_glfwWindowSizeCallback{ nullptr };
+std::atomic<GLFWFRAMEBUFFERSIZEFUN> g_glfwFramebufferSizeCallback{ nullptr };
+std::atomic<bool> g_glfwInitialResizeCallbacksReplayed{ false };
+std::mutex g_glfwResizeCallbackMutex;
 
 typedef UINT(WINAPI* GETRAWINPUTDATAPROC)(HRAWINPUT hRawInput, UINT uiCommand, LPVOID pData, PUINT pcbSize, UINT cbSizeHeader);
 GETRAWINPUTDATAPROC oGetRawInputData = NULL;
@@ -1709,16 +1722,22 @@ static inline void ViewportHook_Impl(GLVIEWPORTPROC next, GLint x, GLint y, GLsi
     }
 
     GLint drawFBO = 0;
-    GLint currentTextureBinding = 0;
 
     glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &drawFBO);
-    glGetIntegerv(GL_TEXTURE_BINDING_2D, &currentTextureBinding);
-    const GLuint currentTexture = static_cast<GLuint>(currentTextureBinding);
 
-    const bool isLegacyVersion = g_gameVersion < GameVersion(1, 17, 0);
-    const bool shouldBypassViewportHook = isLegacyVersion ?
-        (drawFBO != 0) :
-        (currentTexture != 0 || drawFBO != 0);
+    bool shouldBypassViewportHook = false;
+    if (IsMinecraft26_2FinalOrNewer(g_gameVersion)) {
+        // Minecraft 26.2 may retain a texture binding during final presentation,
+        // so the draw FBO is the authoritative destination for this renderer.
+        shouldBypassViewportHook = drawFBO != 0;
+    } else {
+        // Preserve the established routing rules for earlier renderers.
+        GLint currentTextureBinding = 0;
+        glGetIntegerv(GL_TEXTURE_BINDING_2D, &currentTextureBinding);
+        const GLuint currentTexture = static_cast<GLuint>(currentTextureBinding);
+        const bool isLegacyVersion = g_gameVersion < GameVersion(1, 17, 0);
+        shouldBypassViewportHook = isLegacyVersion ? (drawFBO != 0) : (currentTexture != 0 || drawFBO != 0);
+    }
     if (shouldBypassViewportHook) {
         return next(x, y, width, height);
     }
@@ -1921,6 +1940,25 @@ static inline void TrackCurrentReadFramebufferColorAttachmentTexture() {
                                                 std::memory_order_release);
 }
 
+static bool TryHookGlBlitNamedFramebuffer(void* target, const char* source) {
+    if (!target || target == reinterpret_cast<void*>(&hkglBlitNamedFramebuffer)) {
+        return false;
+    }
+
+    MH_STATUS st = MH_CreateHook(target, reinterpret_cast<void*>(&hkglBlitNamedFramebuffer),
+                                 reinterpret_cast<void**>(&oglBlitNamedFramebuffer));
+    if (st != MH_OK && st != MH_ERROR_ALREADY_CREATED) {
+        return false;
+    }
+    st = MH_EnableHook(target);
+    if (st != MH_OK && st != MH_ERROR_ENABLED) {
+        return false;
+    }
+
+    LogCategory("init", std::string("Successfully hooked glBlitNamedFramebuffer via ") + source);
+    return true;
+}
+
 static void AttemptHookGlBlitNamedFramebufferViaGlew() {
     static std::atomic<bool> s_hooked{ false };
     if (s_hooked.load(std::memory_order_acquire)) return;
@@ -1929,25 +1967,88 @@ static void AttemptHookGlBlitNamedFramebufferViaGlew() {
         return;
     }
 
-    PFNGLBLITNAMEDFRAMEBUFFERPROC pFunc = glBlitNamedFramebuffer;
-    if (pFunc == NULL) return;
+    if (IsMinecraft26_2FinalOrNewer(g_gameVersion)) {
+        HMODULE hOpenGL32 = GetModuleHandle(L"opengl32.dll");
+        if (hOpenGL32) {
+            typedef PROC(WINAPI* PFN_wglGetProcAddress)(LPCSTR);
+            PFN_wglGetProcAddress wglGetProc =
+                reinterpret_cast<PFN_wglGetProcAddress>(GetProcAddress(hOpenGL32, "wglGetProcAddress"));
+            const void* exportTarget = reinterpret_cast<void*>(GetProcAddress(hOpenGL32, "glBlitNamedFramebuffer"));
+            if (wglGetProc) {
+                PROC wglTarget = wglGetProc("glBlitNamedFramebuffer");
+                if (wglTarget && reinterpret_cast<void*>(wglTarget) != exportTarget &&
+                    TryHookGlBlitNamedFramebuffer(reinterpret_cast<void*>(wglTarget), "wglGetProcAddress")) {
+                    s_hooked.store(true, std::memory_order_release);
+                    return;
+                }
+            }
+        }
+    }
 
-    MH_STATUS st = MH_CreateHook(reinterpret_cast<void*>(pFunc), reinterpret_cast<void*>(&hkglBlitNamedFramebuffer),
-                                reinterpret_cast<void**>(&oglBlitNamedFramebuffer));
-    if (st != MH_OK && st != MH_ERROR_ALREADY_CREATED) {
-        return;
-    }
-    st = MH_EnableHook(reinterpret_cast<void*>(pFunc));
-    if (st != MH_OK && st != MH_ERROR_ENABLED) {
-        return;
-    }
+    PFNGLBLITNAMEDFRAMEBUFFERPROC glewTarget = glBlitNamedFramebuffer;
+    if (!glewTarget || !TryHookGlBlitNamedFramebuffer(reinterpret_cast<void*>(glewTarget), "GLEW")) return;
 
     s_hooked.store(true, std::memory_order_release);
-    LogCategory("init", "Successfully hooked glBlitNamedFramebuffer via GLEW");
 }
 
 static bool ShouldRetargetMinecraftBlitFramebuffer(GLint readFBO, GLint drawFBO) {
-    return drawFBO == 0 && readFBO != 0 && IsVersionInRange(g_gameVersion, GameVersion(1, 21, 2), GameVersion(1, 21, 4));
+    const bool establishedBlitPath = IsVersionInRange(g_gameVersion, GameVersion(1, 21, 2), GameVersion(1, 21, 4));
+    return drawFBO == 0 && readFBO != 0 && (establishedBlitPath || IsMinecraft26_2FinalOrNewer(g_gameVersion));
+}
+
+static bool GetNamedFramebufferColorAttachmentSize(GLuint framebuffer, int& outWidth, int& outHeight) {
+    struct AttachmentSizeCache {
+        HGLRC context = nullptr;
+        GLuint framebuffer = 0;
+        GLuint texture = 0;
+        uint64_t configVersion = 0;
+        int width = 0;
+        int height = 0;
+    };
+    thread_local AttachmentSizeCache cache;
+
+    outWidth = 0;
+    outHeight = 0;
+
+    GLint attachmentName = 0;
+    glGetNamedFramebufferAttachmentParameteriv(framebuffer, GL_COLOR_ATTACHMENT0,
+                                                GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &attachmentName);
+    if (attachmentName <= 0) { return false; }
+
+    const HGLRC context = wglGetCurrentContext();
+    const uint64_t configVersion = g_configSnapshotVersion.load(std::memory_order_acquire);
+    if (cache.context == context && cache.framebuffer == framebuffer &&
+        cache.texture == static_cast<GLuint>(attachmentName) && cache.configVersion == configVersion &&
+        cache.width > 0 && cache.height > 0) {
+        outWidth = cache.width;
+        outHeight = cache.height;
+        return true;
+    }
+
+    GLint attachmentType = GL_NONE;
+    glGetNamedFramebufferAttachmentParameteriv(framebuffer, GL_COLOR_ATTACHMENT0,
+                                                GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &attachmentType);
+    if (attachmentType != GL_TEXTURE) { return false; }
+
+    GLint attachmentLevel = 0;
+    glGetNamedFramebufferAttachmentParameteriv(framebuffer, GL_COLOR_ATTACHMENT0,
+                                                GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL, &attachmentLevel);
+
+    GLint textureWidth = 0;
+    GLint textureHeight = 0;
+    glGetTextureLevelParameteriv(static_cast<GLuint>(attachmentName), attachmentLevel, GL_TEXTURE_WIDTH, &textureWidth);
+    glGetTextureLevelParameteriv(static_cast<GLuint>(attachmentName), attachmentLevel, GL_TEXTURE_HEIGHT, &textureHeight);
+    if (textureWidth <= 0 || textureHeight <= 0) { return false; }
+
+    cache.context = context;
+    cache.framebuffer = framebuffer;
+    cache.texture = static_cast<GLuint>(attachmentName);
+    cache.configVersion = configVersion;
+    cache.width = textureWidth;
+    cache.height = textureHeight;
+    outWidth = textureWidth;
+    outHeight = textureHeight;
+    return true;
 }
 
 static inline void BlitFramebufferHook_Impl(PFNGLBLITFRAMEBUFFERPROC_HOOK next,
@@ -2312,6 +2413,7 @@ static void GlfwSetInputModeHook_Impl(GLFWSETINPUTMODE next, void* window, int m
     const bool guiOpen = g_showGui.load(std::memory_order_acquire);
 
     g_lastGlfwCursorWindow.store(window, std::memory_order_release);
+    if (IsMinecraft26_2FinalOrNewer(g_gameVersion)) { g_latestGlfwWindow.store(window, std::memory_order_release); }
 
     if (guiOpen) {
         g_deferredGuiGlfwCursorMode.store(value, std::memory_order_release);
@@ -2329,6 +2431,75 @@ void hkglfwSetInputMode(void* window, int mode, int value) { GlfwSetInputModeHoo
 void hkglfwSetInputMode_ThirdParty(void* window, int mode, int value) {
     GLFWSETINPUTMODE next = g_oglfwSetInputModeThirdParty ? g_oglfwSetInputModeThirdParty : oglfwSetInputMode;
     GlfwSetInputModeHook_Impl(next, window, mode, value);
+}
+
+GLFWWINDOWSIZEFUN hkglfwSetWindowSizeCallback(void* window, GLFWWINDOWSIZEFUN callback) {
+    if (!oglfwSetWindowSizeCallback) { return nullptr; }
+    if (!IsMinecraft26_2FinalOrNewer(g_gameVersion)) { return oglfwSetWindowSizeCallback(window, callback); }
+    g_latestGlfwWindow.store(window, std::memory_order_release);
+    const GLFWWINDOWSIZEFUN previous = oglfwSetWindowSizeCallback(window, callback);
+    g_glfwWindowSizeCallback.store(callback, std::memory_order_release);
+    return previous;
+}
+
+GLFWFRAMEBUFFERSIZEFUN hkglfwSetFramebufferSizeCallback(void* window, GLFWFRAMEBUFFERSIZEFUN callback) {
+    if (!oglfwSetFramebufferSizeCallback) { return nullptr; }
+    if (!IsMinecraft26_2FinalOrNewer(g_gameVersion)) { return oglfwSetFramebufferSizeCallback(window, callback); }
+    g_latestGlfwWindow.store(window, std::memory_order_release);
+    const GLFWFRAMEBUFFERSIZEFUN previous = oglfwSetFramebufferSizeCallback(window, callback);
+    g_glfwFramebufferSizeCallback.store(callback, std::memory_order_release);
+    return previous;
+}
+
+void InvokeCapturedGlfwResizeCallbacks(int width, int height) {
+    if (!IsMinecraft26_2FinalOrNewer(g_gameVersion) || width <= 0 || height <= 0 || g_isShuttingDown.load(std::memory_order_acquire)) { return; }
+
+    void* window = g_latestGlfwWindow.load(std::memory_order_acquire);
+    if (!window) { return; }
+
+    GLFWWINDOWSIZEFUN windowCallback = g_glfwWindowSizeCallback.load(std::memory_order_acquire);
+    GLFWFRAMEBUFFERSIZEFUN framebufferCallback = g_glfwFramebufferSizeCallback.load(std::memory_order_acquire);
+    {
+        std::lock_guard<std::mutex> lock(g_glfwResizeCallbackMutex);
+        if (!windowCallback && oglfwSetWindowSizeCallback) {
+            windowCallback = oglfwSetWindowSizeCallback(window, nullptr);
+            oglfwSetWindowSizeCallback(window, windowCallback);
+            g_glfwWindowSizeCallback.store(windowCallback, std::memory_order_release);
+        }
+        if (!framebufferCallback && oglfwSetFramebufferSizeCallback) {
+            framebufferCallback = oglfwSetFramebufferSizeCallback(window, nullptr);
+            oglfwSetFramebufferSizeCallback(window, framebufferCallback);
+            g_glfwFramebufferSizeCallback.store(framebufferCallback, std::memory_order_release);
+        }
+    }
+
+    if (windowCallback) { windowCallback(window, width, height); }
+    if (framebufferCallback) { framebufferCallback(window, width, height); }
+}
+
+void ClearCapturedGlfwResizeCallbacks() {
+    g_latestGlfwWindow.store(nullptr, std::memory_order_release);
+    g_glfwWindowSizeCallback.store(nullptr, std::memory_order_release);
+    g_glfwFramebufferSizeCallback.store(nullptr, std::memory_order_release);
+    g_glfwInitialResizeCallbacksReplayed.store(false, std::memory_order_release);
+}
+
+static void ReplayPendingGlfwResizeCallbacksOnWindowThread(HWND hwnd) {
+    if (!IsMinecraft26_2FinalOrNewer(g_gameVersion) || !hwnd || !g_latestGlfwWindow.load(std::memory_order_acquire)) { return; }
+
+    int requestedWidth = 0;
+    int requestedHeight = 0;
+    int previousRequestedWidth = 0;
+    int previousRequestedHeight = 0;
+    if (!GetRecentRequestedWindowClientResizes(requestedWidth, requestedHeight, previousRequestedWidth, previousRequestedHeight)) { return; }
+
+    bool expected = false;
+    if (!g_glfwInitialResizeCallbacksReplayed.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) { return; }
+
+    if (!PostMessage(hwnd, WM_TOOLSCREEN_INVOKE_GLFW_RESIZE_CALLBACKS, static_cast<WPARAM>(requestedWidth), static_cast<LPARAM>(requestedHeight))) {
+        g_glfwInitialResizeCallbacksReplayed.store(false, std::memory_order_release);
+        Log("[GLFW] Failed to defer initial resize callback replay. Error=" + std::to_string(GetLastError()));
+    }
 }
 
 void hkglfwSetCursor(void* window, void* cursor) {
@@ -2690,7 +2861,11 @@ void APIENTRY hkglBlitFramebuffer_ThirdParty(GLint srcX0,
 
 void WINAPI hkglBlitNamedFramebuffer(GLuint readFramebuffer, GLuint drawFramebuffer, GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
                                      GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1, GLbitfield mask, GLenum filter) {
-    if (drawFramebuffer != 0) {
+    const bool use26_2Path = IsMinecraft26_2FinalOrNewer(g_gameVersion);
+    const bool shouldBypass = use26_2Path ?
+        !ShouldRetargetMinecraftBlitFramebuffer(static_cast<GLint>(readFramebuffer), static_cast<GLint>(drawFramebuffer)) :
+        drawFramebuffer != 0;
+    if (shouldBypass) {
         return oglBlitNamedFramebuffer(readFramebuffer, drawFramebuffer, srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask,
                                        filter);
     }
@@ -2700,6 +2875,20 @@ void WINAPI hkglBlitNamedFramebuffer(GLuint readFramebuffer, GLuint drawFramebuf
     int resolvedDstX1 = 0;
     int resolvedDstY1 = 0;
     if (ResolvePresentedGameBlitRect(resolvedDstX0, resolvedDstY0, resolvedDstX1, resolvedDstY1)) {
+        // Minecraft 26.2's DSA presenter keeps using the physical window size for
+        // both blit rectangles after Toolscreen resizes the offscreen render target.
+        // Sample the complete color attachment so the synthetic-resolution frame is
+        // scaled into the mode's presentation rectangle instead of showing only its
+        // lower-left physical-window-sized portion.
+        if (use26_2Path && srcX0 == dstX0 && srcY0 == dstY0 && srcX1 == dstX1 && srcY1 == dstY1 &&
+            srcX0 == 0 && srcY0 == 0 && srcX1 > 0 && srcY1 > 0) {
+            int attachmentWidth = 0;
+            int attachmentHeight = 0;
+            if (GetNamedFramebufferColorAttachmentSize(readFramebuffer, attachmentWidth, attachmentHeight)) {
+                srcX1 = attachmentWidth;
+                srcY1 = attachmentHeight;
+            }
+        }
         return oglBlitNamedFramebuffer(readFramebuffer, drawFramebuffer, srcX0, srcY0, srcX1, srcY1, resolvedDstX0, resolvedDstY0,
                                        resolvedDstX1, resolvedDstY1, mask, filter);
     }
@@ -2925,6 +3114,12 @@ static BOOL SwapBuffersHook_Impl(WGLSWAPBUFFERS next, HDC hDc) {
 
         HWND hwnd = WindowFromDC(hDc);
         if (!hwnd) { return next(hDc); }
+        if (IsMinecraft26_2FinalOrNewer(g_gameVersion) && glfwGetCurrentContextProc) {
+            if (void* glfwWindow = glfwGetCurrentContextProc()) {
+                g_latestGlfwWindow.store(glfwWindow, std::memory_order_release);
+                ReplayPendingGlfwResizeCallbacksOnWindowThread(hwnd);
+            }
+        }
         HWND previousHwnd = g_minecraftHwnd.load();
         if (hwnd != previousHwnd) {
             g_minecraftHwnd.store(hwnd);
@@ -3582,7 +3777,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 #define HOOK(mod, name) CreateHookOrDie(GetProcAddress(mod, #name), &hk##name, &o##name, #name)
         HOOK(hOpenGL32, wglSwapBuffers);
         HOOK(hOpenGL32, glBindTexture);
-        if (IsVersionInRange(g_gameVersion, GameVersion(1, 0, 0), GameVersion(1, 21, 0))) {
+        // Keep the established export-hook range intact and add the 26.2 renderer.
+        if (IsVersionInRange(g_gameVersion, GameVersion(1, 0, 0), GameVersion(1, 21, 0)) ||
+            IsMinecraft26_2FinalOrNewer(g_gameVersion)) {
             if (HOOK(hOpenGL32, glViewport)) {
                 g_glViewportHookCount.fetch_add(1);
                 LogCategory("init", "Initial glViewport hook created via opengl32.dll");
@@ -3596,6 +3793,11 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         if (hGlfw) {
             HOOK(hGlfw, glfwSetInputMode);
             HOOK(hGlfw, glfwSetCursor);
+            if (IsMinecraft26_2FinalOrNewer(g_gameVersion)) {
+                HOOK(hGlfw, glfwSetWindowSizeCallback);
+                HOOK(hGlfw, glfwSetFramebufferSizeCallback);
+                glfwGetCurrentContextProc = reinterpret_cast<GLFWGETCURRENTCONTEXTPROC>(GetProcAddress(hGlfw, "glfwGetCurrentContext"));
+            }
         } else {
             LogCategory("init", "WARNING: glfw.dll not loaded; skipping glfwSetInputMode hook");
         }
