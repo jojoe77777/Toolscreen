@@ -19,10 +19,9 @@ std::string GetFullVersionInfo() {
 }
 
 void LogVersionInfo() {
-    std::string versionInfo = GetFullVersionInfo();
-    Log("=== " + versionInfo + " ===");
-    Log("Toolscreen Version: " + GetToolscreenVersionString());
-    Log("Config Version: " + std::to_string(GetConfigVersion()));
+    Log("=== {} ===", GetFullVersionInfo());
+    Log("Toolscreen Version: {}", GetToolscreenVersionString());
+    Log("Config Version: {}", GetConfigVersion());
 }
 
 void PrintVersionToStdout() {
@@ -38,7 +37,7 @@ GameVersion ParseMinecraftVersionFromMMCPack(const std::wstring& mmcPackPath) {
         // Open via std::filesystem::path so wide Win32 APIs are used.
         std::ifstream file(std::filesystem::path(mmcPackPath), std::ios::binary);
         if (!file.is_open()) {
-            Log("Failed to open mmc-pack.json at: " + WideToUtf8(mmcPackPath));
+            Log("Failed to open mmc-pack.json at: {}", WideToUtf8(mmcPackPath));
             return result;
         }
 
@@ -62,13 +61,11 @@ GameVersion ParseMinecraftVersionFromMMCPack(const std::wstring& mmcPackPath) {
                                     result.patch = (match.size() > 3 && match[3].matched) ? std::stoi(match[3].str()) : 0;
                                     result.valid = true;
 
-                                    std::ostringstream oss;
-                                    oss << "Detected Minecraft version from mmc-pack.json: " << result.major << "." << result.minor << "."
-                                        << result.patch;
-                                    Log(oss.str());
+                                    Log("Detected Minecraft version from mmc-pack.json: {}.{}.{}",
+                                        result.major, result.minor, result.patch);
                                     return result;
                                 } catch (const std::exception& e) {
-                                    Log(std::string("Failed to parse version from mmc-pack.json: ") + e.what());
+                                    Log("Failed to parse version from mmc-pack.json: {}", e.what());
                                 }
                             }
                         }
@@ -78,7 +75,7 @@ GameVersion ParseMinecraftVersionFromMMCPack(const std::wstring& mmcPackPath) {
         }
 
         Log("Could not find Minecraft component in mmc-pack.json");
-    } catch (const std::exception& e) { Log(std::string("Error parsing mmc-pack.json: ") + e.what()); }
+    } catch (const std::exception& e) { Log("Error parsing mmc-pack.json: {}", e.what()); }
 
     return result;
 }
@@ -89,7 +86,7 @@ GameVersion GetGameVersionFromCommandLine() {
     char instMcDir[MAX_PATH] = { 0 };
     size_t len = 0;
     if (getenv_s(&len, instMcDir, sizeof(instMcDir), "INST_MC_DIR") == 0 && len > 0) {
-        Log(std::string("INST_MC_DIR environment variable found: ") + instMcDir);
+        Log("INST_MC_DIR environment variable found: {}", instMcDir);
 
         int size_needed = MultiByteToWideChar(CP_UTF8, 0, instMcDir, -1, NULL, 0);
         std::wstring instMcDirW(size_needed - 1, 0);
@@ -100,12 +97,12 @@ GameVersion GetGameVersionFromCommandLine() {
         std::filesystem::path mmcPackPath = parentPath / L"mmc-pack.json";
 
         if (std::filesystem::exists(mmcPackPath)) {
-            Log(L"Found mmc-pack.json at: " + mmcPackPath.wstring());
+            Log(L"Found mmc-pack.json at: {}", mmcPackPath.wstring());
             result = ParseMinecraftVersionFromMMCPack(mmcPackPath.wstring());
             if (result.valid) { return result; }
             Log("Failed to parse version from mmc-pack.json, falling back to command line");
         } else {
-            Log(L"mmc-pack.json not found at: " + mmcPackPath.wstring());
+            Log(L"mmc-pack.json not found at: {}", mmcPackPath.wstring());
         }
     }
 
@@ -116,7 +113,7 @@ GameVersion GetGameVersionFromCommandLine() {
     }
 
     std::wstring cmdLineStr(cmdLine);
-    Log(L"Command line: " + cmdLineStr);
+    Log(L"Command line: {}", cmdLineStr);
 
     std::wregex versionRegex(L"--version[=\\s]+(\\d+)\\.(\\d+)(?:\\.(\\d+))?");
     std::wsmatch match;
@@ -128,10 +125,8 @@ GameVersion GetGameVersionFromCommandLine() {
             result.patch = (match.size() > 3 && match[3].matched) ? std::stoi(match[3].str()) : 0;
             result.valid = true;
 
-            std::ostringstream oss;
-            oss << "Detected game version: " << result.major << "." << result.minor << "." << result.patch;
-            Log(oss.str());
-        } catch (const std::exception& e) { Log(std::string("Failed to parse version numbers: ") + e.what()); }
+            Log("Detected game version: {}.{}.{}", result.major, result.minor, result.patch);
+        } catch (const std::exception& e) { Log("Failed to parse version numbers: {}", e.what()); }
     } else {
         Log("No --version flag found in command line");
     }

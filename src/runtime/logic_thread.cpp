@@ -530,7 +530,7 @@ void CheckWorldExitReset() {
                 const auto& hotkey = cfg.hotkeys[i];
                 if (!hotkey.secondaryMode.empty() && GetHotkeySecondaryMode(i) != hotkey.secondaryMode) {
                     SetHotkeySecondaryMode(i, hotkey.secondaryMode);
-                    Log("[Hotkey] Reset secondary mode for hotkey to: " + hotkey.secondaryMode);
+                    Log("[Hotkey] Reset secondary mode for hotkey to: {}", hotkey.secondaryMode);
                 }
             }
         }
@@ -554,7 +554,7 @@ void ProcessPendingModeSwitch() {
     if (!g_pendingModeSwitch.pending) { return; }
 
     if (g_pendingModeSwitch.isPreview && !g_pendingModeSwitch.previewFromModeId.empty()) {
-        Log("[GUI] Processing preview mode switch: " + g_pendingModeSwitch.previewFromModeId + " -> " + g_pendingModeSwitch.modeId);
+        Log("[GUI] Processing preview mode switch: {} -> {}", g_pendingModeSwitch.previewFromModeId, g_pendingModeSwitch.modeId);
 
         std::string fromModeId = g_pendingModeSwitch.previewFromModeId;
         std::string toModeId = g_pendingModeSwitch.modeId;
@@ -563,8 +563,8 @@ void ProcessPendingModeSwitch() {
 
         SwitchToMode(toModeId, "Preview (animated)");
     } else {
-        LogCategory("gui", "[GUI] Processing deferred mode switch to: " + g_pendingModeSwitch.modeId +
-                               " (source: " + g_pendingModeSwitch.source + ")");
+        LogCategory(Log_Gui, "[GUI] Processing deferred mode switch to: {} (source: {})",
+            g_pendingModeSwitch.modeId, g_pendingModeSwitch.source);
 
         // This avoids cross-thread mutation of g_config from the logic thread
         SwitchToMode(g_pendingModeSwitch.modeId, g_pendingModeSwitch.source,
@@ -624,7 +624,7 @@ static void CheckAutoBorderless() {
 
     const UINT toggleMsg = GetToolscreenBorderlessToggleMessageId();
     if (!PostMessage(hwnd, toggleMsg, 0, 0)) {
-        Log("[LogicThread] Failed to queue auto-borderless message. Error=" + std::to_string(GetLastError()));
+        Log("[LogicThread] Failed to queue auto-borderless message. Error={}", GetLastError());
         return;
     }
 
@@ -633,7 +633,7 @@ static void CheckAutoBorderless() {
 }
 
 static void LogicThreadFunc() {
-    LogCategory("init", "[LogicThread] Started");
+    LogCategory(Log_Init, "[LogicThread] Started");
 
     const auto tickInterval = std::chrono::milliseconds(16);
 
@@ -684,7 +684,7 @@ void StartLogicThread() {
     g_logicThread = std::thread(LogicThreadFunc);
     g_logicThreadRunning.store(true);
 
-    LogCategory("init", "[LogicThread] Logic thread started");
+    LogCategory(Log_Init, "[LogicThread] Logic thread started");
 }
 
 void StopLogicThread() {

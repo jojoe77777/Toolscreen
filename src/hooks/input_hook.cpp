@@ -702,7 +702,7 @@ static bool TryHandleBrokenHoldHotkey(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
     }
 
     if (enableHotkeyDebug) {
-        Log("[Hotkey] HOLD RELEASE (state): " + activeHold.hotkeyId + " -> " + cfg.defaultMode);
+        Log("[Hotkey] HOLD RELEASE (state): {} -> {}", activeHold.hotkeyId, cfg.defaultMode);
     }
 
     s_activeHoldHotkey.reset();
@@ -945,7 +945,7 @@ static void QueueDeferredFocusRegainWmSize(HWND hWnd) {
 
     if (!PostMessage(hWnd, WM_TOOLSCREEN_APPLY_FOCUS_REGAIN_SIZE, 0, 0)) {
         s_deferredFocusRegainWmSizePending.store(false, std::memory_order_relaxed);
-        Log("[WINDOW] Failed to post deferred focus-regain WM_SIZE. Error=" + std::to_string(GetLastError()));
+        Log("[WINDOW] Failed to post deferred focus-regain WM_SIZE. Error={}", GetLastError());
     }
 }
 
@@ -1085,8 +1085,8 @@ InputHandlerResult HandleWindowValidation(HWND hWnd, UINT uMsg, WPARAM wParam, L
     PROFILE_SCOPE("HandleWindowValidation");
 
     if (g_subclassedHwnd.load() != hWnd) {
-        Log("WARNING: SubclassedWndProc called for unexpected window " + std::to_string(reinterpret_cast<uintptr_t>(hWnd)) + " (expected " +
-            std::to_string(reinterpret_cast<uintptr_t>(g_subclassedHwnd.load())) + ")");
+        Log("WARNING: SubclassedWndProc called for unexpected window {} (expected {})",
+            reinterpret_cast<uintptr_t>(hWnd), reinterpret_cast<uintptr_t>(g_subclassedHwnd.load()));
         if (g_originalWndProc) { return { true, CallWindowProc(g_originalWndProc, hWnd, uMsg, wParam, lParam) }; }
         return { true, DefWindowProc(hWnd, uMsg, wParam, lParam) };
     }
@@ -1148,7 +1148,7 @@ void HandleCharLogging(UINT uMsg, WPARAM wParam, LPARAM lParam) {
 
     auto cfgSnap = GetConfigSnapshot();
     if (cfgSnap && cfgSnap->debug.showHotkeyDebug) {
-        Log("WM_CHAR: " + std::to_string(wParam) + " " + std::to_string(lParam));
+        Log("WM_CHAR: {} {}", wParam, lParam);
     }
 }
 
@@ -1907,7 +1907,7 @@ InputHandlerResult HandleActivate(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lP
         ReleaseActiveLowLevelRebindKeys(hWnd);
 
         if (auto cs = GetConfigSnapshot(); cs && cs->debug.showHotkeyDebug) {
-            Log(std::string("[WINDOW] Window became inactive via ") + focusSource + ".");
+            Log("[WINDOW] Window became inactive via {}.", focusSource);
         }
         extern std::atomic<bool> g_isGameFocused;
         g_isGameFocused.store(false);
@@ -1923,7 +1923,7 @@ InputHandlerResult HandleActivate(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lP
         ImGuiInputQueue_EnqueueFocus(ownsForeground);
 
         if (auto cs = GetConfigSnapshot(); cs && cs->debug.showHotkeyDebug) {
-            Log(std::string("[WINDOW] Window became active via ") + focusSource + ".");
+            Log("[WINDOW] Window became active via {}.", focusSource);
         }
         extern std::atomic<bool> g_isGameFocused;
         g_isGameFocused.store(ownsForeground);
@@ -2140,19 +2140,17 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
     }
 
     if (s_enableHotkeyDebug) {
-        Log("[Hotkey] Key/button pressed: " + std::to_string(vkCode) + " (raw=" + std::to_string(rawVkCode) + ") in mode: " +
-            currentModeId);
+        Log("[Hotkey] Key/button pressed: {} (raw={}) in mode: {}", vkCode, rawVkCode, currentModeId);
     }
     if (s_enableHotkeyDebug) {
-        Log("[Hotkey] Current game state: " + gameState);
-        Log("[Hotkey] Evaluating " + std::to_string(cfg.hotkeys.size()) + " configured hotkeys");
+        Log("[Hotkey] Current game state: {}", gameState);
+        Log("[Hotkey] Evaluating {} configured hotkeys", cfg.hotkeys.size());
     }
 
     for (size_t hotkeyIdx = 0; hotkeyIdx < cfg.hotkeys.size(); ++hotkeyIdx) {
         const auto& hotkey = cfg.hotkeys[hotkeyIdx];
         if (s_enableHotkeyDebug) {
-            Log("[Hotkey] Checking: " + GetKeyComboString(hotkey.keys) + " (main: " + hotkey.mainMode + ", sec: " + hotkey.secondaryMode +
-                ")");
+            Log("[Hotkey] Checking: {} (main: {}, sec: {})", GetKeyComboString(hotkey.keys), hotkey.mainMode, hotkey.secondaryMode);
         }
 
         bool conditionsMet = MatchesConfiguredGameStateCondition(hotkey.conditions.gameState, gameState);
@@ -2181,7 +2179,7 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
                                   bool blockKey) -> InputHandlerResult {
             if (isKeyDown) {
                 if (isAutoRepeatKeyDown) {
-                    if (s_enableHotkeyDebug) { Log("[Hotkey] HOLD DOWN repeat ignored: " + hotkeyId); }
+                    if (s_enableHotkeyDebug) { Log("[Hotkey] HOLD DOWN repeat ignored: {}", hotkeyId); }
                     if (blockKey) return { true, 0 };
                     return { true, CallWindowProc(g_originalWndProc, hWnd, uMsg, wParam, lParam) };
                 }
@@ -2200,14 +2198,14 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
                 }
                 if (!debounced && !targetMode.empty()) {
                     ActivateHoldHotkeyState(holdKeys, hotkeyId, blockKey);
-                    if (s_enableHotkeyDebug) { Log("[Hotkey] HOLD DOWN: " + hotkeyId + " -> " + targetMode); }
+                    if (s_enableHotkeyDebug) { Log("[Hotkey] HOLD DOWN: {} -> {}", hotkeyId, targetMode); }
                     SwitchToMode(targetMode, "hotkey (hold)");
                 }
             } else {
                 if (s_activeHoldHotkey.has_value() && s_activeHoldHotkey->hotkeyId == hotkeyId) {
                     s_activeHoldHotkey.reset();
                 }
-                if (s_enableHotkeyDebug) { Log("[Hotkey] HOLD RELEASE: " + hotkeyId + " -> " + cfg.defaultMode); }
+                if (s_enableHotkeyDebug) { Log("[Hotkey] HOLD RELEASE: {} -> {}", hotkeyId, cfg.defaultMode); }
                 SwitchToMode(cfg.defaultMode, "hotkey (hold release)");
             }
             if (blockKey) return { true, 0 };
@@ -2240,7 +2238,7 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
                             if (pendingHotkeyId != hotkeyId) { g_triggerOnReleaseInvalidated.insert(pendingHotkeyId); }
                         }
                         g_triggerOnReleasePending.insert(hotkeyId);
-                        if (s_enableHotkeyDebug) { Log("[Hotkey] Alt trigger-on-release hotkey pressed, added to pending: " + hotkeyId); }
+                        if (s_enableHotkeyDebug) { Log("[Hotkey] Alt trigger-on-release hotkey pressed, added to pending: {}", hotkeyId); }
                         if (blockKey) return { true, 0 };
                         return { true, CallWindowProc(g_originalWndProc, hWnd, uMsg, wParam, lParam) };
                     } else {
@@ -2254,7 +2252,7 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
                         }
 
                         if (wasInvalidated) {
-                            if (s_enableHotkeyDebug) { Log("[Hotkey] Alt trigger-on-release hotkey invalidated: " + hotkeyId); }
+                            if (s_enableHotkeyDebug) { Log("[Hotkey] Alt trigger-on-release hotkey invalidated: {}", hotkeyId); }
                             if (blockKey) return { true, 0 };
                             return { true, CallWindowProc(g_originalWndProc, hWnd, uMsg, wParam, lParam) };
                         }
@@ -2277,7 +2275,7 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
                         }
                     }
                     if (debounced) {
-                        if (s_enableHotkeyDebug) { Log("[Hotkey] Alt hotkey matched but debounced: " + hotkeyId); }
+                        if (s_enableHotkeyDebug) { Log("[Hotkey] Alt hotkey matched but debounced: {}", hotkeyId); }
                         if (blockKey) return { true, 0 };
                         return { true, CallWindowProc(g_originalWndProc, hWnd, uMsg, wParam, lParam) };
                     }
@@ -2286,7 +2284,7 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
                     std::string newSecMode = (currentSecMode == alt.mode) ? hotkey.secondaryMode : alt.mode;
                     SetHotkeySecondaryMode(hotkeyIdx, newSecMode);
 
-                    if (s_enableHotkeyDebug) { Log("[Hotkey] ✓✓✓ ALT HOTKEY TRIGGERED: " + hotkeyId + " -> " + newSecMode); }
+                    if (s_enableHotkeyDebug) { Log("[Hotkey] ✓✓✓ ALT HOTKEY TRIGGERED: {} -> {}", hotkeyId, newSecMode); }
 
                     if (!newSecMode.empty()) { SwitchToMode(newSecMode, "alt hotkey"); }
                 }
@@ -2324,7 +2322,7 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
                             if (pendingHotkeyId != hotkeyId) { g_triggerOnReleaseInvalidated.insert(pendingHotkeyId); }
                         }
                         g_triggerOnReleasePending.insert(hotkeyId);
-                        if (s_enableHotkeyDebug) { Log("[Hotkey] Trigger-on-release hotkey pressed, added to pending: " + hotkeyId); }
+                        if (s_enableHotkeyDebug) { Log("[Hotkey] Trigger-on-release hotkey pressed, added to pending: {}", hotkeyId); }
                         if (blockKey) return { true, 0 };
                         return { true, CallWindowProc(g_originalWndProc, hWnd, uMsg, wParam, lParam) };
                     } else {
@@ -2339,7 +2337,7 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
 
                         if (wasInvalidated) {
                             if (s_enableHotkeyDebug) {
-                                Log("[Hotkey] Trigger-on-release hotkey invalidated (another key was pressed): " + hotkeyId);
+                                Log("[Hotkey] Trigger-on-release hotkey invalidated (another key was pressed): {}", hotkeyId);
                             }
                             if (blockKey) return { true, 0 };
                             return { true, CallWindowProc(g_originalWndProc, hWnd, uMsg, wParam, lParam) };
@@ -2363,7 +2361,7 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
                         }
                     }
                     if (debounced) {
-                        if (s_enableHotkeyDebug) { Log("[Hotkey] Main hotkey matched but debounced: " + hotkeyId); }
+                        if (s_enableHotkeyDebug) { Log("[Hotkey] Main hotkey matched but debounced: {}", hotkeyId); }
                         if (blockKey) return { true, 0 };
                         return { true, CallWindowProc(g_originalWndProc, hWnd, uMsg, wParam, lParam) };
                     }
@@ -2383,7 +2381,7 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
                     }
 
                     if (s_enableHotkeyDebug) {
-                        Log("[Hotkey] ✓✓✓ MAIN HOTKEY TRIGGERED: " + hotkeyId + " (current: " + current + " -> target: " + targetMode + ")");
+                        Log("[Hotkey] ✓✓✓ MAIN HOTKEY TRIGGERED: {} (current: {} -> target: {})", hotkeyId, current, targetMode);
                     }
 
                     if (!targetMode.empty()) { SwitchToMode(targetMode, "main hotkey"); }
@@ -2397,8 +2395,7 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
     for (size_t sensIdx = 0; sensIdx < cfg.sensitivityHotkeys.size(); ++sensIdx) {
         const auto& sensHotkey = cfg.sensitivityHotkeys[sensIdx];
         if (s_enableHotkeyDebug) {
-            Log("[Hotkey] Checking sensitivity hotkey: " + GetKeyComboString(sensHotkey.keys) +
-                " -> sens=" + std::to_string(sensHotkey.sensitivity));
+            Log("[Hotkey] Checking sensitivity hotkey: {} -> sens={}", GetKeyComboString(sensHotkey.keys), sensHotkey.sensitivity);
         }
 
         bool conditionsMet = MatchesConfiguredGameStateCondition(sensHotkey.conditions.gameState, gameState);
@@ -2434,7 +2431,7 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
                     }
                 }
                 if (debounced) {
-                    if (s_enableHotkeyDebug) { Log("[Hotkey] Sensitivity hotkey matched but debounced: " + hotkeyId); }
+                    if (s_enableHotkeyDebug) { Log("[Hotkey] Sensitivity hotkey matched but debounced: {}", hotkeyId); }
                     if (blockKey) return { true, 0 };
                     return { true, CallWindowProc(g_originalWndProc, hWnd, uMsg, wParam, lParam) };
                 }
@@ -2450,7 +2447,7 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
                         g_tempSensitivityOverride.sensitivityY = 1.0f;
                         g_tempSensitivityOverride.activeSensHotkeyIndex = -1;
 
-                        if (s_enableHotkeyDebug) { Log("[Hotkey] ✓✓✓ SENSITIVITY HOTKEY TOGGLED OFF: " + hotkeyId); }
+                        if (s_enableHotkeyDebug) { Log("[Hotkey] ✓✓✓ SENSITIVITY HOTKEY TOGGLED OFF: {}", hotkeyId); }
 
                         if (blockKey) return { true, 0 };
                         return { true, CallWindowProc(g_originalWndProc, hWnd, uMsg, wParam, lParam) };
@@ -2467,7 +2464,7 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
                     g_tempSensitivityOverride.activeSensHotkeyIndex = static_cast<int>(sensIdx);
 
                     if (s_enableHotkeyDebug) {
-                        Log("[Hotkey] ✓✓✓ SENSITIVITY HOTKEY TOGGLED ON: " + hotkeyId + " -> sens=" + std::to_string(sensHotkey.sensitivity));
+                        Log("[Hotkey] ✓✓✓ SENSITIVITY HOTKEY TOGGLED ON: {} -> sens={}", hotkeyId, sensHotkey.sensitivity);
                     }
                 } else {
                     {
@@ -2486,7 +2483,7 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
                     }
 
                     if (s_enableHotkeyDebug) {
-                        Log("[Hotkey] ✓✓✓ SENSITIVITY HOTKEY TRIGGERED: " + hotkeyId + " -> sens=" + std::to_string(sensHotkey.sensitivity));
+                        Log("[Hotkey] ✓✓✓ SENSITIVITY HOTKEY TRIGGERED: {} -> sens={}", hotkeyId, sensHotkey.sensitivity);
                     }
                 }
 
@@ -2968,7 +2965,7 @@ static bool RetargetLocalKeyRepeatAliasSource(DWORD rawVk, UINT scanCodeWithFlag
     s_localKeyRepeatOwner = retargetedState;
 
     if (IsLocalRepeatDebugEnabled()) {
-        Log("[LocalRepeat] retarget alias source owner=" + FormatLocalKeyRepeatStateForDebug(s_localKeyRepeatOwner));
+        Log("[LocalRepeat] retarget alias source owner={}", FormatLocalKeyRepeatStateForDebug(s_localKeyRepeatOwner));
     }
 
     return true;
@@ -2977,7 +2974,7 @@ static bool RetargetLocalKeyRepeatAliasSource(DWORD rawVk, UINT scanCodeWithFlag
 static bool PostLocalKeyRepeatKeyDown(HWND hWnd) {
     if (!hWnd || !IsWindow(hWnd) || !IsLocalKeyRepeatOwnerStillHeld()) {
         if (IsLocalRepeatDebugEnabled()) {
-            Log("[LocalRepeat] post-repeat skipped because owner is not held owner=" + FormatLocalKeyRepeatStateForDebug(s_localKeyRepeatOwner));
+            Log("[LocalRepeat] post-repeat skipped because owner is not held owner={}", FormatLocalKeyRepeatStateForDebug(s_localKeyRepeatOwner));
         }
         return false;
     }
@@ -2992,9 +2989,10 @@ static bool PostLocalKeyRepeatKeyDown(HWND hWnd) {
                                    false);
     repeatLParam |= kToolscreenLocalKeyRepeatMessageTag;
     if (IsLocalRepeatDebugEnabled()) {
-        Log("[LocalRepeat] post-repeat vk=" + std::to_string(s_localKeyRepeatOwner.repeatVk) +
-            " scan=" + std::to_string(s_localKeyRepeatOwner.repeatScanCodeWithFlags) +
-            " owner=" + FormatLocalKeyRepeatStateForDebug(s_localKeyRepeatOwner));
+        Log("[LocalRepeat] post-repeat vk={} scan={} owner={}",
+            s_localKeyRepeatOwner.repeatVk,
+            s_localKeyRepeatOwner.repeatScanCodeWithFlags,
+            FormatLocalKeyRepeatStateForDebug(s_localKeyRepeatOwner));
     }
     return ::PostMessage(hWnd, msg, static_cast<WPARAM>(s_localKeyRepeatOwner.repeatVk), repeatLParam) != FALSE;
 }
@@ -3035,7 +3033,7 @@ static InputHandlerResult HandleLocalKeyRepeat(HWND hWnd, UINT uMsg, WPARAM wPar
             const int remainingDelayMs =
                 remainingDelayMs64 > static_cast<ULONGLONG>(0x7fffffff) ? 0x7fffffff : static_cast<int>(remainingDelayMs64);
             if (IsLocalRepeatDebugEnabled()) {
-                Log("[LocalRepeat] ignore repeat tick before due time remainingMs=" + std::to_string(remainingDelayMs));
+                Log("[LocalRepeat] ignore repeat tick before due time remainingMs={}", remainingDelayMs);
             }
             ArmLocalKeyRepeatTimer(hWnd, remainingDelayMs);
             return { true, 0 };
@@ -3064,8 +3062,8 @@ static InputHandlerResult HandleLocalKeyRepeat(HWND hWnd, UINT uMsg, WPARAM wPar
             UINT repeatScanCodeWithFlags = 0;
             if (TryResolveLocalKeyRepeatVkFromChar(wParam, repeatVk, repeatScanCodeWithFlags)) {
                 if (IsLocalRepeatDebugEnabled()) {
-                    Log("[LocalRepeat] learn repeat from char=" + std::to_string(static_cast<unsigned int>(wParam)) +
-                        " repeatVk=" + std::to_string(repeatVk) + " repeatScan=" + std::to_string(repeatScanCodeWithFlags));
+                    Log("[LocalRepeat] learn repeat from char={} repeatVk={} repeatScan={}",
+                        static_cast<unsigned int>(wParam), repeatVk, repeatScanCodeWithFlags);
                 }
                 s_localKeyRepeatOwner.repeatVk = repeatVk;
                 s_localKeyRepeatOwner.repeatScanCodeWithFlags = repeatScanCodeWithFlags;
@@ -3108,8 +3106,7 @@ static InputHandlerResult HandleLocalKeyRepeat(HWND hWnd, UINT uMsg, WPARAM wPar
     const ULONG_PTR extraInfo = GetMessageExtraInfo();
     if (extraInfo == kToolscreenInjectedExtraInfo || extraInfo == kToolscreenMenuMaskExtraInfo) {
         if (IsLocalRepeatDebugEnabled()) {
-            Log("[LocalRepeat] ignore keyboard event because Toolscreen injected it extraInfo=" +
-                std::to_string(static_cast<unsigned long long>(extraInfo)));
+            Log("[LocalRepeat] ignore keyboard event because Toolscreen injected it extraInfo={}", extraInfo);
         }
         return { false, 0 };
     }
@@ -3136,15 +3133,15 @@ static InputHandlerResult HandleLocalKeyRepeat(HWND hWnd, UINT uMsg, WPARAM wPar
         const bool alreadyHeld = s_localKeyRepeatHeldKeys.find(trackedVk) != s_localKeyRepeatHeldKeys.end();
         if ((lParam & (static_cast<LPARAM>(1) << 30)) != 0 && alreadyHeld) {
             if (IsLocalRepeatDebugEnabled()) {
-                Log("[LocalRepeat] suppress keydown because bit30 marks exact key as repeat rawVk=" + std::to_string(rawVk) +
-                    " trackedVk=" + std::to_string(trackedVk));
+                Log("[LocalRepeat] suppress keydown because bit30 marks exact key as repeat rawVk={} trackedVk={}",
+                    rawVk, trackedVk);
             }
             return { true, 0 };
         }
 
         if ((lParam & (static_cast<LPARAM>(1) << 30)) != 0 && IsLocalRepeatDebugEnabled()) {
-            Log("[LocalRepeat] allow keydown despite bit30 because exact key is not held rawVk=" + std::to_string(rawVk) +
-                " trackedVk=" + std::to_string(trackedVk));
+            Log("[LocalRepeat] allow keydown despite bit30 because exact key is not held rawVk={} trackedVk={}",
+                rawVk, trackedVk);
         }
 
         if (alreadyHeld) {
@@ -3152,9 +3149,8 @@ static InputHandlerResult HandleLocalKeyRepeat(HWND hWnd, UINT uMsg, WPARAM wPar
                 s_localKeyRepeatSuppressedChars.push_back({ trackedVk, lParam });
             }
             if (IsLocalRepeatDebugEnabled()) {
-                Log("[LocalRepeat] suppress duplicate held keydown rawVk=" + std::to_string(rawVk) +
-                    " trackedVk=" + std::to_string(trackedVk) +
-                    " owner=" + FormatLocalKeyRepeatStateForDebug(s_localKeyRepeatOwner));
+                Log("[LocalRepeat] suppress duplicate held keydown rawVk={} trackedVk={} owner={}",
+                    rawVk, trackedVk, FormatLocalKeyRepeatStateForDebug(s_localKeyRepeatOwner));
             }
             return { true, 0 };
         }
@@ -3166,20 +3162,18 @@ static InputHandlerResult HandleLocalKeyRepeat(HWND hWnd, UINT uMsg, WPARAM wPar
         if (IsModifierVk(trackedVk)) {
             if (s_localKeyRepeatOwnerActive || !s_localKeyRepeatHeldKeys.empty()) {
                 if (IsLocalRepeatDebugEnabled()) {
-                    Log("[LocalRepeat] interrupt active repeat on modifier keydown rawVk=" + std::to_string(rawVk) +
-                        " trackedVk=" + std::to_string(trackedVk));
+                    Log("[LocalRepeat] interrupt active repeat on modifier keydown rawVk={} trackedVk={}", rawVk, trackedVk);
                 }
                 ResetLocalKeyRepeatState(hWnd);
             } else if (IsLocalRepeatDebugEnabled()) {
-                Log("[LocalRepeat] allow modifier keydown with no active repeat to interrupt rawVk=" + std::to_string(rawVk) +
-                    " trackedVk=" + std::to_string(trackedVk));
+                Log("[LocalRepeat] allow modifier keydown with no active repeat to interrupt rawVk={} trackedVk={}", rawVk, trackedVk);
             }
             return { false, 0 };
         }
 
         BeginLocalKeyRepeatTracking(hWnd, trackedVk, GetScanCodeWithExtendedFlagFromLParam(lParam), uMsg == WM_SYSKEYDOWN, lParam);
         if (IsLocalRepeatDebugEnabled()) {
-            Log("[LocalRepeat] begin tracking owner=" + FormatLocalKeyRepeatStateForDebug(s_localKeyRepeatOwner));
+            Log("[LocalRepeat] begin tracking owner={}", FormatLocalKeyRepeatStateForDebug(s_localKeyRepeatOwner));
         }
         return { false, 0 };
     }
@@ -3197,10 +3191,8 @@ static InputHandlerResult HandleLocalKeyRepeat(HWND hWnd, UINT uMsg, WPARAM wPar
 
     if (s_localKeyRepeatOwnerActive && (s_localKeyRepeatOwner.rawVk == trackedVk || matchesRemappedOwnerKeyUp)) {
         if (IsLocalRepeatDebugEnabled()) {
-            Log("[LocalRepeat] release owner rawVk=" + std::to_string(rawVk) +
-                " trackedVk=" + std::to_string(trackedVk) +
-                " remappedMatch=" + std::to_string(matchesRemappedOwnerKeyUp ? 1 : 0) +
-                " owner=" + FormatLocalKeyRepeatStateForDebug(s_localKeyRepeatOwner));
+            Log("[LocalRepeat] release owner rawVk={} trackedVk={} remappedMatch={} owner={}",
+                rawVk, trackedVk, matchesRemappedOwnerKeyUp ? 1 : 0, FormatLocalKeyRepeatStateForDebug(s_localKeyRepeatOwner));
         }
         s_localKeyRepeatOwner = {};
         s_localKeyRepeatOwnerActive = false;
@@ -3209,8 +3201,8 @@ static InputHandlerResult HandleLocalKeyRepeat(HWND hWnd, UINT uMsg, WPARAM wPar
 
     if (IsModifierVk(trackedVk) && IsLocalKeyRepeatOwnerStillHeld()) {
         if (IsLocalRepeatDebugEnabled()) {
-            Log("[LocalRepeat] restart repeat delay after modifier keyup trackedVk=" + std::to_string(trackedVk) +
-                " owner=" + FormatLocalKeyRepeatStateForDebug(s_localKeyRepeatOwner));
+            Log("[LocalRepeat] restart repeat delay after modifier keyup trackedVk={} owner={}",
+                trackedVk, FormatLocalKeyRepeatStateForDebug(s_localKeyRepeatOwner));
         }
         RestartLocalKeyRepeatStartDelay(hWnd);
     }
@@ -3730,7 +3722,7 @@ static void EnsureLowLevelKeyboardHookInstalled() {
         return;
     }
 
-    LogCategory("init", "Installed low-level keyboard hook for exact modifier tracking and deep key rebind suppression.");
+    LogCategory(Log_Init, "Installed low-level keyboard hook for exact modifier tracking and deep key rebind suppression.");
 }
 
 static bool HasDeepSuppressionEligibleEnabledRebind() {
@@ -3820,7 +3812,7 @@ static void UninstallLowLevelKeyboardHook() {
         return;
     }
 
-    LogCategory("init", "Uninstalled low-level keyboard hook for exact modifier tracking and deep key rebind suppression.");
+    LogCategory(Log_Init, "Uninstalled low-level keyboard hook for exact modifier tracking and deep key rebind suppression.");
 }
 
 static void UpdateLowLevelKeyboardHookInstalledState() {
@@ -4731,8 +4723,8 @@ InputHandlerResult HandleCharRebinding(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
                 if (outputVK == 0) {
                     if (RebindCannotType(rebind)) {
                         if (logHotkeyDebug) {
-                            Log("[REBIND WM_CHAR] Consuming char code " + std::to_string(static_cast<unsigned int>(inputChar)) +
-                                " (trigger cannot type)");
+                            Log("[REBIND WM_CHAR] Consuming char code {} (trigger cannot type)",
+                                static_cast<unsigned int>(inputChar));
                         }
                         return { true, 0 };
                     }
@@ -4762,15 +4754,15 @@ InputHandlerResult HandleCharRebinding(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
 
                 if (outputChar == 0) {
                     if (logHotkeyDebug) {
-                        Log("[REBIND WM_CHAR] Consuming char code " + std::to_string(static_cast<unsigned int>(inputChar)) +
-                            " (output VK has no WM_CHAR)");
+                        Log("[REBIND WM_CHAR] Consuming char code {} (output VK has no WM_CHAR)",
+                            static_cast<unsigned int>(inputChar));
                     }
                     return { true, 0 };
                 }
 
                 if (logHotkeyDebug) {
-                    Log("[REBIND WM_CHAR] Remapping char code " + std::to_string(static_cast<unsigned int>(inputChar)) + " -> " +
-                        std::to_string(static_cast<unsigned int>(outputChar)));
+                    Log("[REBIND WM_CHAR] Remapping char code {} -> {}",
+                        static_cast<unsigned int>(inputChar), static_cast<unsigned int>(outputChar));
                 }
 
                 return { true, CallWindowProc(g_originalWndProc, hWnd, uMsg, outputChar, lParam) };
@@ -5036,7 +5028,7 @@ static InputHandlerResult HandleShiftHotkeyPolling(HWND hWnd, UINT uMsg, WPARAM 
     auto processTransition = [&](DWORD vkCode, bool wasDown, bool isDownNow, const char* label, InputHandlerResult& lastResult,
                                  bool& anyConsumed) {
         if (logHotkeyDebug) {
-            Log(std::string("[Hotkey] shift poll dispatch ") + label + (isDownNow ? " down" : " up"));
+            Log("[Hotkey] shift poll dispatch {} {}", label, isDownNow ? "down" : "up");
         }
         lastResult = DispatchSyntheticShiftHotkeyEvent(hWnd, vkCode, isDownNow, wasDown);
         anyConsumed = anyConsumed || lastResult.consumed;

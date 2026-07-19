@@ -102,7 +102,7 @@ void LoadLangs() {
 
         g_langsJson = nlohmann::json::parse((const char*)resPtr, (const char*)resPtr + resSize);
     } catch (const std::exception& e) {
-        Log(std::string("Failed to load language list: ") + e.what());
+        Log("Failed to load language list: {}", e.what());
     }
 }
 
@@ -124,7 +124,7 @@ bool LoadTranslation(const std::string& lang) {
         g_translationCache.clear();
         g_translationGeneration.fetch_add(1, std::memory_order_release);
     } catch (const std::exception& e) {
-        Log("Failed to load translations of " + lang + ": " + e.what());
+        Log("Failed to load translations of {}: {}", lang, e.what());
         return false;
     }
     return true;
@@ -177,11 +177,11 @@ const std::string& tr_ref(const char* key) {
     }
 
     if (!g_translationJson.contains(key)) {
-        Log("Missing English translation for key: " + std::string(key));
+        Log("Missing English translation for key: {}", key);
         return g_translationCache.emplace(key, key).first->second;
     }
     if (!g_translationJson[key].is_string()) {
-        Log(std::format("Translation for key '{}' is not a string", key));
+        Log("Translation for key '{}' is not a string", key);
         return g_translationCache.emplace(key, key).first->second;
     }
 

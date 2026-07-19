@@ -456,7 +456,7 @@ if (IsResolutionChangeSupported(g_gameVersion)) {
                 std::lock_guard<std::mutex> hotkeyLock(g_hotkeyMainKeysMutex);
                 RebuildHotkeyMainKeys_Internal();
                 g_configIsDirty = true;
-            } catch (const std::exception& e) { Log(std::string("ERROR: Failed to add new hotkey: ") + e.what()); }
+            } catch (const std::exception& e) { Log("ERROR: Failed to add new hotkey: {}", e.what()); }
         }
 
         ImGui::SameLine();
@@ -664,7 +664,7 @@ if (IsResolutionChangeSupported(g_gameVersion)) {
                 std::lock_guard<std::mutex> hotkeyLock(g_hotkeyMainKeysMutex);
                 RebuildHotkeyMainKeys_Internal();
                 g_configIsDirty = true;
-            } catch (const std::exception& e) { Log(std::string("ERROR: Failed to add sensitivity hotkey: ") + e.what()); }
+            } catch (const std::exception& e) { Log("ERROR: Failed to add sensitivity hotkey: {}", e.what()); }
         }
 
         ImGui::EndTabItem();

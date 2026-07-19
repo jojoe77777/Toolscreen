@@ -771,7 +771,7 @@ static GLuint MT_CompileShader(GLenum type, const char* source) {
     if (!ok) {
         char log[512];
         glGetShaderInfoLog(shader, 512, NULL, log);
-        Log("Mirror Thread: Shader compile error: " + std::string(log));
+        Log("Mirror Thread: Shader compile error: {}", log);
         glDeleteShader(shader);
         return 0;
     }
@@ -797,7 +797,7 @@ static GLuint MT_CreateShaderProgram(const char* vertSrc, const char* fragSrc) {
     if (!ok) {
         char log[512];
         glGetProgramInfoLog(p, 512, NULL, log);
-        Log("Mirror Thread: Shader link error: " + std::string(log));
+        Log("Mirror Thread: Shader link error: {}", log);
         glDeleteProgram(p);
         return 0;
     }
@@ -805,7 +805,7 @@ static GLuint MT_CreateShaderProgram(const char* vertSrc, const char* fragSrc) {
 }
 
 static bool MT_InitializeShaders() {
-    LogCategory("init", "Mirror Thread: Initializing local shaders...");
+    LogCategory(Log_Init, "Mirror Thread: Initializing local shaders...");
 
     mt_filterProgram = MT_CreateShaderProgram(mt_passthrough_vert_shader, mt_filter_frag_shader);
     mt_filterPassthroughProgram = MT_CreateShaderProgram(mt_passthrough_vert_shader, mt_filter_passthrough_frag_shader);
@@ -930,7 +930,7 @@ static bool MT_InitializeShaders() {
 
     glUseProgram(0);
 
-    LogCategory("init", "Mirror Thread: Local shaders initialized successfully");
+    LogCategory(Log_Init, "Mirror Thread: Local shaders initialized successfully");
     return true;
 }
 
@@ -1043,8 +1043,7 @@ void InitCaptureTexture(int width, int height) {
     g_copyTextureWriteIndex.store(0);
     g_safeReadTextureValid.store(false, std::memory_order_release);
 
-    LogCategory("init", "InitCaptureTexture: Created FBO and " + std::to_string(2) + " textures of " + std::to_string(width) + "x" +
-                            std::to_string(height));
+    LogCategory(Log_Init, "InitCaptureTexture: Created FBO and {} textures of {}x{}", 2, width, height);
 }
 
 void EnsureCaptureTextureInitialized(int width, int height) {
@@ -1166,7 +1165,7 @@ void SubmitFrameCapture(GLuint gameTexture, int width, int height) {
 
         g_copyTextureW = width;
         g_copyTextureH = height;
-        LogCategory("texture_ops", "SubmitFrameCapture: Resized copy textures to " + std::to_string(width) + "x" + std::to_string(height));
+        LogCategory(Log_TextureOps, "SubmitFrameCapture: Resized copy textures to {}x{}", width, height);
     }
 
     static GLuint srcFBO = 0;
@@ -1178,9 +1177,9 @@ void SubmitFrameCapture(GLuint gameTexture, int width, int height) {
     if (srcStatus != GL_FRAMEBUFFER_COMPLETE) {
         static int s_srcIncompleteLog = 0;
         if ((++s_srcIncompleteLog % 240) == 1) {
-            LogCategory("texture_ops",
-                        "SubmitFrameCapture: Source FBO incomplete (status " + std::to_string(srcStatus) + ") gameTex=" +
-                            std::to_string(gameTexture) + " size=" + std::to_string(width) + "x" + std::to_string(height));
+            LogCategory(Log_TextureOps,
+                        "SubmitFrameCapture: Source FBO incomplete (status {}) gameTex={} size={}x{}",
+                        srcStatus, gameTexture, width, height);
         }
         glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
         restoreState();
@@ -1195,10 +1194,9 @@ void SubmitFrameCapture(GLuint gameTexture, int width, int height) {
     if (dstStatus != GL_FRAMEBUFFER_COMPLETE) {
         static int s_dstIncompleteLog = 0;
         if ((++s_dstIncompleteLog % 240) == 1) {
-            LogCategory("texture_ops",
-                        "SubmitFrameCapture: Destination FBO incomplete (status " + std::to_string(dstStatus) + ") writeIdx=" +
-                            std::to_string(writeIndex) + " dstTex=" + std::to_string(g_copyTextures[writeIndex]) + " size=" +
-                            std::to_string(width) + "x" + std::to_string(height));
+            LogCategory(Log_TextureOps,
+                        "SubmitFrameCapture: Destination FBO incomplete (status {}) writeIdx={} dstTex={} size={}x{}",
+                        dstStatus, writeIndex, g_copyTextures[writeIndex], width, height);
         }
         glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);

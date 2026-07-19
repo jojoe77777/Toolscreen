@@ -189,8 +189,8 @@ void RestoreModeDimensionsFromDefaults(const toml::table& tbl, const std::vector
             repairedFields += "height";
         }
 
-        Log("[CONFIG] Restored mode '" + mode.id + "' " + repairedFields + " from embedded defaults because config.toml contained " +
-            (restoredWidth && restoredHeight ? "0/1 values for both dimensions." : "a 0/1 value."));
+        Log("[CONFIG] Restored mode '{}' {} from embedded defaults because config.toml contained {}",
+            mode.id, repairedFields, restoredWidth && restoredHeight ? "0/1 values for both dimensions." : "a 0/1 value.");
     }
 }
 
@@ -3468,7 +3468,7 @@ bool SerializeConfigToTomlString(const Config& config, std::string& outToml) {
         outToml = out.str();
         return true;
     } catch (const std::exception& e) {
-        Log("ERROR: Failed to serialize config to TOML: " + std::string(e.what()));
+        Log("ERROR: Failed to serialize config to TOML: {}", e.what());
         return false;
     }
 }
@@ -3486,7 +3486,7 @@ bool SaveConfigToTomlFile(const Config& config, const std::wstring& path) {
         file.close();
         return file.good();
     } catch (const std::exception& e) {
-        Log("ERROR: Failed to save config to TOML: " + std::string(e.what()));
+        Log("ERROR: Failed to save config to TOML: {}", e.what());
         return false;
     }
 }
@@ -3495,7 +3495,7 @@ bool LoadConfigFromTomlFile(const std::wstring& path, Config& config) {
     try {
         std::ifstream in(std::filesystem::path(path), std::ios::binary);
         if (!in.is_open()) {
-            Log("ERROR: Failed to open config for reading: " + WideToUtf8(path));
+            Log("ERROR: Failed to open config for reading: {}", WideToUtf8(path));
             return false;
         }
 
@@ -3512,9 +3512,9 @@ bool LoadConfigFromTomlFile(const std::wstring& path, Config& config) {
                 RepairLegacyArrayOfTablesConflicts(source, repairedSource) &&
                 ParseTomlTableFromString(repairedSource, tbl, parseError)) {
                 repairedLegacyArrayConflict = true;
-                Log("WARNING: Repaired legacy TOML array-of-tables conflict while loading: " + WideToUtf8(path));
+                Log("WARNING: Repaired legacy TOML array-of-tables conflict while loading: {}", WideToUtf8(path));
             } else {
-                Log("ERROR: TOML parse error: " + parseError);
+                Log("ERROR: TOML parse error: {}", parseError);
                 return false;
             }
         }
@@ -3525,14 +3525,14 @@ bool LoadConfigFromTomlFile(const std::wstring& path, Config& config) {
 
         if (cleanedAppearanceCustomColors || repairedLegacyArrayConflict) {
             if (!SaveConfigToTomlFile(config, path)) {
-                Log("WARNING: Failed to persist sanitized config/profile TOML after load: " + WideToUtf8(path));
+                Log("WARNING: Failed to persist sanitized config/profile TOML after load: {}", WideToUtf8(path));
             } else if (cleanedAppearanceCustomColors) {
-                Log("WARNING: Removed invalid appearance.customColors entries while loading: " + WideToUtf8(path));
+                Log("WARNING: Removed invalid appearance.customColors entries while loading: {}", WideToUtf8(path));
             }
         }
         return true;
     } catch (const std::exception& e) {
-        Log("ERROR: Failed to load config from TOML: " + std::string(e.what()));
+        Log("ERROR: Failed to load config from TOML: {}", e.what());
         return false;
     }
 }
@@ -3549,26 +3549,26 @@ static std::string LoadEmbeddedRcDataString(int resourceId, const char* debugNam
     HMODULE hModule = nullptr;
     if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                             reinterpret_cast<LPCWSTR>(&LoadEmbeddedRcDataString), &hModule)) {
-        Log(std::string("ERROR: Failed to get module handle for ") + debugName);
+        Log("ERROR: Failed to get module handle for {}", debugName);
         return "";
     }
 
     HRSRC hResource = FindResourceW(hModule, MAKEINTRESOURCEW(resourceId), RT_RCDATA);
     if (!hResource) {
-        Log(std::string("ERROR: Failed to find ") + debugName + " resource. Error: " + std::to_string(GetLastError()));
+        Log("ERROR: Failed to find {} resource. Error: {}", debugName, std::to_string(GetLastError()));
         return "";
     }
 
     HGLOBAL hData = LoadResource(hModule, hResource);
     if (!hData) {
-        Log(std::string("ERROR: Failed to load ") + debugName + " resource. Error: " + std::to_string(GetLastError()));
+        Log("ERROR: Failed to load {} resource. Error: {}", debugName, std::to_string(GetLastError()));
         return "";
     }
 
     const DWORD size = SizeofResource(hModule, hResource);
     const char* data = static_cast<const char*>(LockResource(hData));
     if (!data || size == 0) {
-        Log(std::string("ERROR: Failed to lock ") + debugName + " resource or resource is empty");
+        Log("ERROR: Failed to lock {} resource or resource is empty", debugName);
         return "";
     }
 
@@ -3584,7 +3584,7 @@ std::string GetEmbeddedDefaultConfigString() {
     }
     s_embeddedConfigLoaded = true;
 
-    Log("Loaded embedded default.toml (" + std::to_string(s_embeddedConfigCache.size()) + " bytes)");
+    Log("Loaded embedded default.toml ({} bytes)", s_embeddedConfigCache.size());
     return s_embeddedConfigCache;
 }
 
@@ -3620,7 +3620,7 @@ std::vector<NinjabrainPresetDefinition> GetEmbeddedNinjabrainPresets() {
             const toml::table tbl = toml::parse(presetToml);
             const toml::table* overlayTbl = GetTable(tbl, "ninjabrainOverlay");
             if (!overlayTbl) {
-                Log(std::string("ERROR: Ninjabrain preset TOML is missing [ninjabrainOverlay]: ") + resource.debugName);
+                Log("ERROR: Ninjabrain preset TOML is missing [ninjabrainOverlay]: {}", resource.debugName);
                 continue;
             }
 
@@ -3635,7 +3635,7 @@ std::vector<NinjabrainPresetDefinition> GetEmbeddedNinjabrainPresets() {
 
             s_embeddedNinjabrainPresetsCache.push_back(std::move(preset));
         } catch (const std::exception& e) {
-            Log(std::string("ERROR: Failed to parse ") + resource.debugName + ": " + e.what());
+            Log("ERROR: Failed to parse {}: {}", resource.debugName, e.what());
         }
     }
 
@@ -3652,10 +3652,10 @@ bool LoadEmbeddedDefaultConfig(Config& config) {
         ConfigFromToml(tbl, config);
         return true;
     } catch (const toml::parse_error& e) {
-        Log("ERROR: Failed to parse embedded default.toml: " + std::string(e.what()));
+        Log("ERROR: Failed to parse embedded default.toml: {}", e.what());
         return false;
     } catch (const std::exception& e) {
-        Log("ERROR: Failed to load embedded default config: " + std::string(e.what()));
+        Log("ERROR: Failed to load embedded default config: {}", e.what());
         return false;
     }
 }
@@ -3699,7 +3699,7 @@ std::vector<ModeConfig> GetDefaultModesFromEmbedded() {
             }
         }
 
-    } catch (const std::exception& e) { Log("ERROR: Failed to parse embedded modes: " + std::string(e.what())); }
+    } catch (const std::exception& e) { Log("ERROR: Failed to parse embedded modes: {}", e.what()); }
 
     return modes;
 }
@@ -3726,7 +3726,7 @@ std::vector<MirrorConfig> GetDefaultMirrorsFromEmbedded() {
             }
         }
 
-    } catch (const std::exception& e) { Log("ERROR: Failed to parse embedded mirrors: " + std::string(e.what())); }
+    } catch (const std::exception& e) { Log("ERROR: Failed to parse embedded mirrors: {}", e.what()); }
 
     return mirrors;
 }
@@ -3754,7 +3754,7 @@ std::vector<MirrorGroupConfig> GetDefaultMirrorGroupsFromEmbedded() {
         }
 
     } catch (const std::exception& e) {
-        Log("ERROR: Failed to parse embedded mirror groups: " + std::string(e.what()));
+        Log("ERROR: Failed to parse embedded mirror groups: {}", e.what());
     }
 
     return groups;
@@ -3782,7 +3782,7 @@ std::vector<HotkeyConfig> GetDefaultHotkeysFromEmbedded() {
             }
         }
 
-    } catch (const std::exception& e) { Log("ERROR: Failed to parse embedded hotkeys: " + std::string(e.what())); }
+    } catch (const std::exception& e) { Log("ERROR: Failed to parse embedded hotkeys: {}", e.what()); }
 
     return hotkeys;
 }
@@ -3819,7 +3819,7 @@ std::vector<ImageConfig> GetDefaultImagesFromEmbedded() {
             }
         }
 
-    } catch (const std::exception& e) { Log("ERROR: Failed to parse embedded images: " + std::string(e.what())); }
+    } catch (const std::exception& e) { Log("ERROR: Failed to parse embedded images: {}", e.what()); }
 
     return images;
 }
@@ -3849,7 +3849,7 @@ CursorsConfig GetDefaultCursorsFromEmbedded() {
         cursors.wall.cursorSize = systemCursorSize;
         cursors.ingame.cursorSize = systemCursorSize;
 
-    } catch (const std::exception& e) { Log("ERROR: Failed to parse embedded cursors: " + std::string(e.what())); }
+    } catch (const std::exception& e) { Log("ERROR: Failed to parse embedded cursors: {}", e.what()); }
 
     return cursors;
 }
@@ -3888,7 +3888,7 @@ EyeZoomConfig GetDefaultEyeZoomConfigFromEmbedded() {
         eyezoom.positionX = horizontalMargin;
         eyezoom.positionY = verticalMargin;
 
-    } catch (const std::exception& e) { Log("ERROR: Failed to parse embedded eyezoom: " + std::string(e.what())); }
+    } catch (const std::exception& e) { Log("ERROR: Failed to parse embedded eyezoom: {}", e.what()); }
 
     return eyezoom;
 }

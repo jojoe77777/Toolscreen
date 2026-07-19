@@ -239,8 +239,7 @@ bool TryObsBlitFramebufferRedirect(GLint readFBO,
             if (status != GL_FRAMEBUFFER_COMPLETE) {
                 static GLenum lastLoggedStatus = GL_FRAMEBUFFER_COMPLETE;
                 if (status != lastLoggedStatus) {
-                    Log("[OBS Hook] WARNING: Redirect FBO incomplete! Status: " + std::to_string(status) +
-                        ", Texture: " + std::to_string(obsTexture));
+                    Log("[OBS Hook] WARNING: Redirect FBO incomplete! Status: {}, Texture: {}", status, obsTexture);
                     lastLoggedStatus = status;
                 }
                 g_obsRedirectAttachedTexture = 0;

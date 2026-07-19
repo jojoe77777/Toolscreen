@@ -469,8 +469,8 @@ bool SubclassGameWindow(HWND hwnd) {
     }
 
     if (currentSubclassed != NULL && currentSubclassed != hwnd) {
-        Log("Window handle changed from " + std::to_string(reinterpret_cast<uintptr_t>(currentSubclassed)) + " to " +
-            std::to_string(reinterpret_cast<uintptr_t>(hwnd)) + " (likely fullscreen toggle)");
+        Log("Window handle changed from {} to {} (likely fullscreen toggle)",
+            reinterpret_cast<uintptr_t>(currentSubclassed), reinterpret_cast<uintptr_t>(hwnd));
         g_originalWndProc = NULL;
 
         g_minecraftHwnd.store(hwnd);
@@ -488,26 +488,24 @@ bool SubclassGameWindow(HWND hwnd) {
             ApplyKeyRepeatSettings();
             ApplyConfineCursorToGameWindow();
         }
-        Log("Successfully subclassed window: " + std::to_string(reinterpret_cast<uintptr_t>(hwnd)));
+        Log("Successfully subclassed window: {}", reinterpret_cast<uintptr_t>(hwnd));
         return true;
     } else {
-        Log("ERROR: Failed to subclass window: " + std::to_string(reinterpret_cast<uintptr_t>(hwnd)));
+        Log("ERROR: Failed to subclass window: {}", reinterpret_cast<uintptr_t>(hwnd));
         return false;
     }
 }
 
 template <typename T> bool CreateHookOrDie(LPVOID pTarget, LPVOID pDetour, T** ppOriginal, const char* hookName) {
-    if (pTarget == NULL) {
-        std::string warnMsg = std::string("WARNING: ") + hookName + " function not found (NULL pointer)";
-        Log(warnMsg);
+    if (pTarget == nullptr) {
+        Log("WARNING: {} function not found (NULL pointer)", hookName);
         return false;
     }
     if (MH_CreateHook(pTarget, pDetour, reinterpret_cast<void**>(ppOriginal)) != MH_OK) {
-        std::string errorMsg = std::string("ERROR: ") + hookName + " hook failed!";
-        Log(errorMsg);
+        Log("ERROR: {} hook failed!", hookName);
         return false;
     }
-    LogCategory("init", "Created hook for " + std::string(hookName));
+    LogCategory(Log_Init, "Created hook for {}", hookName);
     return true;
 }
 
@@ -604,7 +602,7 @@ void SaveOriginalWindowsMouseSpeed() {
     int currentSpeed = 0;
     if (SystemParametersInfo(SPI_GETMOUSESPEED, 0, &currentSpeed, 0)) {
         g_originalWindowsMouseSpeed = currentSpeed;
-        LogCategory("init", "Saved original Windows mouse speed: " + std::to_string(currentSpeed));
+        LogCategory(Log_Init, "Saved original Windows mouse speed: {}", currentSpeed);
     } else {
         Log("WARNING: Failed to get current Windows mouse speed");
         g_originalWindowsMouseSpeed = 10;
@@ -632,7 +630,7 @@ void ApplyWindowsMouseSpeed() {
         if (g_windowsMouseSpeedApplied.load()) {
             if (SystemParametersInfo(SPI_SETMOUSESPEED, 0, reinterpret_cast<void*>(static_cast<intptr_t>(g_originalWindowsMouseSpeed)),
                                      0)) {
-                Log("Restored Windows mouse speed to: " + std::to_string(g_originalWindowsMouseSpeed));
+                Log("Restored Windows mouse speed to: {}", g_originalWindowsMouseSpeed);
             }
             g_windowsMouseSpeedApplied.store(false);
         }
@@ -644,9 +642,9 @@ void ApplyWindowsMouseSpeed() {
 
     if (SystemParametersInfo(SPI_SETMOUSESPEED, 0, reinterpret_cast<void*>(static_cast<intptr_t>(targetSpeed)), 0)) {
         g_windowsMouseSpeedApplied.store(true);
-        Log("Applied Windows mouse speed: " + std::to_string(targetSpeed));
+        Log("Applied Windows mouse speed: {}", targetSpeed);
     } else {
-        Log("WARNING: Failed to set Windows mouse speed to: " + std::to_string(targetSpeed));
+        Log("WARNING: Failed to set Windows mouse speed to: {}", targetSpeed);
     }
 }
 
@@ -654,7 +652,7 @@ void ApplyWindowsMouseSpeed() {
 void RestoreWindowsMouseSpeed() {
     if (g_windowsMouseSpeedApplied.load()) {
         if (SystemParametersInfo(SPI_SETMOUSESPEED, 0, reinterpret_cast<void*>(static_cast<intptr_t>(g_originalWindowsMouseSpeed)), 0)) {
-            Log("Restored Windows mouse speed to: " + std::to_string(g_originalWindowsMouseSpeed));
+            Log("Restored Windows mouse speed to: {}", g_originalWindowsMouseSpeed);
         } else {
             Log("WARNING: Failed to restore Windows mouse speed");
         }
@@ -666,9 +664,10 @@ void SaveOriginalKeyRepeatSettings() {
     g_originalFilterKeys.cbSize = sizeof(FILTERKEYS);
     if (SystemParametersInfo(SPI_GETFILTERKEYS, sizeof(FILTERKEYS), &g_originalFilterKeys, 0)) {
         g_originalFilterKeysCaptured.store(true);
-        LogCategory("init", "Saved original FILTERKEYS: flags=0x" + std::to_string(g_originalFilterKeys.dwFlags) +
-                                ", iDelayMSec=" + std::to_string(g_originalFilterKeys.iDelayMSec) +
-                                ", iRepeatMSec=" + std::to_string(g_originalFilterKeys.iRepeatMSec));
+        LogCategory(Log_Init, "Saved original FILTERKEYS: flags=0x{:X}, iDelayMSec={}, iRepeatMSec={}",
+            g_originalFilterKeys.dwFlags,
+            g_originalFilterKeys.iDelayMSec,
+            g_originalFilterKeys.iRepeatMSec);
     } else {
         Log("WARNING: Failed to get current FILTERKEYS settings");
         g_originalFilterKeys.dwFlags = 0;
@@ -771,13 +770,13 @@ static bool ApplySystemKeyRepeatFilterKeys() {
 
     if (SystemParametersInfo(SPI_SETFILTERKEYS, sizeof(FILTERKEYS), &targetFilterKeys, 0)) {
         g_filterKeysApplied.store(true, std::memory_order_release);
-        Log("Applied FILTERKEYS settings: iDelayMSec=" + std::to_string(targetFilterKeys.iDelayMSec) +
-            ", iRepeatMSec=" + std::to_string(targetFilterKeys.iRepeatMSec));
+        Log("Applied FILTERKEYS settings: iDelayMSec={}, iRepeatMSec={}",
+            targetFilterKeys.iDelayMSec, targetFilterKeys.iRepeatMSec);
         return true;
     }
 
-    Log("WARNING: Failed to apply FILTERKEYS settings: iDelayMSec=" + std::to_string(targetFilterKeys.iDelayMSec) +
-        ", iRepeatMSec=" + std::to_string(targetFilterKeys.iRepeatMSec));
+    Log("WARNING: Failed to apply FILTERKEYS settings: iDelayMSec={}, iRepeatMSec={}",
+        targetFilterKeys.iDelayMSec, targetFilterKeys.iRepeatMSec);
     return false;
 }
 
@@ -1439,7 +1438,7 @@ static HCURSOR SetCursorHook_Impl(SETCURSORPROC next, HCURSOR hCursor) {
             }
         }
 
-        Log("hkSetCursor: maskHash = " + maskHash);
+        Log("hkSetCursor: maskHash = {}", maskHash);
 
         if (maskHash == "773ff800") {
             Log("hkSetCursor: Detected special cursor (maskHash=773ff800), caching for later use");
@@ -1943,7 +1942,7 @@ static void AttemptHookGlBlitNamedFramebufferViaGlew() {
     }
 
     s_hooked.store(true, std::memory_order_release);
-    LogCategory("init", "Successfully hooked glBlitNamedFramebuffer via GLEW");
+    LogCategory(Log_Init, "Successfully hooked glBlitNamedFramebuffer via GLEW");
 }
 
 static bool ShouldRetargetMinecraftBlitFramebuffer(GLint readFBO, GLint drawFBO) {
@@ -2011,8 +2010,8 @@ static void AttemptHookGlBlitFramebufferViaWgl() {
         reinterpret_cast<void*>(pBlitFramebufferWGL) != reinterpret_cast<void*>(&hkglBlitFramebuffer) &&
         reinterpret_cast<void*>(pBlitFramebufferWGL) != reinterpret_cast<void*>(&hkglBlitFramebuffer_Driver) &&
         reinterpret_cast<void*>(pBlitFramebufferWGL) != pBlitFramebufferExport) {
-        LogCategory("init", "Attempting glBlitFramebuffer hook via wglGetProcAddress: " +
-                   std::to_string(reinterpret_cast<uintptr_t>(pBlitFramebufferWGL)));
+        LogCategory(Log_Init, "Attempting glBlitFramebuffer hook via wglGetProcAddress: {}",
+            reinterpret_cast<uintptr_t>(pBlitFramebufferWGL));
 
         MH_STATUS st = MH_CreateHook(reinterpret_cast<void*>(pBlitFramebufferWGL), reinterpret_cast<void*>(&hkglBlitFramebuffer_Driver),
                                      reinterpret_cast<void**>(&g_oglBlitFramebufferDriver));
@@ -2021,7 +2020,7 @@ static void AttemptHookGlBlitFramebufferViaWgl() {
             if (st == MH_OK || st == MH_ERROR_ENABLED) {
                 s_hooked.store(true, std::memory_order_release);
                 g_glBlitFramebufferHooked.store(true, std::memory_order_release);
-                LogCategory("init", "SUCCESS: glBlitFramebuffer hooked via wglGetProcAddress");
+                LogCategory(Log_Init, "SUCCESS: glBlitFramebuffer hooked via wglGetProcAddress");
                 return;
             }
         }
@@ -2032,8 +2031,8 @@ static void AttemptHookGlBlitFramebufferViaWgl() {
         reinterpret_cast<void*>(pBlitFramebufferGLEW) != reinterpret_cast<void*>(&hkglBlitFramebuffer) &&
         reinterpret_cast<void*>(pBlitFramebufferGLEW) != reinterpret_cast<void*>(&hkglBlitFramebuffer_Driver) &&
         reinterpret_cast<void*>(pBlitFramebufferGLEW) != pBlitFramebufferExport) {
-        LogCategory("init", "Attempting glBlitFramebuffer hook via GLEW pointer: " +
-                   std::to_string(reinterpret_cast<uintptr_t>(pBlitFramebufferGLEW)));
+        LogCategory(Log_Init, "Attempting glBlitFramebuffer hook via GLEW pointer: {}",
+            reinterpret_cast<uintptr_t>(pBlitFramebufferGLEW));
 
         MH_STATUS st = MH_CreateHook(reinterpret_cast<void*>(pBlitFramebufferGLEW), reinterpret_cast<void*>(&hkglBlitFramebuffer_Driver),
                                      reinterpret_cast<void**>(&g_oglBlitFramebufferDriver));
@@ -2042,7 +2041,7 @@ static void AttemptHookGlBlitFramebufferViaWgl() {
             if (st == MH_OK || st == MH_ERROR_ENABLED) {
                 s_hooked.store(true, std::memory_order_release);
                 g_glBlitFramebufferHooked.store(true, std::memory_order_release);
-                LogCategory("init", "SUCCESS: glBlitFramebuffer hooked via GLEW pointer");
+                LogCategory(Log_Init, "SUCCESS: glBlitFramebuffer hooked via GLEW pointer");
             }
         }
     }
@@ -2083,9 +2082,8 @@ static void AttemptHookGlBlitFramebufferThirdParty() {
                                           reinterpret_cast<void**>(&g_oglBlitFramebufferThirdParty),
                                           "glBlitFramebuffer (third-party chain)")) {
         g_glBlitFramebufferThirdPartyHookTarget.store(hookTarget, std::memory_order_release);
-        LogCategory("hookchain",
-                    std::string("[glBlitFramebuffer] installed third-party hook target ") +
-                        HookChain::DescribeAddressWithOwner(hookTarget));
+        LogCategory(Log_HookChain, "[glBlitFramebuffer] installed third-party hook target {}",
+            HookChain::DescribeAddressWithOwner(hookTarget));
     }
 }
 
@@ -2111,7 +2109,7 @@ static void AttemptHookGlNamedFramebufferTextureViaGlew() {
     }
 
     s_hooked.store(true, std::memory_order_release);
-    LogCategory("init", "Successfully hooked glNamedFramebufferTexture via GLEW");
+    LogCategory(Log_Init, "Successfully hooked glNamedFramebufferTexture via GLEW");
 }
 
 static BOOL SetCursorPosHook_Impl(SETCURSORPOSPROC next, int X, int Y) {
@@ -2239,8 +2237,8 @@ static void SyncLegacyLwjglRequestedResizeOnSwapThread(HWND hwnd) {
     }
 
     if (!PostMessageW(hwnd, WM_SIZE, SIZE_RESTORED, MAKELPARAM(requestedWidth, requestedHeight))) {
-        Log("[WINDOW] Failed to post legacy LWJGL WM_SIZE resize request: " + std::to_string(requestedWidth) + "x" +
-            std::to_string(requestedHeight) + ", error=" + std::to_string(GetLastError()));
+        Log("[WINDOW] Failed to post legacy LWJGL WM_SIZE resize request: {}x{}, error={}",
+            requestedWidth, requestedHeight, GetLastError());
         return;
     }
 
@@ -2727,7 +2725,7 @@ void AttemptAggressiveGlViewportHook() {
                 if (pGlViewportWGL != NULL && reinterpret_cast<void*>(pGlViewportWGL) != reinterpret_cast<void*>(&hkglViewport) &&
                     reinterpret_cast<void*>(pGlViewportWGL) != reinterpret_cast<void*>(&hkglViewport_Driver) &&
                     reinterpret_cast<void*>(pGlViewportWGL) != reinterpret_cast<void*>(oglViewport)) {
-                    Log("Attempting glViewport hook via wglGetProcAddress: " + std::to_string(reinterpret_cast<uintptr_t>(pGlViewportWGL)));
+                    Log("Attempting glViewport hook via wglGetProcAddress: {}", reinterpret_cast<uintptr_t>(pGlViewportWGL));
                     GLVIEWPORTPROC pViewportFunc = reinterpret_cast<GLVIEWPORTPROC>(pGlViewportWGL);
                     if (HookChain::TryCreateAndEnableHook(reinterpret_cast<void*>(pViewportFunc), reinterpret_cast<void*>(&hkglViewport_Driver),
                                                reinterpret_cast<void**>(&g_oglViewportDriver), "glViewport (wglGetProcAddress)")) {
@@ -2746,7 +2744,7 @@ void AttemptAggressiveGlViewportHook() {
         if (pGlViewportGLEW != NULL && reinterpret_cast<void*>(pGlViewportGLEW) != reinterpret_cast<void*>(&hkglViewport) &&
             reinterpret_cast<void*>(pGlViewportGLEW) != reinterpret_cast<void*>(&hkglViewport_Driver) &&
             reinterpret_cast<void*>(pGlViewportGLEW) != reinterpret_cast<void*>(oglViewport)) {
-            Log("Attempting glViewport hook via GLEW pointer: " + std::to_string(reinterpret_cast<uintptr_t>(pGlViewportGLEW)));
+            Log("Attempting glViewport hook via GLEW pointer: {}", reinterpret_cast<uintptr_t>(pGlViewportGLEW));
             if (HookChain::TryCreateAndEnableHook(reinterpret_cast<void*>(pGlViewportGLEW), reinterpret_cast<void*>(&hkglViewport_Driver),
                                        reinterpret_cast<void**>(&g_oglViewportDriver), "glViewport (GLEW pointer)")) {
                 g_glViewportHookedViaGLEW.store(true);
@@ -2758,8 +2756,8 @@ void AttemptAggressiveGlViewportHook() {
     }
 
     g_glViewportHookCount.fetch_add(hooksCreated);
-    Log("Aggressive glViewport hooking complete. Total additional hooks created: " + std::to_string(hooksCreated));
-    Log("Total glViewport hook count: " + std::to_string(g_glViewportHookCount.load()));
+    Log("Aggressive glViewport hooking complete. Total additional hooks created: {}", hooksCreated);
+    Log("Total glViewport hook count: {}", g_glViewportHookCount.load());
 }
 
 static void AttemptHookGlBindTextureViaWgl() {
@@ -2779,14 +2777,13 @@ static void AttemptHookGlBindTextureViaWgl() {
         reinterpret_cast<void*>(pBindTexWGL) != reinterpret_cast<void*>(&hkglBindTexture) &&
         reinterpret_cast<void*>(pBindTexWGL) != reinterpret_cast<void*>(&hkglBindTexture_Driver) &&
         reinterpret_cast<void*>(pBindTexWGL) != reinterpret_cast<void*>(oglBindTexture)) {
-        LogCategory("init", "Attempting glBindTexture hook via wglGetProcAddress: " +
-                   std::to_string(reinterpret_cast<uintptr_t>(pBindTexWGL)));
+        LogCategory(Log_Init, "Attempting glBindTexture hook via wglGetProcAddress: {}", reinterpret_cast<uintptr_t>(pBindTexWGL));
         if (HookChain::TryCreateAndEnableHook(reinterpret_cast<void*>(pBindTexWGL),
                                               reinterpret_cast<void*>(&hkglBindTexture_Driver),
                                               reinterpret_cast<void**>(&g_oglBindTextureDriver),
                                               "glBindTexture (wglGetProcAddress)")) {
             s_hooked.store(true, std::memory_order_release);
-            LogCategory("init", "SUCCESS: glBindTexture hooked via wglGetProcAddress (driver target)");
+            LogCategory(Log_Init, "SUCCESS: glBindTexture hooked via wglGetProcAddress (driver target)");
         }
     }
 }
@@ -2808,14 +2805,13 @@ static void AttemptHookGlBindFramebufferViaWgl() {
         reinterpret_cast<void*>(pBindFramebufferWGL) != reinterpret_cast<void*>(&hkglBindFramebuffer) &&
         reinterpret_cast<void*>(pBindFramebufferWGL) != reinterpret_cast<void*>(&hkglBindFramebuffer_Driver) &&
         reinterpret_cast<void*>(pBindFramebufferWGL) != reinterpret_cast<void*>(oglBindFramebuffer)) {
-        LogCategory("init", "Attempting glBindFramebuffer hook via wglGetProcAddress: " +
-                   std::to_string(reinterpret_cast<uintptr_t>(pBindFramebufferWGL)));
+        LogCategory(Log_Init, "Attempting glBindFramebuffer hook via wglGetProcAddress: {}", reinterpret_cast<uintptr_t>(pBindFramebufferWGL));
         if (HookChain::TryCreateAndEnableHook(reinterpret_cast<void*>(pBindFramebufferWGL),
                                               reinterpret_cast<void*>(&hkglBindFramebuffer_Driver),
                                               reinterpret_cast<void**>(&g_oglBindFramebufferDriver),
                                               "glBindFramebuffer (wglGetProcAddress)")) {
             s_hooked.store(true, std::memory_order_release);
-            LogCategory("init", "SUCCESS: glBindFramebuffer hooked via wglGetProcAddress (driver target)");
+            LogCategory(Log_Init, "SUCCESS: glBindFramebuffer hooked via wglGetProcAddress (driver target)");
             return;
         }
     }
@@ -2825,14 +2821,13 @@ static void AttemptHookGlBindFramebufferViaWgl() {
         reinterpret_cast<void*>(pBindFramebufferGLEW) != reinterpret_cast<void*>(&hkglBindFramebuffer) &&
         reinterpret_cast<void*>(pBindFramebufferGLEW) != reinterpret_cast<void*>(&hkglBindFramebuffer_Driver) &&
         reinterpret_cast<void*>(pBindFramebufferGLEW) != reinterpret_cast<void*>(oglBindFramebuffer)) {
-        LogCategory("init", "Attempting glBindFramebuffer hook via GLEW pointer: " +
-                   std::to_string(reinterpret_cast<uintptr_t>(pBindFramebufferGLEW)));
+        LogCategory(Log_Init, "Attempting glBindFramebuffer hook via GLEW pointer: {}", reinterpret_cast<uintptr_t>(pBindFramebufferGLEW));
         if (HookChain::TryCreateAndEnableHook(reinterpret_cast<void*>(pBindFramebufferGLEW),
                                               reinterpret_cast<void*>(&hkglBindFramebuffer_Driver),
                                               reinterpret_cast<void**>(&g_oglBindFramebufferDriver),
                                               "glBindFramebuffer (GLEW pointer)")) {
             s_hooked.store(true, std::memory_order_release);
-            LogCategory("init", "SUCCESS: glBindFramebuffer hooked via GLEW pointer (driver target)");
+            LogCategory(Log_Init, "SUCCESS: glBindFramebuffer hooked via GLEW pointer (driver target)");
         }
     }
 }
@@ -2884,7 +2879,7 @@ static BOOL SwapBuffersHook_Impl(WGLSWAPBUFFERS next, HDC hDc) {
             PROFILE_SCOPE_CAT("GLEW Initialization", "SwapBuffers");
             glewExperimental = GL_TRUE;
             if (glewInit() == GLEW_OK) {
-                LogCategory("init", "[RENDER] GLEW Initialized successfully.");
+                LogCategory(Log_Init, "[RENDER] GLEW Initialized successfully.");
                 g_glewLoaded = true;
 
                 g_welcomeToastVisible.store(true);
@@ -3100,7 +3095,7 @@ static BOOL SwapBuffersHook_Impl(WGLSWAPBUFFERS next, HDC hDc) {
         } else if (lastFrameModeIdCopy != desiredModeId) {
             PROFILE_SCOPE_CAT("Mode Transition Complete", "SwapBuffers");
             g_isTransitioningMode = true;
-            Log("Mode transition detected (no animation): " + lastFrameModeIdCopy + " -> " + desiredModeId);
+            Log("Mode transition detected (no animation): {} -> {}", lastFrameModeIdCopy, desiredModeId);
 
             int modeWidth = 0, modeHeight = 0;
             bool modeValid = false;
@@ -3399,9 +3394,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 
         InstallGlobalExceptionHandlers();
 
-        LogCategory("init", "========================================");
-        LogCategory("init", "=== Toolscreen INITIALIZATION START ===");
-        LogCategory("init", "========================================");
+        LogCategory(Log_Init, "========================================");
+        LogCategory(Log_Init, "=== Toolscreen INITIALIZATION START ===");
+        LogCategory(Log_Init, "========================================");
         PrintVersionToStdout();
 
         // Create high-resolution waitable timer for FPS limiting (Windows 10 1803+)
@@ -3411,7 +3406,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
                                                 TIMER_ALL_ACCESS
         );
         if (g_highResTimer) {
-            LogCategory("init", "High-resolution waitable timer created successfully for FPS limiting.");
+            LogCategory(Log_Init, "High-resolution waitable timer created successfully for FPS limiting.");
         } else {
             Log("Warning: Failed to create high-resolution waitable timer. FPS limiting may be less precise.");
         }
@@ -3450,8 +3445,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
                         }
 
                         if (!MoveFileW(latestLogPath.c_str(), archivedLogPath.c_str())) {
-                            Log("WARNING: Could not rename old log to " + WideToUtf8(archivedLogPath) +
-                                ", error code: " + std::to_string(GetLastError()));
+                            Log("WARNING: Could not rename old log to {}, error code: {}",
+                                WideToUtf8(archivedLogPath), GetLastError());
                         } else {
                             // Compress the archived log to .gz on a background thread
                             // so we don't block DLL initialization
@@ -3488,7 +3483,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 
             g_modeFilePath = g_toolscreenPath + L"\\mode.txt";
         }
-        LogCategory("init", "--- DLL instance attached ---");
+        LogCategory(Log_Init, "--- DLL instance attached ---");
         LogVersionInfo();
         if (g_toolscreenPath.empty()) { Log("FATAL: Could not get toolscreen directory."); }
         
@@ -3508,29 +3503,29 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             } else {
                 oss << " is outside supported range [1.16.1 - 1.18.2].";
             }
-            LogCategory("init", oss.str());
+            LogCategory(Log_Init, oss.str());
         } else {
-            LogCategory("init", "No game version detected from command line.");
+            LogCategory(Log_Init, "No game version detected from command line.");
         }
 
         LoadConfig();
 
         LoadLangs();
-        LogCategory("init", "Languages list loaded.");
+        LogCategory(Log_Init, "Languages list loaded.");
 
         if (!LoadTranslation(g_config.lang)) {
-            Log("FATAL: Could not load translations of " + g_config.lang);
+            Log("FATAL: Could not load translations of {}", g_config.lang);
             return TRUE;
         }
-        LogCategory("init", "Loaded translations for language: " + g_config.lang);
+        LogCategory(Log_Init, "Loaded translations for language: {}", g_config.lang);
 
         WCHAR dir[MAX_PATH];
         if (GetCurrentDirectoryW(MAX_PATH, dir) > 0) {
             g_stateFilePath = std::wstring(dir) + L"\\hermes\\state.json";
             g_hermesAliveFilePath = std::wstring(dir) + L"\\hermes\\alive";
             g_stateOutputFilePath = std::wstring(dir) + L"\\wpstateout.txt";
-            LogCategory("init", "Hermes state path: " + WideToUtf8(g_stateFilePath) +
-                                    "; State Output path: " + WideToUtf8(g_stateOutputFilePath));
+            LogCategory(Log_Init, "Hermes state path: {}; State Output path: {}",
+                WideToUtf8(g_stateFilePath), WideToUtf8(g_stateOutputFilePath));
 
             auto fileExists = [](const std::wstring& path) {
                 DWORD attrs = GetFileAttributesW(path.c_str());
@@ -3540,7 +3535,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             const bool stateOutputPresent = fileExists(g_stateOutputFilePath);
             g_isStateOutputAvailable.store(hermesPresent || stateOutputPresent, std::memory_order_release);
             if (!hermesPresent && !stateOutputPresent) {
-                LogCategory("init",
+                LogCategory(Log_Init,
                             "WARNING: neither hermes/state.json nor wpstateout.txt found. Game-state hotkey restrictions "
                             "will not apply until Hermes (recommended) or State Output is installed.");
             }
@@ -3564,7 +3559,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             return TRUE;
         }
 
-        LogCategory("init", "Setting up hooks...");
+        LogCategory(Log_Init, "Setting up hooks...");
 
         HMODULE hOpenGL32 = GetModuleHandle(L"opengl32.dll");
         HMODULE hUser32 = GetModuleHandle(L"user32.dll");
@@ -3585,7 +3580,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         if (IsVersionInRange(g_gameVersion, GameVersion(1, 0, 0), GameVersion(1, 21, 0))) {
             if (HOOK(hOpenGL32, glViewport)) {
                 g_glViewportHookCount.fetch_add(1);
-                LogCategory("init", "Initial glViewport hook created via opengl32.dll");
+                LogCategory(Log_Init, "Initial glViewport hook created via opengl32.dll");
             }
         }
         HOOK(hUser32, SetCursorPos);
@@ -3597,7 +3592,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             HOOK(hGlfw, glfwSetInputMode);
             HOOK(hGlfw, glfwSetCursor);
         } else {
-            LogCategory("init", "WARNING: glfw.dll not loaded; skipping glfwSetInputMode hook");
+            LogCategory(Log_Init, "WARNING: glfw.dll not loaded; skipping glfwSetInputMode hook");
         }
 #undef HOOK
 
@@ -3605,7 +3600,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         if (pGlBindFramebuffer != NULL) {
             CreateHookOrDie(pGlBindFramebuffer, &hkglBindFramebuffer, &oglBindFramebuffer, "glBindFramebuffer");
         } else {
-            LogCategory("init",
+            LogCategory(Log_Init,
                         "WARNING: glBindFramebuffer not found in opengl32.dll - will attempt to hook via WGL/GLEW after context init");
         }
 
@@ -3613,7 +3608,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         if (pGlBlitNamedFramebuffer != NULL) {
             CreateHookOrDie(pGlBlitNamedFramebuffer, &hkglBlitNamedFramebuffer, &oglBlitNamedFramebuffer, "glBlitNamedFramebuffer");
         } else {
-            LogCategory("init",
+            LogCategory(Log_Init,
                         "WARNING: glBlitNamedFramebuffer not found in opengl32.dll - will attempt to hook via GLEW after context init");
         }
 
@@ -3623,7 +3618,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
                 g_glBlitFramebufferHooked.store(true, std::memory_order_release);
             }
         } else {
-            LogCategory("init",
+            LogCategory(Log_Init,
                         "WARNING: glBlitFramebuffer not found in opengl32.dll - will attempt to hook via WGL/GLEW after context init");
         }
 
@@ -3632,7 +3627,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             return TRUE;
         }
 
-        LogCategory("init", "Hooks enabled.");
+        LogCategory(Log_Init, "Hooks enabled.");
 
         // This thread periodically detects those detours (prolog or IAT) and chains behind them.
         g_stopHookCompat.store(false, std::memory_order_release);

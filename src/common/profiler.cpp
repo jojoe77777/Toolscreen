@@ -169,9 +169,8 @@ void Profiler::SubmitEvent(const char* sectionName, double durationMs, uint8_t d
 
     constexpr double SLOW_THRESHOLD_MS = 100.0;
     if (durationMs > SLOW_THRESHOLD_MS) {
-        std::string pathStr = sectionName;
-        Log("[SLOW PROFILER] " + pathStr + " took " + std::to_string(durationMs) + "ms (>" +
-            std::to_string(static_cast<int>(SLOW_THRESHOLD_MS)) + "ms threshold)");
+        Log("[SLOW PROFILER] {} took {}ms (>{}ms threshold)",
+            sectionName, durationMs, static_cast<int>(SLOW_THRESHOLD_MS));
     }
 
     // Get write position (only this thread writes to writeIndex)

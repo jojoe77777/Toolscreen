@@ -220,8 +220,8 @@ void LogVirtualCameraSyncGuardOnce(const std::string& reason, int width, int hei
     s_lastBytes = totalBytes;
     s_lastReason = reason;
 
-    Log("Virtual Camera: rejecting synchronous readback at " + std::to_string(width) + "x" + std::to_string(height) +
-        " (" + FormatByteCount(totalBytes) + "): " + reason);
+    Log("Virtual Camera: rejecting synchronous readback at {}x{} ({}): {}",
+        width, height, FormatByteCount(totalBytes), reason);
 }
 } // namespace
 
@@ -2290,8 +2290,8 @@ void DiscardUnusedUserImageCaches() {
     }
 
     if (removedGpuEntries > 0 || removedPendingDecodes > 0) {
-        LogCategory("image_monitor", "Pruned deleted user image caches: gpuEntries=" + std::to_string(removedGpuEntries) +
-                                         ", pendingDecodes=" + std::to_string(removedPendingDecodes) + ".");
+        LogCategory(Log_ImageMonitor, "Pruned deleted user image caches: gpuEntries={}, pendingDecodes={}.",
+            removedGpuEntries, removedPendingDecodes);
     }
 }
 
@@ -2585,7 +2585,7 @@ void CleanupGPUResources() {
         LogException("CleanupGPUResources [" + formatCleanupDebugState(phase) + "]", e);
     };
     auto logCleanupUnknownException = [&](const char* phase) {
-        Log("CleanupGPUResources: Unknown exception [" + formatCleanupDebugState(phase) + "]");
+        Log("CleanupGPUResources: Unknown exception [{}]", formatCleanupDebugState(phase));
     };
 
     // PBO system cleanup is handled by CleanupCapturePBOs() in mirror_thread.cpp
@@ -2762,7 +2762,7 @@ void CleanupGPUResources() {
     {
         std::lock_guard<std::mutex> lock(g_decodedImagesMutex);
         if (!g_decodedImagesQueue.empty()) {
-            Log("Cleaning up " + std::to_string(g_decodedImagesQueue.size()) + " " + "pending decoded images to prevent memory leaks...");
+            Log("Cleaning up {} pending decoded images to prevent memory leaks...", g_decodedImagesQueue.size());
             for (auto& decodedImg : g_decodedImagesQueue) {
                 if (decodedImg.data) {
                     stbi_image_free(decodedImg.data);
@@ -2830,19 +2830,19 @@ void UploadDecodedImageToGPU_Internal(const DecodedImageData& imgData) {
     size_t decodedBytes = 0;
     std::string decodedReason;
     if (!TryDescribeDecodedImageStorage(imgData, decodedBytes, decodedReason)) {
-        LogCategory("image_monitor", "Skipping GPU upload for image '" + imgData.id + "' due to invalid decoded image data: " + decodedReason + ".");
+        LogCategory(Log_ImageMonitor, "Skipping GPU upload for image '{}' due to invalid decoded image data: {}.",
+            imgData.id, decodedReason);
         return;
     }
     if (!imgData.isVideo && decodedBytes > kMaxDecodedImageUploadBytes) {
-        LogCategory("image_monitor",
-                    "Skipping GPU upload for image '" + imgData.id + "' because decoded storage " + FormatByteCount(decodedBytes) +
-                        " exceeds guard limit of " + FormatByteCount(kMaxDecodedImageUploadBytes) + ".");
+        LogCategory(Log_ImageMonitor,
+                    "Skipping GPU upload for image '{}' because decoded storage {} exceeds guard limit of {}.",
+                    imgData.id, FormatByteCount(decodedBytes), FormatByteCount(kMaxDecodedImageUploadBytes));
         return;
     }
 
-    LogCategory("image_monitor", "Uploading decoded image '" + imgData.id + "' to GPU: " + std::to_string(imgData.width) + "x" +
-                                   std::to_string(imgData.height) + ", frameCount=" + std::to_string(imgData.frameCount) +
-                                   ", bytes=" + FormatByteCount(decodedBytes) + ".");
+    LogCategory(Log_ImageMonitor, "Uploading decoded image '{}' to GPU: {}x{}, frameCount={}, bytes={}.",
+        imgData.id, imgData.width, imgData.height, imgData.frameCount, FormatByteCount(decodedBytes));
 
     if (imgData.type == DecodedImageData::Type::Background) {
         std::lock_guard<std::mutex> bgLock(g_backgroundTexturesMutex);
@@ -2880,10 +2880,8 @@ void UploadDecodedImageToGPU_Internal(const DecodedImageData& imgData) {
                 glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxTextureSize);
                 const int frameHeight = imgData.frameHeight;
                 if (maxTextureSize > 0 && (imgData.width > maxTextureSize || frameHeight > maxTextureSize)) {
-                    LogCategory("image_monitor", "Skipping animated background atlas upload for '" + imgData.id +
-                                                     "' because frame dimensions exceed GL_MAX_TEXTURE_SIZE=" +
-                                                     std::to_string(maxTextureSize) + ": " + std::to_string(imgData.width) + "x" +
-                                                     std::to_string(frameHeight) + ".");
+                    LogCategory(Log_ImageMonitor, "Skipping animated background atlas upload for '{}' because frame dimensions exceed GL_MAX_TEXTURE_SIZE={}: {}x{}.",
+                        imgData.id, maxTextureSize, imgData.width, frameHeight);
                     return;
                 }
                 const int framesPerTexture = (std::max)(1, maxTextureSize > 0 ? (maxTextureSize / (std::max)(1, frameHeight)) : imgData.frameCount);
@@ -2916,8 +2914,8 @@ void UploadDecodedImageToGPU_Internal(const DecodedImageData& imgData) {
                 }
 
                 g_backgroundTextures[imgData.id] = inst;
-                Log("Uploaded animated background atlas for '" + imgData.id + "' to GPU (" + std::to_string(imgData.frameCount) +
-                    " frames across " + std::to_string(inst.frameTextures.size()) + " texture page(s)).");
+                Log("Uploaded animated background atlas for '{}' to GPU ({} frames across {} texture page(s)).",
+                    imgData.id, imgData.frameCount, inst.frameTextures.size());
             } else {
                 inst.isAnimated = false;
 
@@ -2937,10 +2935,10 @@ void UploadDecodedImageToGPU_Internal(const DecodedImageData& imgData) {
 
                 inst.textureId = t;
                 g_backgroundTextures[imgData.id] = inst;
-                Log("Uploaded background for '" + imgData.id + "' to GPU.");
+                Log("Uploaded background for '{}' to GPU.", imgData.id);
             }
         } else {
-            Log("Skipping GPU upload for background '" + imgData.id + "' due to null image data.");
+            Log("Skipping GPU upload for background '{}' due to null image data.", imgData.id);
         }
     } else if (imgData.type == DecodedImageData::Type::UserImage) {
         // Remove old instance under lock, but avoid holding the lock while uploading new textures.
@@ -2994,10 +2992,8 @@ void UploadDecodedImageToGPU_Internal(const DecodedImageData& imgData) {
                 glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxTextureSize);
                 const int frameHeight = imgData.frameHeight;
                 if (maxTextureSize > 0 && (imgData.width > maxTextureSize || frameHeight > maxTextureSize)) {
-                    LogCategory("image_monitor", "Skipping animated user image atlas upload for '" + imgData.id +
-                                                     "' because frame dimensions exceed GL_MAX_TEXTURE_SIZE=" +
-                                                     std::to_string(maxTextureSize) + ": " + std::to_string(imgData.width) + "x" +
-                                                     std::to_string(frameHeight) + ".");
+                    LogCategory(Log_ImageMonitor, "Skipping animated user image atlas upload for '{}' because frame dimensions exceed GL_MAX_TEXTURE_SIZE={}: {}x{}.",
+                        imgData.id, maxTextureSize, imgData.width, frameHeight);
                     return;
                 }
                 const int framesPerTexture = (std::max)(1, maxTextureSize > 0 ? (maxTextureSize / (std::max)(1, frameHeight)) : imgData.frameCount);
@@ -3035,9 +3031,8 @@ void UploadDecodedImageToGPU_Internal(const DecodedImageData& imgData) {
                     std::lock_guard<std::mutex> imageLock(g_userImagesMutex);
                     g_userImages[imgData.id] = std::move(inst);
                 }
-                LogCategory("image_monitor", "Uploaded animated user image atlas '" + imgData.id + "' to GPU (" +
-                                                 std::to_string(imgData.frameCount) + " frames across " +
-                                                 std::to_string(pageCount) + " texture page(s)).");
+                LogCategory(Log_ImageMonitor, "Uploaded animated user image atlas '{}' to GPU ({} frames across {} texture page(s)).",
+                    imgData.id, imgData.frameCount, pageCount);
             } else {
                 inst.isAnimated = false;
 
@@ -3058,10 +3053,10 @@ void UploadDecodedImageToGPU_Internal(const DecodedImageData& imgData) {
                     std::lock_guard<std::mutex> imageLock(g_userImagesMutex);
                     g_userImages[imgData.id] = std::move(inst);
                 }
-                LogCategory("image_monitor", "Uploaded user image '" + imgData.id + "' to GPU.");
+                LogCategory(Log_ImageMonitor, "Uploaded user image '{}' to GPU.", imgData.id);
             }
         } else {
-            Log("Skipping GPU upload for user image '" + imgData.id + "' due to null image data.");
+            Log("Skipping GPU upload for user image '{}' due to null image data.", imgData.id);
         }
     }
 }
@@ -3077,7 +3072,7 @@ void ProcessPendingDecodedImages() {
     }
 
     PROFILE_SCOPE_CAT("Process Decoded Images", "GPU Operations");
-    LogCategory("image_monitor", "Processing " + std::to_string(pendingImages.size()) + " decoded images on render thread.");
+    LogCategory(Log_ImageMonitor, "Processing {} decoded images on render thread.", pendingImages.size());
     for (auto& decodedImg : pendingImages) {
         if (!decodedImg.data) {
             continue;
@@ -3131,7 +3126,7 @@ void InitializeGPUResources() {
     {
         auto initSnap = GetConfigSnapshot();
         if (initSnap) { mirrorsToCreate = initSnap->mirrors; }
-        LogCategory("init", "Found " + std::to_string(mirrorsToCreate.size()) + " mirrors in config to create.");
+        LogCategory(Log_Init, "Found {} mirrors in config to create.", mirrorsToCreate.size());
     }
     // Release the framebuffer binding before calling CreateMirrorGPUResources
     glBindFramebuffer(GL_FRAMEBUFFER, last_framebuffer);
@@ -3179,7 +3174,7 @@ void InitializeGPUResources() {
 
     glBindVertexArray(0);
 
-    LogCategory("init", "Restoring original OpenGL state...");
+    LogCategory(Log_Init, "Restoring original OpenGL state...");
     glUseProgram(last_program);
     glActiveTexture(last_active_texture);
     BindTextureDirect(GL_TEXTURE_2D, last_texture);
@@ -3188,7 +3183,7 @@ void InitializeGPUResources() {
     glBindFramebuffer(GL_FRAMEBUFFER, last_framebuffer);
 
     g_glInitialized.store(true, std::memory_order_release);
-    LogCategory("init", "--- GPU resources initialized successfully. ---");
+    LogCategory(Log_Init, "--- GPU resources initialized successfully. ---");
 }
 
 static bool CreateMirrorFramebuffer(GLuint& fbo, GLuint& texture, int w, int h, GLenum filter) {
@@ -3226,7 +3221,7 @@ void CreateMirrorGPUResources(const MirrorConfig& conf) {
     PROFILE_SCOPE_CAT("Create Mirror GPU Resources", "GPU Operations");
 
     if (conf.input.empty()) {
-        Log("Warning: Mirror '" + conf.name + "' has no input regions. Skipping GPU resource creation.");
+        Log("Warning: Mirror '{}' has no input regions. Skipping GPU resource creation.", conf.name);
         return;
     }
 
@@ -3235,7 +3230,7 @@ void CreateMirrorGPUResources(const MirrorConfig& conf) {
 
     auto it = g_mirrorInstances.find(conf.name);
     if (it != g_mirrorInstances.end()) {
-        Log("Mirror '" + conf.name + "' GPU resources already exist. Skipping creation.");
+        Log("Mirror '{}' GPU resources already exist. Skipping creation.", conf.name);
         return;
     }
 
@@ -3269,11 +3264,10 @@ void CreateMirrorGPUResources(const MirrorConfig& conf) {
         inst.capturedAsRawOutput = conf.rawOutput;
         inst.capturedAsRawOutputBack = conf.rawOutput;
         g_mirrorInstances[conf.name] = inst;
-        LogCategory("init", "Created single-buffered GPU resources for mirror '" + conf.name + "' (FBO: " +
-                                std::to_string(inst.fbo) + ", FinalFBO: " + std::to_string(inst.finalFbo) + " [" +
-                                std::to_string(inst.final_w) + "x" + std::to_string(inst.final_h) + "])");
+        LogCategory(Log_Init, "Created single-buffered GPU resources for mirror '{}' (FBO: {}, FinalFBO: {} [{}x{}])",
+            conf.name, inst.fbo, inst.finalFbo, inst.final_w, inst.final_h);
     } else {
-        Log("ERROR: Failed to create complete framebuffers for mirror '" + conf.name + "'");
+        Log("ERROR: Failed to create complete framebuffers for mirror '{}'", conf.name);
         DeleteMirrorFramebuffer(inst.fbo, inst.fboTexture);
         DeleteMirrorFramebuffer(inst.fboBack, inst.fboTextureBack);
         DeleteMirrorFramebuffer(inst.finalFbo, inst.finalTexture);
@@ -3338,9 +3332,8 @@ static void LogInvalidTextureSampleThrottled(const std::string& stage, GLuint te
         expected = " expected=" + std::to_string(expectedW) + "x" + std::to_string(expectedH);
     }
 
-    LogCategory("texture_ops", "Main Render: Invalid texture sample stage=" + stage + " tex=" + std::to_string(texture) +
-                                   " valid=" + std::to_string(valid ? 1 : 0) + " actual=" + std::to_string(actualW) + "x" +
-                                   std::to_string(actualH) + expected);
+    LogCategory(Log_TextureOps, "Main Render: Invalid texture sample stage={} tex={} valid={} actual={}x{}{}",
+        stage, texture, valid ? 1 : 0, actualW, actualH, expected);
 }
 
 static int GetAnimatedTextureDelayMs(const std::vector<int>& frameDelays, size_t frameIndex) {
@@ -3623,7 +3616,7 @@ static void LogEyeZoomDebugThrottled(const char* stage, const std::string& messa
 
     state.lastLogMs = now;
     state.lastMessage = message;
-    LogCategory("texture_ops", std::string("EyeZoom: ") + stage + " " + message);
+    LogCategory(Log_TextureOps, "EyeZoom: {} {}", stage, message);
 }
 
 static void LogEyeZoomFramebufferStatusThrottled(const char* stage, GLuint texture, GLenum status, int width, int height) {
@@ -3635,9 +3628,8 @@ static void LogEyeZoomFramebufferStatusThrottled(const char* stage, GLuint textu
     if (it != s_lastLogByStage.end() && (now - it->second) < kLogIntervalMs) { return; }
     s_lastLogByStage[stage] = now;
 
-    LogCategory("texture_ops",
-                std::string("EyeZoom: framebuffer incomplete at ") + stage + " status=" + std::to_string(status) +
-                    " tex=" + std::to_string(texture) + " size=" + std::to_string(width) + "x" + std::to_string(height));
+    LogCategory(Log_TextureOps, "EyeZoom: framebuffer incomplete at {} status={} tex={} size={}x{}",
+        stage, status, texture, width, height);
 }
 
 static void DrawPassthroughTextureRegion(GLuint textureId, const float sourceRect[4], int dstLeft, int dstBottom, int dstRight,
@@ -9257,9 +9249,8 @@ void RenderTextureGridOverlay(bool showTextureGrid, int modeWidth, int modeHeigh
 
     static bool loggedOnce = false;
     if (!loggedOnce) {
-        Log("RenderTextureGridOverlay called - g_glInitialized: " +
-            std::to_string(g_glInitialized.load(std::memory_order_acquire) ? 1 : 0) +
-            ", g_solidColorProgram: " + std::to_string(g_solidColorProgram));
+        Log("RenderTextureGridOverlay called - g_glInitialized: {}, g_solidColorProgram: {}",
+            g_glInitialized.load(std::memory_order_acquire) ? 1 : 0, g_solidColorProgram);
         loggedOnce = true;
     }
 
@@ -9675,9 +9666,9 @@ static void PublishViewportTransitionSnapshotLocked() {
 
 void StartModeTransition(const std::string& fromModeId, const std::string& toModeId, int fromWidth, int fromHeight, int fromX, int fromY,
                          int toWidth, int toHeight, int toX, int toY, const ModeConfig& toMode) {
-    LogCategory("animation", "[ANIMATION] StartModeTransition entry - acquiring g_modeTransitionMutex...");
+    LogCategory(Log_Animation, "[ANIMATION] StartModeTransition entry - acquiring g_modeTransitionMutex...");
     std::lock_guard<std::mutex> lock(g_modeTransitionMutex);
-    LogCategory("animation", "[ANIMATION] g_modeTransitionMutex acquired");
+    LogCategory(Log_Animation, "[ANIMATION] g_modeTransitionMutex acquired");
 
     bool transitioningToFullscreen = EqualsIgnoreCase(toModeId, "Fullscreen");
     bool transitioningFromFullscreen = EqualsIgnoreCase(fromModeId, "Fullscreen");
@@ -9686,7 +9677,7 @@ void StartModeTransition(const std::string& fromModeId, const std::string& toMod
                               toMode.backgroundTransition == BackgroundTransitionType::Cut;
 
     if (isAllCutTransition && !transitioningToFullscreen) {
-        LogCategory("animation", "[ANIMATION] Cut/Cut/Cut transition - using 1-frame protection to prevent black flash");
+        LogCategory(Log_Animation, "[ANIMATION] Cut/Cut/Cut transition - using 1-frame protection to prevent black flash");
     }
 
     g_modeTransition.active = true;
@@ -9772,7 +9763,7 @@ void StartModeTransition(const std::string& fromModeId, const std::string& toMod
 
     if (transitioningFromEyeZoom && !transitioningToEyeZoom) {
         g_isTransitioningFromEyeZoom.store(true, std::memory_order_release);
-        LogCategory("animation", "[ANIMATION] Set g_isTransitioningFromEyeZoom=true BEFORE WM_SIZE to freeze snapshot");
+        LogCategory(Log_Animation, "[ANIMATION] Set g_isTransitioningFromEyeZoom=true BEFORE WM_SIZE to freeze snapshot");
     } else {
         g_isTransitioningFromEyeZoom.store(false, std::memory_order_release);
     }
@@ -9787,21 +9778,22 @@ void StartModeTransition(const std::string& fromModeId, const std::string& toMod
         if (posted) {
             g_modeTransition.lastSentWidth = wmWidth;
             g_modeTransition.lastSentHeight = wmHeight;
-            LogCategory("animation", "[ANIMATION] WM_SIZE sent immediately: " + std::to_string(wmWidth) + "x" + std::to_string(wmHeight));
+            LogCategory(Log_Animation, "[ANIMATION] WM_SIZE sent immediately: {}x{}", wmWidth, wmHeight);
         }
     }
 
-    LogCategory("animation", "[ANIMATION] Starting mode transition (Game:" + GameTransitionTypeToString(toMode.gameTransition) +
-                                 ", Overlay:" + OverlayTransitionTypeToString(toMode.overlayTransition) +
-                                 ", Bg:" + BackgroundTransitionTypeToString(toMode.backgroundTransition) + ", " +
-                                 std::to_string(toMode.transitionDurationMs) + "ms): " + fromModeId + " (" + std::to_string(fromWidth) +
-                                 "x" + std::to_string(fromHeight) + " at " + std::to_string(fromX) + "," + std::to_string(fromY) + ")" +
-                                 " -> " + toModeId + " (" + std::to_string(toWidth) + "x" + std::to_string(toHeight) + " at " +
-                                 std::to_string(toX) + "," + std::to_string(toY) + ")");
+    LogCategory(Log_Animation,
+        "[ANIMATION] Starting mode transition (Game:{}, Overlay:{}, Bg:{}, {}ms): {} ({}x{} at {},{}) -> {} ({}x{} at {},{})",
+        GameTransitionTypeToString(toMode.gameTransition),
+        OverlayTransitionTypeToString(toMode.overlayTransition),
+        BackgroundTransitionTypeToString(toMode.backgroundTransition),
+        toMode.transitionDurationMs,
+        fromModeId, fromWidth, fromHeight, fromX, fromY,
+        toModeId, toWidth, toHeight, toX, toY);
 
     PublishViewportTransitionSnapshotLocked();
 
-    LogCategory("animation", "[ANIMATION] StartModeTransition complete - releasing g_modeTransitionMutex");
+    LogCategory(Log_Animation, "[ANIMATION] StartModeTransition complete - releasing g_modeTransitionMutex");
 }
 
 void RetargetActiveModeTransition(const ModeConfig& mode) {
@@ -9964,9 +9956,8 @@ void UpdateModeTransition() {
     bool allComplete = (elapsed >= totalDuration);
 
     if (allComplete) {
-        LogCategory("animation", "[ANIMATION] Mode transition complete: " + g_modeTransition.toModeId + " (final stretch: " +
-                                     std::to_string(g_modeTransition.toWidth) + "x" + std::to_string(g_modeTransition.toHeight) + " at " +
-                                     std::to_string(g_modeTransition.toX) + "," + std::to_string(g_modeTransition.toY) + ")");
+        LogCategory(Log_Animation, "[ANIMATION] Mode transition complete: {} (final stretch: {}x{} at {},{})",
+            g_modeTransition.toModeId, g_modeTransition.toWidth, g_modeTransition.toHeight, g_modeTransition.toX, g_modeTransition.toY);
 
         g_modeTransition.currentWidth = g_modeTransition.toWidth;
         g_modeTransition.currentHeight = g_modeTransition.toHeight;
@@ -10244,20 +10235,20 @@ static bool LoadPngTextureResource(HMODULE hModule, int resourceId, GLuint& outT
 {
     HRSRC hResource = FindResourceW(hModule, MAKEINTRESOURCEW(resourceId), RT_RCDATA);
     if (!hResource) {
-        Log(std::string("Failed to find ") + debugName + " resource ID: " + std::to_string(resourceId));
+        Log("Failed to find {} resource ID: {}", debugName, resourceId);
         return false;
     }
 
     HGLOBAL hLoaded = LoadResource(hModule, hResource);
     if (!hLoaded) {
-        Log(std::string("Failed to load ") + debugName + " resource ID: " + std::to_string(resourceId));
+        Log("Failed to load {} resource ID: {}", debugName, resourceId);
         return false;
     }
 
     void* pData = LockResource(hLoaded);
     DWORD dataSize = SizeofResource(hModule, hResource);
     if (!pData || dataSize == 0) {
-        Log(std::string("Invalid ") + debugName + " resource data for ID: " + std::to_string(resourceId));
+        Log("Invalid {} resource data for ID: {}", debugName, resourceId);
         return false;
     }
 
@@ -10266,7 +10257,7 @@ static bool LoadPngTextureResource(HMODULE hModule, int resourceId, GLuint& outT
     int ch = 0;
     unsigned char* px = stbi_load_from_memory((const unsigned char*)pData, dataSize, &w, &h, &ch, 4);
     if (!px) {
-        Log(std::string("Failed to decode ") + debugName + " PNG for resource ID: " + std::to_string(resourceId));
+        Log("Failed to decode {} PNG for resource ID: {}", debugName, resourceId);
         return false;
     }
 
@@ -10320,7 +10311,7 @@ static void EnsureNinjabrainOverlayIconsLoaded()
 
     for (int i = 0; i < 4; i++) {
         if (LoadPngTextureResource(hModule, resourceIds[i], s_boatIconTex[i], "boat icon")) {
-            Log("Loaded boat icon from resource ID: " + std::to_string(resourceIds[i]));
+            Log("Loaded boat icon from resource ID: {}", resourceIds[i]);
         }
     }
 
@@ -10336,7 +10327,7 @@ static void EnsureNinjabrainOverlayIconsLoaded()
     };
     for (int i = 0; i < 3; ++i) {
         if (LoadPngTextureResource(hModule, messageResourceIds[i], s_ninjabrainMessageIconTex[i], messageDebugNames[i])) {
-            Log(std::string("Loaded ") + messageDebugNames[i] + " from resource ID: " + std::to_string(messageResourceIds[i]));
+            Log("Loaded {} from resource ID: {}", messageDebugNames[i], messageResourceIds[i]);
         }
     }
 

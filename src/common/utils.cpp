@@ -1157,41 +1157,29 @@ static void WriteLogsToFile() {
 
 void FlushLogs() { WriteLogsToFile(); }
 
-void LogCategory(const char* category, const std::string& message) {
-    bool enabled = false;
-    if (strcmp(category, "mode_switch") == 0)
-        enabled = g_config.debug.logModeSwitch;
-    else if (strcmp(category, "animation") == 0)
-        enabled = g_config.debug.logAnimation;
-    else if (strcmp(category, "hotkey") == 0)
-        enabled = g_config.debug.logHotkey;
-    else if (strcmp(category, "obs") == 0)
-        enabled = g_config.debug.logObs;
-    else if (strcmp(category, "window_overlay") == 0)
-        enabled = g_config.debug.logWindowOverlay;
-    else if (strcmp(category, "browser_overlay") == 0)
-        enabled = g_config.debug.logBrowserOverlay;
-    else if (strcmp(category, "ninjabrain") == 0)
-        enabled = g_config.debug.logNinjabrain;
-    else if (strcmp(category, "file_monitor") == 0)
-        enabled = g_config.debug.logFileMonitor;
-    else if (strcmp(category, "image_monitor") == 0)
-        enabled = g_config.debug.logImageMonitor;
-    else if (strcmp(category, "performance") == 0)
-        enabled = g_config.debug.logPerformance;
-    else if (strcmp(category, "texture_ops") == 0)
-        enabled = g_config.debug.logTextureOps;
-    else if (strcmp(category, "gui") == 0)
-        enabled = g_config.debug.logGui;
-    else if (strcmp(category, "init") == 0)
-        enabled = g_config.debug.logInit;
-    else if (strcmp(category, "cursor_textures") == 0)
-        enabled = g_config.debug.logCursorTextures;
-    else if (strcmp(category, "hookchain") == 0)
-        enabled = true;
+bool ShouldLogCategory(const LogCategoryEnum category) {
+    switch (category) {
+        case Log_ModeSwitch:     return g_config.debug.logModeSwitch;
+        case Log_Animation:      return g_config.debug.logAnimation;
+        case Log_Hotkey:         return g_config.debug.logHotkey;
+        case Log_Obs:            return g_config.debug.logObs;
+        case Log_WindowOverlay:  return g_config.debug.logWindowOverlay;
+        case Log_BrowserOverlay: return g_config.debug.logBrowserOverlay;
+        case Log_Ninjabrain:     return g_config.debug.logNinjabrain;
+        case Log_FileMonitor:    return g_config.debug.logFileMonitor;
+        case Log_ImageMonitor:   return g_config.debug.logImageMonitor;
+        case Log_Performance:    return g_config.debug.logPerformance;
+        case Log_TextureOps:     return g_config.debug.logTextureOps;
+        case Log_Gui:            return g_config.debug.logGui;
+        case Log_Init:           return g_config.debug.logInit;
+        case Log_CursorTextures: return g_config.debug.logCursorTextures;
+        case Log_HookChain:      return true;
+    }
+    return false;
+}
 
-    if (!enabled) return;
-    Log(message);
+void LogCategory(const LogCategoryEnum category, const std::string& message) {
+    if (ShouldLogCategory(category)) Log(message);
 }
 
 // True lock-free log submission using two-phase commit:
@@ -1240,9 +1228,7 @@ std::string WideToUtf8(const std::wstring& wstr) {
 #include "common/path_sanitize.inl"
 
 void LogException(const std::string& context, const std::exception& e) {
-    std::stringstream ss;
-    ss << "EXCEPTION in " << context << ": " << e.what();
-    Log(ss.str());
+    Log("EXCEPTION in {}: {}", context, e.what());
 }
 
 void LogException(const std::string& context, DWORD exceptionCode, EXCEPTION_POINTERS* exceptionInfo) {
@@ -1272,8 +1258,7 @@ void LogException(const std::string& context, DWORD exceptionCode, EXCEPTION_POI
 
     const uint32_t suppressed = s_suppressedSehCount.exchange(0, std::memory_order_relaxed);
     if (suppressed > 0) {
-        Log("(Suppressed " + std::to_string(suppressed) + " repeat structured exceptions in last " +
-            std::to_string(kRepeatSuppressWindowMs) + "ms)");
+        Log("(Suppressed {} repeat structured exceptions in last {}ms)", suppressed, kRepeatSuppressWindowMs);
     }
 
     s_lastSehCode.store(exceptionCode, std::memory_order_relaxed);
@@ -1421,11 +1406,7 @@ void EnsureSymbolsInitialized() {
         return;
     }
 
-    DWORD64 dllBaseAddr = (DWORD64)hCurrentModule;
-
-    std::stringstream ssAddr;
-    ssAddr << "Detected DLL loaded at address: 0x" << std::hex << dllBaseAddr;
-    Log(ssAddr.str());
+    Log("Detected DLL loaded at address: 0x{:X}", reinterpret_cast<uintptr_t>(hCurrentModule));
     g_symbolsInitialized.store(true);
     return;
     /*
@@ -1516,7 +1497,7 @@ void WriteCurrentModeToFile(const std::string& modeId) {
 bool SwitchToMode(const std::string& newModeId, const std::string& source, bool forceCut) {
     PROFILE_SCOPE_CAT("Mode Switch", "Mode Management");
 
-    LogCategory("mode_switch", "[MODE_SWITCH] Entry: Attempting to switch to '" + newModeId + "' from source: " + source);
+    LogCategory(Log_ModeSwitch, "[MODE_SWITCH] Entry: Attempting to switch to '{}' from source: {}", newModeId, source);
 
     if (newModeId.empty()) {
         Log("ERROR: Attempted to switch to empty mode ID");
@@ -1540,21 +1521,20 @@ bool SwitchToMode(const std::string& newModeId, const std::string& source, bool 
 
     std::string currentMode;
 
-    LogCategory("mode_switch", "[MODE_SWITCH] Acquiring g_modeIdMutex...");
+    LogCategory(Log_ModeSwitch, "[MODE_SWITCH] Acquiring g_modeIdMutex...");
     // Keep the mode ID publication serialized with StartModeTransition so render readers
     // never observe the new mode before the transition snapshot is ready.
     std::unique_lock<std::mutex> modeLock(g_modeIdMutex);
-    LogCategory("mode_switch", "[MODE_SWITCH] g_modeIdMutex acquired");
+    LogCategory(Log_ModeSwitch, "[MODE_SWITCH] g_modeIdMutex acquired");
     currentMode = g_currentModeId;
 
     if (EqualsIgnoreCase(currentMode, newModeId)) {
-        Log("Mode switch to '" + newModeId + "' requested, but already in that mode.");
+        Log("Mode switch to '{}' requested, but already in that mode.", newModeId);
         return false;
     }
 
-    std::string logMessage = "[MODE] Switching from '" + currentMode + "' to '" + newModeId + "'";
-    if (!source.empty()) { logMessage += " (source: " + source + ")"; }
-    LogCategory("mode_switch", logMessage);
+    LogCategory(Log_ModeSwitch, "[MODE] Switching from '{}' to '{}'{}",
+        currentMode, newModeId, source.empty() ? "" : " (source: " + source + ")");
 
     int fromWidth = 0, fromHeight = 0, fromX = 0, fromY = 0;
     int toWidth = 0, toHeight = 0, toX = 0, toY = 0;
@@ -1585,9 +1565,9 @@ bool SwitchToMode(const std::string& newModeId, const std::string& source, bool 
             if (origDistance > 0) {
             }
 
-            LogCategory("mode_switch",
-                        "[MODE_SWITCH] Active transition detected - using current animated position: " + std::to_string(fromWidth) + "x" +
-                            std::to_string(fromHeight) + " at " + std::to_string(fromX) + "," + std::to_string(fromY));
+            LogCategory(Log_ModeSwitch,
+                        "[MODE_SWITCH] Active transition detected - using current animated position: {}x{} at {},{}",
+                        fromWidth, fromHeight, fromX, fromY);
         }
     }
 
@@ -1680,8 +1660,8 @@ bool SwitchToMode(const std::string& newModeId, const std::string& source, bool 
             toModeCopy.overlayTransition = OverlayTransitionType::Cut;
             toModeCopy.backgroundTransition = BackgroundTransitionType::Cut;
         }
-        LogCategory("mode_switch", "[MODE_SWITCH] Mode dimensions calculated - from: " + std::to_string(fromWidth) + "x" +
-                                       std::to_string(fromHeight) + ", to: " + std::to_string(toWidth) + "x" + std::to_string(toHeight));
+        LogCategory(Log_ModeSwitch, "[MODE_SWITCH] Mode dimensions calculated - from: {}x{}, to: {}x{}",
+            fromWidth, fromHeight, toWidth, toHeight);
     }
 
     if (useAnimatedPosition && toModeCopy.gameTransition == GameTransitionType::Bounce) {
@@ -1713,9 +1693,9 @@ bool SwitchToMode(const std::string& newModeId, const std::string& source, bool 
                 int originalDuration = toModeCopy.transitionDurationMs;
                 toModeCopy.transitionDurationMs = static_cast<int>(originalDuration * distanceRatio);
 
-                LogCategory("mode_switch",
-                            "[MODE_SWITCH] Mid-animation reversal: scaling duration from " + std::to_string(originalDuration) + "ms to " +
-                                std::to_string(toModeCopy.transitionDurationMs) + "ms (ratio: " + std::to_string(distanceRatio) + ")");
+                LogCategory(Log_ModeSwitch,
+                            "[MODE_SWITCH] Mid-animation reversal: scaling duration from {}ms to {}ms (ratio: {})",
+                            originalDuration, toModeCopy.transitionDurationMs, distanceRatio);
             }
         }
     }
@@ -1726,24 +1706,25 @@ bool SwitchToMode(const std::string& newModeId, const std::string& source, bool 
         toModeCopy.backgroundTransition = BackgroundTransitionType::Cut;
     }
 
-    LogCategory("mode_switch",
-                "[MODE_SWITCH] Calling StartModeTransition with Game:" + GameTransitionTypeToString(toModeCopy.gameTransition) +
-                    ", Overlay:" + OverlayTransitionTypeToString(toModeCopy.overlayTransition) +
-                    ", Bg:" + BackgroundTransitionTypeToString(toModeCopy.backgroundTransition));
+    LogCategory(Log_ModeSwitch,
+                "[MODE_SWITCH] Calling StartModeTransition with Game:{}, Overlay:{}, Bg:{}",
+                GameTransitionTypeToString(toModeCopy.gameTransition),
+                OverlayTransitionTypeToString(toModeCopy.overlayTransition),
+                BackgroundTransitionTypeToString(toModeCopy.backgroundTransition));
     // The next real game glViewport after a mode switch must republish the live source size.
     // Until then, input translation should resolve from the new mode snapshot instead of the prior mode's viewport.
     InvalidateLatestGameViewportSize();
     StartModeTransition(currentMode, newModeId, fromWidth, fromHeight, fromX, fromY, toWidth, toHeight, toX, toY, toModeCopy);
-    LogCategory("mode_switch", "[MODE_SWITCH] StartModeTransition completed");
+    LogCategory(Log_ModeSwitch, "[MODE_SWITCH] StartModeTransition completed");
 
     g_currentModeId = newModeId;
     int nextIndex = 1 - g_currentModeIdIndex.load(std::memory_order_relaxed);
     g_modeIdBuffers[nextIndex] = newModeId;
     g_currentModeIdIndex.store(nextIndex, std::memory_order_release);
-    LogCategory("mode_switch", "[MODE_SWITCH] Published new active mode after transition setup: " + newModeId);
+    LogCategory(Log_ModeSwitch, "[MODE_SWITCH] Published new active mode after transition setup: {}", newModeId);
 
     modeLock.unlock();
-    LogCategory("mode_switch", "[MODE_SWITCH] g_modeIdMutex released");
+    LogCategory(Log_ModeSwitch, "[MODE_SWITCH] g_modeIdMutex released");
 
     // Async file write OUTSIDE the mutex - never blocks
     WriteCurrentModeToFile(newModeId);
@@ -2103,7 +2084,7 @@ GLuint CompileShader(GLenum type, const char* source) {
     if (!ok) {
         char log[512];
         glGetShaderInfoLog(shader, 512, NULL, log);
-        Log("ERROR: Shader compile failed: " + std::string(log));
+        Log("ERROR: Shader compile failed: {}", log);
         glDeleteShader(shader);
         return 0;
     }
@@ -2124,7 +2105,7 @@ GLuint CreateShaderProgram(const char* vert, const char* frag) {
     if (!ok) {
         char log[512];
         glGetProgramInfoLog(p, 512, NULL, log);
-        Log("ERROR: Shader link failed: " + std::string(log));
+        Log("ERROR: Shader link failed: {}", log);
         glDeleteProgram(p);
         p = 0;
     }
@@ -2136,7 +2117,7 @@ GLuint CreateShaderProgram(const char* vert, const char* frag) {
 void LoadImageAsync(DecodedImageData::Type type, std::string id, std::string path, const std::wstring& toolscreenPath) {
     PROFILE_SCOPE_CAT("Async Image Load", "IO Operations");
     if (path.empty()) {
-        Log("Skipping image load for '" + id + "' due to empty path.");
+        Log("Skipping image load for '{}' due to empty path.", id);
         return;
     }
 
@@ -2147,7 +2128,7 @@ void LoadImageAsync(DecodedImageData::Type type, std::string id, std::string pat
         _set_se_translator(SEHTranslator);
 
         try {
-            LogCategory("image_monitor", "Started thread for loading image '" + id + "' from path '" + path + "'");
+            LogCategory(Log_ImageMonitor, "Started thread for loading image '{}' from path '{}'", id, path);
             try {
                 if (g_isShuttingDown.load()) { return; }
 
@@ -2164,9 +2145,8 @@ void LoadImageAsync(DecodedImageData::Type type, std::string id, std::string pat
                 const bool isGif = mediaKind == VisualMediaKind::AnimatedGif;
                 const bool isVideo = mediaKind == VisualMediaKind::VideoMpeg1;
                 if (mediaKind == VisualMediaKind::Unsupported) {
-                    LogCategory("image_monitor",
-                                "Skipping unsupported visual media for '" + id + "' from '" + path + "'. " +
-                                    DescribeSupportedVisualMediaFormats());
+                    LogCategory(Log_ImageMonitor, "Skipping unsupported visual media for '{}' from '{}'. {}",
+                        id, path, DescribeSupportedVisualMediaFormats());
                     return;
                 }
 
@@ -2179,9 +2159,8 @@ void LoadImageAsync(DecodedImageData::Type type, std::string id, std::string pat
                 if (isVideo) {
                     CachedMpegVideoResult cachedVideo;
                     if (videoCacheBudgetBytes == 0) {
-                        LogCategory("image_monitor",
-                                    "Skipping MPEG-1 video '" + id + "' from '" + path +
-                                        "' because debug.videoCacheBudgetMiB is set to 0 and live streaming playback is disabled.");
+                        LogCategory(Log_ImageMonitor,
+                                    "Skipping MPEG-1 video '{}' from '{}' because debug.videoCacheBudgetMiB is set to 0 and live streaming playback is disabled.", id, path);
                         return;
                     }
 
@@ -2200,9 +2179,9 @@ void LoadImageAsync(DecodedImageData::Type type, std::string id, std::string pat
                             }
                         }
                     } else {
-                        LogCategory("image_monitor",
-                                    "Skipping MPEG-1 video '" + id + "' from '" + path + "' because it could not be cached within the configured budget of " +
-                                        std::to_string(videoCacheBudgetMiB) + " MiB: " + cachedVideo.error);
+                        LogCategory(Log_ImageMonitor,
+                                    "Skipping MPEG-1 video '{}' from '{}' because it could not be cached within the configured budget of {} MiB: {}",
+                                    id, path, videoCacheBudgetMiB, cachedVideo.error);
                         return;
                     }
                 }
@@ -2216,17 +2195,14 @@ void LoadImageAsync(DecodedImageData::Type type, std::string id, std::string pat
                         fseek(f, 0, SEEK_SET);
 
                         if (fileSize <= 0) {
-                            LogCategory("image_monitor", "Skipping GIF load for '" + id + "' from '" + path + "' due to invalid file size " +
-                                                           std::to_string(fileSize) + ".");
+                            LogCategory(Log_ImageMonitor, "Skipping GIF load for '{}' from '{}' due to invalid file size {}.",
+                                id, path, fileSize);
                         } else if (static_cast<unsigned long long>(fileSize) > kMaxGifLoadBytes) {
-                            LogCategory("image_monitor",
-                                        "Skipping GIF load for '" + id + "' from '" + path + "' because file size " +
-                                            FormatByteCount(static_cast<size_t>(fileSize)) + " exceeds guard limit of " +
-                                            FormatByteCount(kMaxGifLoadBytes) + ".");
+                            LogCategory(Log_ImageMonitor, "Skipping GIF load for '{}' from '{}' because file size {} exceeds guard limit of {}.",
+                                id, path, FormatByteCount(static_cast<size_t>(fileSize)), FormatByteCount(kMaxGifLoadBytes));
                         } else if (fileSize > (std::numeric_limits<int>::max)()) {
-                            LogCategory("image_monitor",
-                                        "Skipping GIF load for '" + id + "' from '" + path + "' because file size " +
-                                            FormatByteCount(static_cast<size_t>(fileSize)) + " exceeds stb_image int input range.");
+                            LogCategory(Log_ImageMonitor, "Skipping GIF load for '{}' from '{}' because file size {} exceeds stb_image int input range.",
+                                id, path, FormatByteCount(static_cast<size_t>(fileSize)));
                         } else {
                             std::vector<unsigned char> fileData(static_cast<size_t>(fileSize));
                             size_t bytesRead = fread(fileData.data(), 1, static_cast<size_t>(fileSize), f);
@@ -2242,9 +2218,8 @@ void LoadImageAsync(DecodedImageData::Type type, std::string id, std::string pat
                                     delays = nullptr;
                                 }
                             } else {
-                                LogCategory("image_monitor",
-                                            "Failed to read full GIF file for '" + id + "' from '" + path + "'. Expected " +
-                                                std::to_string(fileSize) + " bytes, read " + std::to_string(bytesRead) + ".");
+                                LogCategory(Log_ImageMonitor, "Failed to read full GIF file for '{}' from '{}'. Expected {} bytes, read {}.",
+                                    id, path, fileSize, bytesRead);
                             }
                         }
 
@@ -2270,10 +2245,9 @@ void LoadImageAsync(DecodedImageData::Type type, std::string id, std::string pat
                     if (frameCount > 1) {
                         long long totalHeight = static_cast<long long>(h) * static_cast<long long>(frameCount);
                         if (frameCount <= 0 || totalHeight <= 0 || totalHeight > (std::numeric_limits<int>::max)()) {
-                            LogCategory("image_monitor",
-                                        "Skipping decoded animated image '" + id + "' from '" + path +
-                                            "' because frame dimensions are invalid: frameCount=" + std::to_string(frameCount) +
-                                            ", frameHeight=" + std::to_string(h) + ".");
+                            LogCategory(Log_ImageMonitor,
+                                        "Skipping decoded animated image '{}' from '{}' because frame dimensions are invalid: frameCount={}, frameHeight={}.",
+                                        id, path, frameCount, h);
                             stbi_image_free(data);
                             if (delays) stbi_image_free(delays);
                             return;
@@ -2283,19 +2257,17 @@ void LoadImageAsync(DecodedImageData::Type type, std::string id, std::string pat
 
                     size_t decodedBytes = 0;
                     if (!TryComputeImageByteCount(w, decodedHeight, 4, decodedBytes)) {
-                        LogCategory("image_monitor",
-                                    "Skipping decoded image '" + id + "' from '" + path +
-                                        "' because dimensions overflow byte-count calculation: " + std::to_string(w) + "x" +
-                                        std::to_string(decodedHeight) + "x4.");
+                        LogCategory(Log_ImageMonitor,
+                                    "Skipping decoded image '{}' from '{}' because dimensions overflow byte-count calculation: {}x{}x4.",
+                                    id, path, w, decodedHeight);
                         stbi_image_free(data);
                         if (delays) stbi_image_free(delays);
                         return;
                     }
                     if (!isVideo && decodedBytes > kMaxDecodedImageBytes) {
-                        LogCategory("image_monitor",
-                                    "Skipping decoded image '" + id + "' from '" + path + "' because estimated pixel storage " +
-                                        FormatByteCount(decodedBytes) + " exceeds guard limit of " +
-                                        FormatByteCount(kMaxDecodedImageBytes) + ".");
+                        LogCategory(Log_ImageMonitor,
+                                    "Skipping decoded image '{}' from '{}' because estimated pixel storage {} exceeds guard limit of {}.",
+                                    id, path, FormatByteCount(decodedBytes), FormatByteCount(kMaxDecodedImageBytes));
                         stbi_image_free(data);
                         if (delays) stbi_image_free(delays);
                         return;
@@ -2323,11 +2295,11 @@ void LoadImageAsync(DecodedImageData::Type type, std::string id, std::string pat
                             }
                         }
                         if (isVideo) {
-                            Log("Loaded cached MPEG-1 video '" + id + "' with " + std::to_string(frameCount) +
-                                " frames, frame size: " + std::to_string(w) + "x" + std::to_string(h));
+                            Log("Loaded cached MPEG-1 video '{}' with {} frames, frame size: {}x{}",
+                                id, frameCount, w, h);
                         } else {
-                            Log("Loaded animated GIF '" + id + "' with " + std::to_string(frameCount) +
-                                " frames, frame size: " + std::to_string(w) + "x" + std::to_string(h));
+                            Log("Loaded animated GIF '{}' with {} frames, frame size: {}x{}",
+                                id, frameCount, w, h);
                         }
                     } else {
                         decoded.isAnimated = false;
@@ -2340,12 +2312,11 @@ void LoadImageAsync(DecodedImageData::Type type, std::string id, std::string pat
 
                     std::lock_guard<std::mutex> lock(g_decodedImagesMutex);
                     g_decodedImagesQueue.push_back(decoded);
-                    LogCategory("image_monitor", "Successfully decoded visual media for '" + id + "' from '" + path +
-                                                   "' on background thread: " + std::to_string(decoded.width) + "x" +
-                                                   std::to_string(decoded.height) + ", frameCount=" +
-                                                   std::to_string(decoded.frameCount) + ", queueSize=" +
-                                                   std::to_string(g_decodedImagesQueue.size()) + ", bytes=" +
-                                                   FormatByteCount(decodedBytes) + ".");
+                    LogCategory(Log_ImageMonitor,
+                        "Successfully decoded visual media for '{}' from '{}' on background thread:"
+                        "{}x{}, frameCount={}, queueSize={}, bytes={}.",
+                        id, path, decoded.width, decoded.height, decoded.frameCount,
+                        g_decodedImagesQueue.size(), FormatByteCount(decodedBytes));
                 } else {
                     std::string reason = "unknown error";
                     if (isVideo) {
@@ -2353,19 +2324,19 @@ void LoadImageAsync(DecodedImageData::Type type, std::string id, std::string pat
                     } else if (stbi_failure_reason()) {
                         reason = stbi_failure_reason();
                     }
-                    Log("ERROR: Failed to decode visual media '" + path + "' for ID '" + id + "'. Reason: " + reason);
+                    Log("ERROR: Failed to decode visual media '{}' for ID '{}'. Reason: {}", path, id, reason);
                     if (data) stbi_image_free(data);
                     if (delays) stbi_image_free(delays);
                 }
             } catch (const std::exception& ex) {
-                Log("ERROR: Exception during image load for '" + id + "' from '" + path + "': " + ex.what());
+                Log("ERROR: Exception during image load for '{}' from '{}': {}", id, path, ex.what());
             }
         } catch (const SE_Exception& e) {
             LogException("ImageLoadThread (SEH) for '" + id + "'", e.getCode(), e.getInfo());
         } catch (const std::exception& e) { LogException("ImageLoadThread for '" + id + "'", e); } catch (...) {
-            Log("EXCEPTION in ImageLoadThread for '" + id + "': Unknown exception");
+            Log("EXCEPTION in ImageLoadThread for '{}': Unknown exception", id);
         }
-        LogCategory("image_monitor", "Image load thread for '" + id + "' has completed.");
+        LogCategory(Log_ImageMonitor, "Image load thread for '{}' has completed.", id);
     }).detach();
 }
 
@@ -2388,7 +2359,7 @@ void LoadAllImages() {
 
     for (const auto& mode : modesToLoad) {
         if (mode.background.selectedMode == "image" && !mode.background.image.empty()) {
-            Log("Queueing background image load for mode '" + mode.id + "': " + mode.background.image);
+            Log("Queueing background image load for mode '{}': {}", mode.id, mode.background.image);
             LoadImageAsync(DecodedImageData::Type::Background, mode.id, mode.background.image, g_toolscreenPath);
         }
     }
@@ -2572,7 +2543,7 @@ DWORD WINAPI ImageMonitorThread(LPVOID lpParam) {
                     auto it = s_lastWriteTimes.find(img.name);
                     if (it == s_lastWriteTimes.end() || CompareFileTime(&it->second, &currentWriteTime) != 0) {
                         if (it != s_lastWriteTimes.end()) {
-                            Log("[IMON] Detected change in image file, queueing for reload: " + img.path);
+                            Log("[IMON] Detected change in image file, queueing for reload: {}", img.path);
                             LoadImageAsync(DecodedImageData::Type::UserImage, img.name, img.path, g_toolscreenPath);
                         }
                         s_lastWriteTimes[img.name] = currentWriteTime;
@@ -2770,7 +2741,7 @@ bool CheckHotkeyMatch(const std::vector<DWORD>& keys, WPARAM wParam, const std::
             }
 
             if (excludedPressed) {
-                if (g_config.debug.showHotkeyDebug) { Log("[Hotkey] FAIL: Exclusion key " + std::to_string(excluded_key) + " is pressed"); }
+                if (g_config.debug.showHotkeyDebug) { Log("[Hotkey] FAIL: Exclusion key {} is pressed", excluded_key); }
                 return false;
             }
         }
@@ -2811,7 +2782,7 @@ bool CheckHotkeyMatch(const std::vector<DWORD>& keys, WPARAM wParam, const std::
 
     if (s_enableHotkeyDebug) {
         keyCombo = GetKeyComboString(keys);
-        Log("[Hotkey] Check: " + keyCombo + " vs keypress " + std::to_string(wParam));
+        Log("[Hotkey] Check: {} vs keypress {}", keyCombo, wParam);
     }
 
     // Handle modifier keys specially - Windows may report generic modifiers in wParam,
@@ -2871,19 +2842,19 @@ bool CheckHotkeyMatch(const std::vector<DWORD>& keys, WPARAM wParam, const std::
     }
 
     if (!main_key_pressed) {
-        if (s_enableHotkeyDebug) { Log("[Hotkey] SKIP: main key " + std::to_string(main_key) + " != " + std::to_string(wParam)); }
+        if (s_enableHotkeyDebug) { Log("[Hotkey] SKIP: main key {} != {}", main_key, wParam); }
         return false;
     }
 
     if (!skipLiveKeyStateChecks) {
         if (s_enableHotkeyDebug) {
-            Log("[Hotkey] Modifiers - Need: LCtrl=" + std::to_string(requires_lctrl) + " RCtrl=" + std::to_string(requires_rctrl) +
-                " Ctrl=" + std::to_string(requires_ctrl) + " LShift=" + std::to_string(requires_lshift) + " RShift=" +
-                std::to_string(requires_rshift) + " Shift=" + std::to_string(requires_shift) + " LAlt=" + std::to_string(requires_lalt) +
-                " RAlt=" + std::to_string(requires_ralt) + " Alt=" + std::to_string(requires_alt));
-            Log("[Hotkey] Modifiers - Have: LCtrl=" + std::to_string(lctrl_down) + " RCtrl=" + std::to_string(rctrl_down) +
-                " LShift=" + std::to_string(lshift_down) + " RShift=" + std::to_string(rshift_down) + " LAlt=" + std::to_string(lalt_down) +
-                " RAlt=" + std::to_string(ralt_down));
+            Log("[Hotkey] Modifiers - Need: LCtrl={} RCtrl={} Ctrl={} LShift={} RShift={} Shift={} LAlt={} RAlt={} Alt={}",
+                requires_lctrl, requires_rctrl, requires_ctrl,
+                requires_lshift, requires_rshift, requires_shift,
+                requires_lalt, requires_ralt, requires_alt);
+
+            Log("[Hotkey] Modifiers - Have: LCtrl={} RCtrl={} LShift={} RShift={} LAlt={} RAlt={}",
+                lctrl_down, rctrl_down, lshift_down, rshift_down, lalt_down, ralt_down);
         }
 
         if (requires_lctrl && !lctrl_down) {
@@ -2930,7 +2901,7 @@ bool CheckHotkeyMatch(const std::vector<DWORD>& keys, WPARAM wParam, const std::
 
             if (!IsConfiguredInputKeyDown(requiredKey)) {
                 if (s_enableHotkeyDebug) {
-                    Log("[Hotkey] FAIL: Required key " + std::to_string(requiredKey) + " is not pressed");
+                    Log("[Hotkey] FAIL: Required key {} is not pressed", requiredKey);
                 }
                 return false;
             }
@@ -2941,7 +2912,7 @@ bool CheckHotkeyMatch(const std::vector<DWORD>& keys, WPARAM wParam, const std::
 
     if (s_enableHotkeyDebug) {
         if (keyCombo.empty()) keyCombo = GetKeyComboString(keys);
-        Log("[Hotkey] ✓ MATCH: " + keyCombo);
+        Log("[Hotkey] ✓ MATCH: {}", keyCombo);
     }
 
     return true;
@@ -3177,23 +3148,22 @@ void ScreenDeltaToMirrorConfigDelta(const std::string& relativeTo,
 void ScreenshotToClipboard(int width, int height) {
     PROFILE_SCOPE_CAT("Screenshot to Clipboard", "System");
     if (width <= 0 || height <= 0) {
-        Log("ERROR: Screenshot request rejected due to invalid dimensions " + std::to_string(width) + "x" + std::to_string(height) + ".");
+        Log("ERROR: Screenshot request rejected due to invalid dimensions {}x{}.", width, height);
         return;
     }
 
     size_t bufferSize = 0;
     if (!TryComputeImageByteCount(width, height, 4, bufferSize)) {
-        Log("ERROR: Screenshot request rejected because byte-count overflowed for dimensions " + std::to_string(width) + "x" +
-            std::to_string(height) + ".");
+        Log("ERROR: Screenshot request rejected because byte-count overflowed for dimensions {}x{}.", width, height);
         return;
     }
     if (bufferSize > kMaxScreenshotBytes) {
-        Log("ERROR: Screenshot request rejected because buffer size " + FormatByteCount(bufferSize) + " exceeds guard limit of " +
-            FormatByteCount(kMaxScreenshotBytes) + " for dimensions " + std::to_string(width) + "x" + std::to_string(height) + ".");
+        Log("ERROR: Screenshot request rejected because buffer size {} exceeds guard limit of {} for dimensions {}x{}.",
+            FormatByteCount(bufferSize), FormatByteCount(kMaxScreenshotBytes), width, height);
         return;
     }
 
-    Log("Taking screenshot at " + std::to_string(width) + "x" + std::to_string(height) + " (" + FormatByteCount(bufferSize) + ").");
+    Log("Taking screenshot at {}x{} ({}).", width, height, FormatByteCount(bufferSize));
     std::vector<BYTE> pixels(bufferSize);
 
     GLint previousPackRowLength = 0;
@@ -3218,8 +3188,7 @@ void ScreenshotToClipboard(int width, int height) {
     }
 
     if (pixels.size() > (std::numeric_limits<SIZE_T>::max)() - sizeof(BITMAPINFOHEADER)) {
-        Log("ERROR: Screenshot clipboard payload size overflowed for dimensions " + std::to_string(width) + "x" +
-            std::to_string(height) + ".");
+        Log("ERROR: Screenshot clipboard payload size overflowed for dimensions {}x{}.", width, height);
         CloseClipboard();
         return;
     }
@@ -3252,7 +3221,7 @@ void ScreenshotToClipboard(int width, int height) {
     GlobalUnlock(hMem);
 
     if (!SetClipboardData(CF_DIB, hMem)) {
-        Log("ERROR: SetClipboardData failed with error code: " + std::to_string(GetLastError()));
+        Log("ERROR: SetClipboardData failed with error code: {}", GetLastError());
         GlobalFree(hMem);
     } else {
         Log("Screenshot copied to clipboard.");
@@ -3284,7 +3253,7 @@ void BackupConfigFile() {
     std::wstring backupFileName = backupDir + L"\\config_" + std::to_wstring(timestamp) + L".toml";
 
     if (CopyFileW(configPath.c_str(), backupFileName.c_str(), FALSE)) {
-        Log("Config backed up to: " + WideToUtf8(backupFileName));
+        Log("Config backed up to: {}", WideToUtf8(backupFileName));
 
         WIN32_FIND_DATAW findData;
         std::vector<std::pair<FILETIME, std::wstring>> backupFiles;
@@ -3313,15 +3282,15 @@ void BackupConfigFile() {
         if (backupFiles.size() > 50) {
             for (size_t i = 50; i < backupFiles.size(); i++) {
                 if (DeleteFileW(backupFiles[i].second.c_str())) {
-                    Log("Deleted old backup: " + WideToUtf8(backupFiles[i].second));
+                    Log("Deleted old backup: {}", WideToUtf8(backupFiles[i].second));
                 } else {
-                    Log("Failed to delete old backup: " + WideToUtf8(backupFiles[i].second));
+                    Log("Failed to delete old backup: {}", WideToUtf8(backupFiles[i].second));
                 }
             }
         }
     } else {
         DWORD error = GetLastError();
-        Log("Failed to backup config file. Error code: " + std::to_string(error));
+        Log("Failed to backup config file. Error code: {}", error);
     }
 }
 
@@ -3394,7 +3363,7 @@ static bool ApplyCenteredWindowedRestore(HWND hwnd, UINT extraFlags, const char*
     const int targetH = targetRect.bottom - targetRect.top;
     if (!SetWindowPos(hwnd, HWND_NOTOPMOST, targetRect.left, targetRect.top, targetW, targetH, SWP_NOOWNERZORDER | extraFlags)) {
         std::string src = source ? source : "unknown";
-        Log("[WINDOW] SetWindowPos failed while centering windowed restore (" + src + "). Error=" + std::to_string(GetLastError()));
+        Log("[WINDOW] SetWindowPos failed while centering windowed restore ({}). Error={}", src, GetLastError());
         return false;
     }
 
@@ -3408,9 +3377,8 @@ bool CenterWindowedRestoreOnCurrentMonitor(HWND hwnd, const char* source) {
 
     const int targetW = targetRect.right - targetRect.left;
     const int targetH = targetRect.bottom - targetRect.top;
-    std::string src = source ? source : "unknown";
-    Log("[WINDOW] Centered windowed restore (" + src + ") -> " + std::to_string(targetW) + "x" + std::to_string(targetH) +
-        " at " + std::to_string(targetRect.left) + "," + std::to_string(targetRect.top));
+    Log("[WINDOW] Centered windowed restore ({}) -> {}x{} at {},{}",
+        source ? source : "unknown", targetW, targetH, targetRect.left, targetRect.top);
     return true;
 }
 
@@ -3434,8 +3402,7 @@ bool RequestWindowClientResize(HWND hwnd, int width, int height, const char* sou
     if (!PostMessage(hwnd, WM_SIZE, SIZE_RESTORED, MAKELPARAM(width, height))) {
         DWORD err = GetLastError();
         std::string src = source ? source : "unknown";
-        Log("[WINDOW] Failed to post WM_SIZE resize request (" + src + "): " + std::to_string(width) + "x" + std::to_string(height) +
-            ", error=" + std::to_string(err));
+        Log("[WINDOW] Failed to post WM_SIZE resize request ({}): {}x{}, error={}", src, width, height, err);
         return false;
     }
 
@@ -3476,7 +3443,7 @@ void ToggleBorderlessWindowedFullscreen(HWND hwnd) {
     if (windowThreadId != 0 && windowThreadId != currentThreadId) {
         const UINT msg = GetToolscreenBorderlessToggleMessageId();
         if (!PostMessage(hwnd, msg, 0, 0)) {
-            Log("[WINDOW] Failed to post borderless toggle request to window thread. Error=" + std::to_string(GetLastError()));
+            Log("[WINDOW] Failed to post borderless toggle request to window thread. Error={}", GetLastError());
         }
         return;
     }
@@ -3515,7 +3482,7 @@ void ToggleBorderlessWindowedFullscreen(HWND hwnd) {
         SetLastError(0);
         LONG_PTR prev = SetWindowLongPtr(hwnd, index, static_cast<LONG_PTR>(value));
         if (prev == 0 && GetLastError() != 0) {
-            Log("[WINDOW] SetWindowLongPtr failed (index=" + std::to_string(index) + ", error=" + std::to_string(GetLastError()) + ")");
+            Log("[WINDOW] SetWindowLongPtr failed (index={}, error={})", index, GetLastError());
             return false;
         }
         return true;
@@ -3559,7 +3526,7 @@ void ToggleBorderlessWindowedFullscreen(HWND hwnd) {
         if (ok) {
             ok = SetWindowPos(hwnd, HWND_NOTOPMOST, targetRect.left, targetRect.top, targetW, targetH, SWP_NOOWNERZORDER | SWP_FRAMECHANGED) !=
                  FALSE;
-            if (!ok) { Log("[WINDOW] SetWindowPos failed while enabling borderless. Error=" + std::to_string(GetLastError())); }
+            if (!ok) { Log("[WINDOW] SetWindowPos failed while enabling borderless. Error={}", GetLastError()); }
         }
 
         if (!ok) {
@@ -3571,7 +3538,7 @@ void ToggleBorderlessWindowedFullscreen(HWND hwnd) {
         state.active = true;
         RequestScreenMetricsRecalculation();
         RequestCurrentModeClientResizeSync(hwnd, "window:borderless_on");
-        Log("[WINDOW] Toggled borderless ON (" + std::to_string(targetW) + "x" + std::to_string(targetH) + ")");
+        Log("[WINDOW] Toggled borderless ON ({}x{})", targetW, targetH);
     } else {
         if (IsIconic(hwnd) || IsZoomed(hwnd)) {
             ShowWindow(hwnd, SW_RESTORE);
@@ -3609,6 +3576,6 @@ void ToggleBorderlessWindowedFullscreen(HWND hwnd) {
         RequestCurrentModeClientResizeSync(hwnd, "window:borderless_off");
         const int centeredW = centeredRect.right - centeredRect.left;
         const int centeredH = centeredRect.bottom - centeredRect.top;
-        Log("[WINDOW] Toggled borderless OFF -> windowed centered (" + std::to_string(centeredW) + "x" + std::to_string(centeredH) + ")");
+        Log("[WINDOW] Toggled borderless OFF -> windowed centered ({}x{})", centeredW, centeredH);
     }
 }
