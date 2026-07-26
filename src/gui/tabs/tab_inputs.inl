@@ -4909,9 +4909,8 @@ if (BeginSelectableSettingsTopTabItem(trc("tabs.inputs"))) {
                                     rebind.customOutputScanCode = scanCode;
                                     rebind.useCustomOutput = true;
 
-                                    Log("[Rebind][GameKeybind] capturedVk=" + std::to_string(capturedVk) +
-                                        " capturedLParam=" + std::to_string(static_cast<long long>(capturedLParam)) +
-                                        " storedScan=" + std::to_string(scanCode) + " ext=" + std::string((scanCode & 0xFF00) ? "1" : "0"));
+                                    Log("[Rebind][GameKeybind] capturedVk={} capturedLParam={} storedScan={} ext={}",
+                                        capturedVk, static_cast<long long>(capturedLParam), scanCode, (scanCode & 0xFF00) ? '1' : '0');
                                 }
 
                                 g_configIsDirty = true;

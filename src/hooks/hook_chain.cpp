@@ -266,23 +266,23 @@ static void LogSkippedDisallowedHookTarget(const char* apiName, void* startAddre
     g_lastSkippedWglSwapBuffersStart.store(startAddress, std::memory_order_release);
     g_lastSkippedWglSwapBuffersTarget.store(skippedTarget, std::memory_order_release);
 
-    const char* action = "skipping unchainable hook target";
+    std::string_view action = "skipping unchainable hook target";
     HookChainOwnerInfo ownerInfo{};
     if (GetOwnerInfoForAddress(skippedTarget, ownerInfo) && IsToolscreenHookOwner(ownerInfo)) {
         action = "Skipping chaining our own hook";
     }
 
-    LogCategory("hookchain",
-                std::string("[") + apiName + "] " + action + " start=" +
-                    HookChain::DescribeAddressWithOwner(startAddress) + " target=" + HookChain::DescribeAddressWithOwner(skippedTarget));
+    LogCategory(Log_HookChain, "[{}] {} start={} target={}",
+        apiName, action,
+        HookChain::DescribeAddressWithOwner(startAddress),
+        HookChain::DescribeAddressWithOwner(skippedTarget));
 }
 
 static void LogSkippedStaleHookTarget(const char* apiName, void* target, const char* reason) {
     if (!apiName || !target) return;
 
-    LogCategory("hookchain",
-                std::string("[") + apiName + "] skipping stale third-party hook target " + HookChain::DescribeAddressWithOwner(target) +
-                    " reason=" + (reason ? reason : "unknown"));
+    LogCategory(Log_HookChain, "[{}] skipping stale third-party hook target {} reason={}",
+        apiName, HookChain::DescribeAddressWithOwner(target), reason ? reason : "unknown");
 }
 
 static bool IsLiveThirdPartyWglSwapBuffersHookTarget(void* target) {
@@ -387,25 +387,23 @@ static void LogHookChainDetails(const char* apiName, void* startAddress, void* r
     if (!apiName) apiName = "(unknown api)";
     if (!reason) reason = "(unspecified)";
 
-    const char* mode = "LatestHook";
+    constexpr std::string_view mode = "LatestHook";
 
-    LogCategory("hookchain",
-                std::string("[") + apiName + "] chain-detect reason=" + reason + " nextTarget=" + mode + " start=" +
-                    HookChain::DescribeAddressWithOwner(startAddress) + " hookTarget=" + HookChain::DescribeAddressWithOwner(resolvedHookTarget));
+    LogCategory(Log_HookChain, "[{}] chain-detect reason={} nextTarget={} start={} hookTarget={}",
+        apiName, reason, mode, HookChain::DescribeAddressWithOwner(startAddress), HookChain::DescribeAddressWithOwner(resolvedHookTarget));
 
     std::vector<std::string> trace;
     (void)TraceAbsoluteJumpTarget(startAddress, trace);
     for (const auto& line : trace) {
-        LogCategory("hookchain", std::string("[") + apiName + "] " + line);
+        LogCategory(Log_HookChain, "[{}] {}", apiName, line);
     }
 }
 
 static void LogIatHookChainDetails(const char* apiName, HMODULE importingModule, void* thunkTarget, void* expectedExport) {
     if (!apiName) apiName = "(unknown api)";
     std::string importerDesc = importingModule ? HookChain::DescribeAddressWithOwner(importingModule) : std::string("(null)");
-    LogCategory("hookchain",
-                std::string("[") + apiName + "] IAT chain-detect importingModule=" + importerDesc + " iatTarget=" +
-                    HookChain::DescribeAddressWithOwner(thunkTarget) + " expectedExport=" + HookChain::DescribeAddressWithOwner(expectedExport));
+    LogCategory(Log_HookChain, "[{}] IAT chain-detect importingModule={} iatTarget={} expectedExport={}",
+        apiName, importerDesc, HookChain::DescribeAddressWithOwner(thunkTarget), HookChain::DescribeAddressWithOwner(expectedExport));
 }
 
 static bool TryInstallThirdPartyWglSwapBuffersHook(void* jumpTarget, const char* what) {
@@ -415,10 +413,10 @@ static bool TryInstallThirdPartyWglSwapBuffersHook(void* jumpTarget, const char*
     }
 
     if (currentTarget) {
-        LogCategory("hookchain",
-                    std::string("[wglSwapBuffers] keeping existing third-party hook target ") +
-                        HookChain::DescribeAddressWithOwner(currentTarget) + " instead of switching to " +
-                        HookChain::DescribeAddressWithOwner(jumpTarget));
+        LogCategory(Log_HookChain,
+            "[wglSwapBuffers] keeping existing third-party hook target {} instead of switching to {}",
+            HookChain::DescribeAddressWithOwner(currentTarget),
+            HookChain::DescribeAddressWithOwner(jumpTarget));
         return false;
     }
 
@@ -544,7 +542,7 @@ static void RefreshThirdPartyWglSwapBuffersHookChain() {
         LogHookChainDetails("wglSwapBuffers", exportSwap, jumpTarget,
                             sawDisallowedOuterHook && jumpTarget == observedTarget ? "export detour (transport fallback)"
                                                                                    : "export detour (prolog)");
-        Log("Chained wglSwapBuffers through third-party detour target at " + HookChain::DescribeAddressWithOwner(jumpTarget));
+        Log("Chained wglSwapBuffers through third-party detour target at {}", HookChain::DescribeAddressWithOwner(jumpTarget));
     }
 }
 
@@ -608,7 +606,7 @@ static void RefreshThirdPartyWglSwapBuffersIatHookChain() {
 
         if (TryInstallThirdPartyWglSwapBuffersHook(thunkTarget, "wglSwapBuffers (IAT third-party chain)")) {
             LogIatHookChainDetails("wglSwapBuffers", m, thunkTarget, exportSwap);
-            Log("Chained wglSwapBuffers via IAT target at " + HookChain::DescribeAddressWithOwner(thunkTarget));
+            Log("Chained wglSwapBuffers via IAT target at {}", HookChain::DescribeAddressWithOwner(thunkTarget));
             return;
         }
     }
@@ -626,10 +624,11 @@ bool IsAllowedSwapBuffersThirdPartyHookAddress(const void* addr) {
 
 bool TryCreateAndEnableHook(void* target, void* detour, void** outOriginal, const char* what) {
     if (!target) return false;
+    if (!what) what = "(hook)";
 
     MH_STATUS st = MH_CreateHook(target, detour, outOriginal);
     if (st != MH_OK && st != MH_ERROR_ALREADY_CREATED) {
-        Log(std::string("ERROR: Failed to create ") + (what ? what : "(hook)") + " hook (status " + std::to_string((int)st) + ")");
+        Log("ERROR: Failed to create {} hook (status {})", what, MH_StatusToString(st));
         return false;
     }
 
@@ -637,11 +636,11 @@ bool TryCreateAndEnableHook(void* target, void* detour, void** outOriginal, cons
     if (st != MH_OK && st != MH_ERROR_ENABLED) {
         if ((int)st == 11) {
             MH_RemoveHook(target);
-            Log(std::string("INFO: Skipping ") + (what ? what : "(hook)") +
-                " hook because the target is not safely patchable by MinHook (status " + std::to_string((int)st) + ")");
+            Log("INFO: Skipping {} hook because the target is not safely patchable by MinHook (status {})",
+                what, MH_StatusToString(st));
             return false;
         }
-        Log(std::string("ERROR: Failed to enable ") + (what ? what : "(hook)") + " hook (status " + std::to_string((int)st) + ")");
+        Log("ERROR: Failed to enable {} hook (status {})", what, MH_StatusToString(st));
         return false;
     }
     return true;

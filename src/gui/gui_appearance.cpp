@@ -414,7 +414,7 @@ void ApplyAppearanceConfig() {
         }
     }
 
-    Log("Applied appearance config: theme=" + theme);
+    Log("Applied appearance config: theme={}", theme);
 }
 
 void SaveTheme() {
@@ -444,8 +444,8 @@ void SaveTheme() {
         }
         o << tbl;
         o.close();
-        Log("Saved theme to theme.toml: " + g_config.appearance.theme);
-    } catch (const std::exception& e) { Log("ERROR: Failed to save theme: " + std::string(e.what())); }
+        Log("Saved theme to theme.toml: {}", g_config.appearance.theme);
+    } catch (const std::exception& e) { Log("ERROR: Failed to save theme: {}", e.what()); }
 }
 
 void LoadTheme() {
@@ -468,7 +468,7 @@ void LoadTheme() {
         toml::parse_result result = toml::parse(testFile, themePath);
         if (!result) {
             const auto& err = result.error();
-            Log("ERROR: Failed to parse theme.toml: " + std::string(err.description()));
+            Log("ERROR: Failed to parse theme.toml: {}", err.description());
             return;
         }
         tbl = std::move(result).table();
@@ -477,7 +477,7 @@ void LoadTheme() {
         if (tbl.contains("theme")) {
             std::string themeName = tbl["theme"].value_or<std::string>("Dark");
             g_config.appearance.theme = themeName;
-            Log("Loaded theme from theme.toml: " + themeName);
+            Log("Loaded theme from theme.toml: {}", themeName);
         }
 
         if (const toml::node* ccNode = tbl.get("customColors")) {
@@ -500,5 +500,5 @@ void LoadTheme() {
             SaveTheme();
             Log("WARNING: Removed invalid customColors entries while loading theme.toml.");
         }
-    } catch (const std::exception& e) { Log("ERROR: Failed to load theme: " + std::string(e.what())); }
+    } catch (const std::exception& e) { Log("ERROR: Failed to load theme: {}", e.what()); }
 }

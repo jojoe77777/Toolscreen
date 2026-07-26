@@ -161,12 +161,14 @@ void InitializeWindowOverlays() {
     for (const auto& config : cfgSnap->windowOverlays) {
         try {
             LoadWindowOverlay(config.name, config);
-        } catch (const std::exception& e) { Log("Error loading window overlay '" + config.name + "': " + e.what()); } catch (...) {
-            Log("Unknown error loading window overlay '" + config.name + "'");
+        } catch (const std::exception& e) {
+            Log("Error loading window overlay '{}': {}", config.name, e.what());
+        } catch (...) {
+            Log("Unknown error loading window overlay '{}'", config.name);
         }
     }
 
-    Log("Initialized " + std::to_string(cfgSnap->windowOverlays.size()) + " window overlays");
+    Log("Initialized {} window overlays", cfgSnap->windowOverlays.size());
 }
 
 // Internal helper - updates entry without acquiring lock (caller must hold lock)
@@ -194,9 +196,9 @@ static void LoadWindowOverlay_Internal(const std::string& overlayId, const Windo
                 std::memory_order_relaxed);
 
             if (entry->targetWindow.load(std::memory_order_relaxed)) {
-                Log("Updated target window for overlay '" + overlayId + "': " + config.windowTitle);
+                Log("Updated target window for overlay '{}': {}", overlayId, config.windowTitle);
             } else {
-                Log("Warning: Could not find target window for overlay '" + overlayId + "': " + config.windowTitle);
+                Log("Warning: Could not find target window for overlay '{}': {}", overlayId, config.windowTitle);
             }
         }
 
@@ -217,9 +219,9 @@ static void LoadWindowOverlay_Internal(const std::string& overlayId, const Windo
         std::memory_order_relaxed);
 
     if (entry->targetWindow.load(std::memory_order_relaxed)) {
-        Log("Found target window for overlay '" + overlayId + "': " + config.windowTitle);
+        Log("Found target window for overlay '{}': {}", overlayId, config.windowTitle);
     } else {
-        Log("Warning: Could not find target window for overlay '" + overlayId + "': " + config.windowTitle);
+        Log("Warning: Could not find target window for overlay '{}': {}", overlayId, config.windowTitle);
     }
 
     g_windowOverlayCache[overlayId] = std::move(entry);
@@ -293,7 +295,7 @@ void UpdateAllWindowOverlays() {
         entry.targetWindow.store(found, std::memory_order_relaxed);
 
         if (found) {
-            Log("Reacquired target window for overlay '" + search.overlayId + "'");
+            Log("Reacquired target window for overlay '{}'", search.overlayId);
             entry.needsUpdate.store(true, std::memory_order_relaxed);
         }
     }
@@ -314,9 +316,9 @@ void UpdateWindowOverlayFPS(const std::string& overlayId, int newFPS) {
         // These are atomic operations, no lock needed
         entry->fps.store(newFPS, std::memory_order_relaxed);
         entry->needsUpdate.store(true, std::memory_order_relaxed);
-        Log("Updated FPS for overlay '" + overlayId + "' to " + std::to_string(newFPS));
+        Log("Updated FPS for overlay '{}' to {}", overlayId, newFPS);
     } else {
-        Log("FPS update requested for overlay '" + overlayId + "' but cache entry not found (overlay may not be loaded yet)");
+        Log("FPS update requested for overlay '{}' but cache entry not found (overlay may not be loaded yet)", overlayId);
     }
 }
 
@@ -334,9 +336,9 @@ void UpdateWindowOverlaySearchInterval(const std::string& overlayId, int newSear
     if (entry) {
         // This is an atomic operation, no lock needed
         entry->searchInterval.store(newSearchInterval, std::memory_order_relaxed);
-        Log("Updated search interval for overlay '" + overlayId + "' to " + std::to_string(newSearchInterval) + "ms");
+        Log("Updated search interval for overlay '{}' to {}ms", overlayId, newSearchInterval);
     } else {
-        Log("Search interval update requested for overlay '" + overlayId + "' but cache entry not found (overlay may not be loaded yet)");
+        Log("Search interval update requested for overlay '{}' but cache entry not found (overlay may not be loaded yet)", overlayId);
     }
 }
 
@@ -483,7 +485,7 @@ bool CaptureWindowContent(WindowOverlayCacheEntry& entry, const WindowOverlayCon
         if (bufferSize > 0 && bufferSize < 100 * 1024 * 1024) {
             entry.pixelData = new unsigned char[bufferSize];
         } else {
-            Log("[WindowOverlay] Invalid buffer size: " + std::to_string(bufferSize));
+            Log("[WindowOverlay] Invalid buffer size: {}", bufferSize);
             SelectObject(hdcMem, hOldBitmap);
             DeleteObject(hBitmap);
             DeleteDC(hdcMem);
@@ -737,7 +739,7 @@ void CleanupWindowOverlayCache() {
                 try {
                     glDeleteTextures(1, &entry->glTextureId);
                     entry->glTextureId = 0;
-                } catch (...) { Log("Exception cleaning up window overlay texture: " + id); }
+                } catch (...) { Log("Exception cleaning up window overlay texture: {}", id); }
             }
         }
     } else {
@@ -898,7 +900,7 @@ void FocusWindowOverlay(const std::string& overlayName) {
     std::lock_guard<std::mutex> lock(g_focusedWindowOverlayMutex);
     g_focusedWindowOverlayName = overlayName;
     g_windowOverlayInteractionActive.store(true);
-    Log("[WindowOverlay] Focused overlay for interaction: " + overlayName);
+    Log("[WindowOverlay] Focused overlay for interaction: {}", overlayName);
 
     if (targetHwnd && IsWindow(targetHwnd)) {
         PostMessage(targetHwnd, WM_SETFOCUS, 0, 0);
@@ -911,7 +913,7 @@ void UnfocusWindowOverlay() {
     {
         std::lock_guard<std::mutex> lock(g_focusedWindowOverlayMutex);
         if (!g_focusedWindowOverlayName.empty()) {
-            Log("[WindowOverlay] Unfocused overlay: " + g_focusedWindowOverlayName);
+            Log("[WindowOverlay] Unfocused overlay: {}", g_focusedWindowOverlayName);
             overlayToUnfocus = g_focusedWindowOverlayName;
         }
         g_focusedWindowOverlayName = "";
@@ -1188,9 +1190,9 @@ void WindowCaptureThreadFunc() {
                     for (const auto& reload : reloadsToProcess) {
                         try {
                             LoadWindowOverlay(reload.overlayId, reload.config);
-                            Log("Processed deferred reload for overlay: " + reload.overlayId);
+                            Log("Processed deferred reload for overlay: {}", reload.overlayId);
                         } catch (const std::exception& e) {
-                            Log("Error processing deferred reload for overlay '" + reload.overlayId + "': " + e.what());
+                            Log("Error processing deferred reload for overlay '{}': {}", reload.overlayId, e.what());
                         }
                     }
                 }
@@ -1237,12 +1239,12 @@ void WindowCaptureThreadFunc() {
                             CaptureWindowContent(*entry, config);
                         }
                     } catch (const std::exception& e) {
-                        Log("Error capturing window content for overlay '" + overlayId + "': " + e.what());
-                    } catch (...) { Log("Unknown error capturing window content for overlay '" + overlayId + "'"); }
+                        Log("Error capturing window content for overlay '{}': {}", overlayId, e.what());
+                    } catch (...) {Log("Unknown error capturing window content for overlay '{}'", overlayId); }
                 }
 
                 std::this_thread::sleep_for(std::chrono::milliseconds(16));
-            } catch (const std::exception& e) { Log("Error in window capture thread: " + std::string(e.what())); } catch (...) {
+            } catch (const std::exception& e) { Log("Error in window capture thread: {}", e.what()); } catch (...) {
                 Log("Unknown error in window capture thread");
             }
         }
@@ -1275,7 +1277,7 @@ void StopWindowCaptureThread() {
         try {
             g_windowCaptureThread.join();
             Log("Window capture thread stopped cleanly");
-        } catch (const std::system_error& e) { Log("Exception while joining window capture thread: " + std::string(e.what())); }
+        } catch (const std::system_error& e) { Log("Exception while joining window capture thread: {}", e.what()); }
     }
 }
 

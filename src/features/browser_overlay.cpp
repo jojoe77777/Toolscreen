@@ -225,7 +225,7 @@ std::string GetBrowserOverlayEnvironmentModeLabel(bool allowSystemMediaKeys, boo
 }
 
 void LogBrowserOverlayMessage(const std::string& message) {
-    LogCategory("browser_overlay", message);
+    LogCategory(Log_BrowserOverlay, message);
 }
 
 std::wstring GetBrowserOverlayUserDataFolder(bool allowSystemMediaKeys, bool hardwareAcceleration) {

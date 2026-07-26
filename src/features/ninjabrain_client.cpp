@@ -35,7 +35,7 @@ bool IsNinjabrainOverlayEnabled() {
 }
 
 void LogNinjabrainMessage(const std::string& message) {
-    LogCategory("ninjabrain", message);
+    LogCategory(Log_Ninjabrain, message);
 }
 
 std::string ResolveApiBaseUrl() {

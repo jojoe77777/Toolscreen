@@ -295,7 +295,7 @@ void RenderTransitionSettingsHorizontal(ModeConfig& mode, const std::string& idS
         g_pendingModeSwitch.previewFromModeId = g_config.defaultMode;
         g_pendingModeSwitch.modeId = mode.id;
         g_pendingModeSwitch.source = "Preview button";
-        Log("[GUI] Queued transition preview: " + g_config.defaultMode + " -> " + mode.id);
+        Log("[GUI] Queued transition preview: {} -> {}", g_config.defaultMode, mode.id);
     }
     ImGui::SameLine();
     HelpMarker(("Preview the transition by switching from your default mode (" + g_config.defaultMode + ") to this mode.").c_str());

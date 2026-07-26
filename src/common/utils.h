@@ -325,8 +325,6 @@ extern std::atomic<int> g_currentGameStateIndex;
 extern std::mutex g_hotkeyMainKeysMutex;
 extern std::atomic<HCURSOR> g_specialCursorHandle;
 
-void Log(const std::string& message);
-void Log(const std::wstring& message);
 void APIENTRY BindTextureDirect(GLenum target, GLuint texture);
 void InvalidateTrackedGameTextureId(bool clearSwapThread = false, bool clearCachedTexture = true);
 
@@ -341,7 +339,34 @@ void FlushLogs();
 void QueueArchivedLogCompression(const std::wstring& archivedLogPath);
 void ProcessQueuedArchivedLogCompressions();
 
-void LogCategory(const char* category, const std::string& message);
+enum LogCategoryEnum : uint8_t {
+    Log_ModeSwitch,
+    Log_Animation,
+    Log_Hotkey,
+    Log_Obs,
+    Log_WindowOverlay,
+    Log_BrowserOverlay,
+    Log_Ninjabrain,
+    Log_FileMonitor,
+    Log_ImageMonitor,
+    Log_Performance,
+    Log_TextureOps,
+    Log_Gui,
+    Log_Init,
+    Log_CursorTextures,
+    Log_HookChain,
+};
+bool ShouldLogCategory(LogCategoryEnum category);
+void LogCategory(LogCategoryEnum, const std::string& message);
+
+template <typename... Args> requires (sizeof...(Args) > 0)
+void LogCategory(const LogCategoryEnum category, const std::format_string<Args...>& fmt, Args&&... args) {
+    // The same check is in the implementation of "LogCategory(const std::string&)"
+    // Avoid actually formatting unless the message is going to be logged
+    if (ShouldLogCategory(category)) {
+        Log(std::format(fmt, std::forward<Args>(args)...));
+    }
+}
 
 std::wstring Utf8ToWide(const std::string& utf8_string);
 std::string WideToUtf8(const std::wstring& wstr);
@@ -356,7 +381,7 @@ inline std::string GetKeyComboString(const std::vector<DWORD>& keys) {
     std::string keyStr;
     for (size_t k = 0; k < keys.size(); ++k) {
         keyStr += VkToString(keys[k]);
-        if (k < keys.size() - 1) keyStr += "+";
+        if (k < keys.size() - 1) keyStr += '+';
     }
     return keyStr;
 }

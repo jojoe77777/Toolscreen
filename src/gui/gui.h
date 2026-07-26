@@ -16,6 +16,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "common/log.h"
 #include "common/video_media.h"
 #include "config/config_defaults.h"
 #include "features/ninjabrain_data.h"
@@ -1333,8 +1334,6 @@ void RenderInteractiveCreateBanner();
 extern std::string g_gameStateBuffers[2];
 extern std::atomic<int> g_currentGameStateIndex;
 
-void Log(const std::string& message);
-void Log(const std::wstring& message);
 std::wstring Utf8ToWide(const std::string& utf8_string);
 
 void RenderSettingsGUI();

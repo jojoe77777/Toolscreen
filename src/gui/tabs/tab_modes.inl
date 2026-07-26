@@ -597,7 +597,7 @@ if (BeginSelectableSettingsTopTabItem(trc("tabs.modes"))) {
                     g_pendingModeSwitch.pending = true;
                     g_pendingModeSwitch.modeId = mode.id;
                     g_pendingModeSwitch.source = "GUI mode list";
-                    Log("[GUI] Deferred mode switch to: " + mode.id);
+                    Log("[GUI] Deferred mode switch to: {}", mode.id);
                 }
                 mode.stretch.enabled = true;
                 mode.stretch.x = 0;
@@ -731,7 +731,7 @@ if (BeginSelectableSettingsTopTabItem(trc("tabs.modes"))) {
                     g_pendingModeSwitch.pending = true;
                     g_pendingModeSwitch.modeId = mode.id;
                     g_pendingModeSwitch.source = "GUI EyeZoom mode";
-                    Log("[GUI] Deferred mode switch to: " + mode.id);
+                    Log("[GUI] Deferred mode switch to: {}", mode.id);
                 }
 
                 if (!resolutionSupported) { ImGui::EndDisabled(); }
@@ -2469,7 +2469,7 @@ if (BeginSelectableSettingsTopTabItem(trc("tabs.modes"))) {
                     g_pendingModeSwitch.pending = true;
                     g_pendingModeSwitch.modeId = mode.id;
                     g_pendingModeSwitch.source = "GUI mode detail";
-                    Log("[GUI] Deferred mode switch to: " + mode.id);
+                    Log("[GUI] Deferred mode switch to: {}", mode.id);
                 }
 
                 ImGui::Separator();
@@ -2750,7 +2750,7 @@ if (BeginSelectableSettingsTopTabItem(trc("tabs.modes"))) {
                 g_pendingModeSwitch.source = "Mode deleted";
                 g_pendingModeSwitch.isPreview = false;
                 g_pendingModeSwitch.forceInstant = true;
-                Log("[GUI] Mode '" + removedModeId + "' was active and is being deleted - switching to " + fallbackMode);
+                Log("[GUI] Mode '{}' was active and is being deleted - switching to {}", removedModeId, fallbackMode);
             }
             if (EqualsIgnoreCase(g_config.defaultMode, removedModeId)) {
                 g_config.defaultMode = "Fullscreen";

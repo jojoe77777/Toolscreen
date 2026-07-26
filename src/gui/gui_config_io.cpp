@@ -198,9 +198,9 @@ bool RemoveInvalidHotkeyModeReferences(Config& config) {
     }
 
     if (changed) {
-        Log("Sanitized hotkey mode references: reset " + std::to_string(mainModeResetCount) + " main mode reference(s), cleared " +
-            std::to_string(secondaryModeClearedCount) + " secondary mode reference(s), removed " +
-            std::to_string(altModeRemovedCount) + " alt mode reference(s).");
+        Log("Sanitized hotkey mode references: reset {} main mode reference(s),"
+            "cleared {} secondary mode reference(s), removed {} alt mode reference(s).",
+            mainModeResetCount, secondaryModeClearedCount, altModeRemovedCount);
     }
 
     return changed;
@@ -208,7 +208,7 @@ bool RemoveInvalidHotkeyModeReferences(Config& config) {
 
 void CopyToClipboard(HWND hwnd, const std::string& text) {
     if (!OpenClipboard(hwnd)) {
-        Log("ERROR: Could not open clipboard. Error code: " + std::to_string(GetLastError()));
+        Log("ERROR: Could not open clipboard. Error code: {}", GetLastError());
         return;
     }
 
@@ -217,7 +217,7 @@ void CopyToClipboard(HWND hwnd, const std::string& text) {
     } guard;
 
     if (!EmptyClipboard()) {
-        Log("ERROR: Could not empty clipboard. Error code: " + std::to_string(GetLastError()));
+        Log("ERROR: Could not empty clipboard. Error code: {}", GetLastError());
         return;
     }
 
@@ -226,13 +226,13 @@ void CopyToClipboard(HWND hwnd, const std::string& text) {
 
     HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, size);
     if (!hg) {
-        Log("ERROR: GlobalAlloc failed. Error code: " + std::to_string(GetLastError()));
+        Log("ERROR: GlobalAlloc failed. Error code: {}", GetLastError());
         return;
     }
 
     void* globalData = GlobalLock(hg);
     if (!globalData) {
-        Log("ERROR: GlobalLock failed. Error code: " + std::to_string(GetLastError()));
+        Log("ERROR: GlobalLock failed. Error code: {}", GetLastError());
         GlobalFree(hg);
         return;
     }
@@ -241,7 +241,7 @@ void CopyToClipboard(HWND hwnd, const std::string& text) {
     GlobalUnlock(hg);
 
     if (!SetClipboardData(CF_UNICODETEXT, hg)) {
-        Log("ERROR: SetClipboardData failed. Error code: " + std::to_string(GetLastError()));
+        Log("ERROR: SetClipboardData failed. Error code: {}", GetLastError());
         GlobalFree(hg);
     }
 }
@@ -276,7 +276,7 @@ void ParseColorString(const std::string& input, Color& outColor) {
     }
 
 error_case:
-    Log("ERROR: Invalid color format: '" + input + "'. Using black as default.");
+    Log("ERROR: Invalid color format: '{}'. Using black as default.", input);
     outColor = { 0.0f, 0.0f, 0.0f };
 }
 
@@ -321,10 +321,10 @@ void SaveConfig() {
                         Log("ERROR: Failed to write config file.");
                     }
                 } catch (const std::exception& e) {
-                    Log("ERROR: Failed to write config file: " + std::string(e.what()));
+                    Log("ERROR: Failed to write config file: {}", e.what());
                 }
                 if (activeProfileTracked && !SaveProfileSnapshotIfTracked(activeProfileName, profileSnapshot)) {
-                    Log("INFO: Skipped async profile save for removed or renamed profile '" + activeProfileName + "'.");
+                    Log("INFO: Skipped async profile save for removed or renamed profile '{}'.", activeProfileName);
                 }
             } catch (const SE_Exception& e) {
                 LogException("ConfigSaveThread (SEH)", e.getCode(), e.getInfo());
@@ -336,7 +336,7 @@ void SaveConfig() {
             s_isConfigSaving = false;
         }).detach();
     } catch (const std::exception& e) {
-        Log("ERROR: Failed to prepare config for save: " + std::string(e.what()));
+        Log("ERROR: Failed to prepare config for save: {}", e.what());
     } catch (...) {
         Log("ERROR: Unknown exception in SaveConfig");
     }
@@ -374,13 +374,13 @@ void SaveConfigImmediate() {
         }
 
         if (activeProfileState.tracked && !SaveProfileSnapshotIfTracked(activeProfileState.name, profileSnapshot)) {
-            Log("INFO: Skipped immediate profile save for removed or renamed profile '" + activeProfileState.name + "'.");
+            Log("INFO: Skipped immediate profile save for removed or renamed profile '{}'.", activeProfileState.name);
         }
 
         Log("Configuration saved to file (immediate).");
         g_configIsDirty = false;
     } catch (const std::exception& e) {
-        Log("ERROR: Failed to write config file: " + std::string(e.what()));
+        Log("ERROR: Failed to write config file: {}", e.what());
     } catch (...) {
         Log("ERROR: Unknown exception in SaveConfigImmediate");
     }
@@ -462,10 +462,9 @@ void WriteDefaultConfig(const std::wstring& path) {
                 Log("ERROR: Failed to write default config file.");
                 return;
             }
-            Log("Wrote default config.toml from embedded defaults, customized for your monitor (" + std::to_string(screenWidth) + "x" +
-                std::to_string(screenHeight) + ").");
+            Log("Wrote default config.toml from embedded defaults, customized for your monitor ({}x{}).", screenWidth, screenHeight);
         } catch (const std::exception& e) {
-            Log("ERROR: Failed to write default config file: " + std::string(e.what()));
+            Log("ERROR: Failed to write default config file: {}", e.what());
         }
     } else {
         Log("WARNING: Could not load embedded default config, creating minimal fallback config");
@@ -489,9 +488,9 @@ void WriteDefaultConfig(const std::wstring& path) {
                 Log("ERROR: Failed to write fallback config file.");
                 return;
             }
-            Log("Wrote fallback config.toml for your monitor (" + std::to_string(screenWidth) + "x" + std::to_string(screenHeight) + ").");
+            Log("Wrote fallback config.toml for your monitor ({}x{}).", screenWidth, screenHeight);
         } catch (const std::exception& e) {
-            Log("ERROR: Failed to write fallback config file: " + std::string(e.what()));
+            Log("ERROR: Failed to write fallback config file: {}", e.what());
         }
     }
 }
@@ -554,7 +553,7 @@ void LoadConfig() {
         MigrateToProfiles();
         EnsureProfilesConfigReady();
         if (!LoadProfile(g_profilesConfig.activeProfile)) {
-            Log("WARNING: Failed to load active profile '" + g_profilesConfig.activeProfile + "', using base config");
+            Log("WARNING: Failed to load active profile '{}', using base config", g_profilesConfig.activeProfile);
         }
 
         auto normalizeConfigFontPaths = [](Config& config, const std::wstring& toolscreenPath) {
@@ -785,21 +784,19 @@ void LoadConfig() {
             }
         }
 
-        Log("Config loaded: " + std::to_string(g_config.modes.size()) + " modes, " + std::to_string(g_config.mirrors.size()) +
-            " mirrors, " + std::to_string(g_config.images.size()) + " images, " + std::to_string(g_config.windowOverlays.size()) +
-            " window overlays, " + std::to_string(g_config.hotkeys.size()) + " hotkeys.");
+        Log("Config loaded: {} modes, {} mirrors, {} images, {} window overlays, {} hotkeys.",
+            g_config.modes.size(), g_config.mirrors.size(), g_config.images.size(), g_config.windowOverlays.size(), g_config.hotkeys.size());
 
         int loadedConfigVersion = g_config.configVersion;
         int currentConfigVersion = GetConfigVersion();
 
         if (MigrateConfigToCurrentVersion(g_config)) {
             g_configIsDirty = true;
-            Log("Config upgraded from v" + std::to_string(loadedConfigVersion) + " to v" + std::to_string(currentConfigVersion));
+            Log("Config upgraded from v{} to v{}", loadedConfigVersion, currentConfigVersion);
         } else if (loadedConfigVersion > currentConfigVersion) {
-            Log("WARNING: Config version is newer than tool version (config: v" + std::to_string(loadedConfigVersion) + ", tool: v" +
-                std::to_string(currentConfigVersion) + ")");
+            Log("WARNING: Config version is newer than tool version (config: v{}, tool: v{})", loadedConfigVersion, currentConfigVersion);
         } else {
-            Log("Config version: v" + std::to_string(loadedConfigVersion) + " (current)");
+            Log("Config version: v{} (current)", loadedConfigVersion);
         }
 
         std::string initialMode;

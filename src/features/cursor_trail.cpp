@@ -19,8 +19,6 @@
 #include <vector>
 #include <windows.h>
 
-void Log(const std::string& msg);
-
 namespace {
 
 constexpr int kMaxStamps = 512;
@@ -159,15 +157,14 @@ void EnsureSpriteLoaded(const std::string& spritePath) {
                     UploadTexture(pixels, w, h);
                     loadedFromFile = true;
                 } else {
-                    Log("[CursorTrail] Sprite '" + spritePath + "' exceeds " + std::to_string(kMaxSpritePixels) +
-                        "px max, falling back to default");
+                    Log("[CursorTrail] Sprite '{}' exceeds {}px max, falling back to default", spritePath, kMaxSpritePixels);
                 }
                 stbi_image_free(pixels);
             } else {
-                Log("[CursorTrail] stb_image failed to decode '" + spritePath + "', falling back to default");
+                Log("[CursorTrail] stb_image failed to decode '{}', falling back to default", spritePath);
             }
         } else {
-            Log("[CursorTrail] Could not open sprite '" + spritePath + "', falling back to default");
+            Log("[CursorTrail] Could not open sprite '{}', falling back to default", spritePath);
         }
     }
 

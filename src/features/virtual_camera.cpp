@@ -145,7 +145,7 @@ static bool ReinitializeVirtualCamera(uint32_t width, uint32_t height) {
     if (IsVirtualCameraActive()) { StopVirtualCamera(); }
 
     if (!StartVirtualCamera(width, height)) {
-        Log("Virtual Camera: Reinit after resize failed - " + g_vcLastError);
+        Log("Virtual Camera: Reinit after resize failed - {}", g_vcLastError);
         return false;
     }
 
@@ -294,7 +294,7 @@ static bool ResetVirtualCameraStateLocked(uint32_t width, uint32_t height, const
     MemoryBarrier();
 
     g_vcLastError.clear();
-    Log(std::string("Virtual Camera: Reinitialized ") + reason + " at " + std::to_string(width) + "x" + std::to_string(height));
+    Log("Virtual Camera: Reinitialized {} at {}x{}", reason, width, height);
     return true;
 }
 
@@ -425,7 +425,7 @@ bool StartVirtualCamera(uint32_t width, uint32_t height) {
     if ((height & 1U) != 0) { height -= 1; }
     if (width < 2 || height < 2) {
         g_vcLastError = "Invalid virtual camera dimensions";
-        Log("Virtual Camera: " + g_vcLastError);
+        Log("Virtual Camera: {}", g_vcLastError);
         return false;
     }
 
@@ -438,13 +438,13 @@ bool StartVirtualCamera(uint32_t width, uint32_t height) {
 
     if (!IsVirtualCameraDriverInstalled()) {
         g_vcLastError = "OBS Virtual Camera driver not installed";
-        Log("Virtual Camera: " + g_vcLastError);
+        Log("Virtual Camera: {}", g_vcLastError);
         return false;
     }
 
     if (IsVirtualCameraInUseByOBS()) {
         g_vcLastError = "Virtual camera is currently in use by OBS";
-        Log("Virtual Camera: " + g_vcLastError);
+        Log("Virtual Camera: {}", g_vcLastError);
         return false;
     }
 
@@ -481,7 +481,7 @@ bool StartVirtualCamera(uint32_t width, uint32_t height) {
 
     if (!g_vcState.handle) {
         g_vcLastError = "Failed to create shared memory (error " + std::to_string(GetLastError()) + ")";
-        Log("Virtual Camera: " + g_vcLastError);
+        Log("Virtual Camera: {}", g_vcLastError);
         return false;
     }
 
@@ -491,7 +491,7 @@ bool StartVirtualCamera(uint32_t width, uint32_t height) {
         CloseHandle(g_vcState.handle);
         g_vcState.handle = nullptr;
         g_vcLastError = "Failed to map shared memory";
-        Log("Virtual Camera: " + g_vcLastError);
+        Log("Virtual Camera: {}", g_vcLastError);
         return false;
     }
 
@@ -524,8 +524,7 @@ bool StartVirtualCamera(uint32_t width, uint32_t height) {
     PublishBlankVirtualCameraFrameLocked(width, height);
     ForceVirtualCameraCaptureFrames(kVirtualCameraForcedFramesAfterReinit);
 
-    Log("Virtual Camera: Started at " + std::to_string(width) + "x" + std::to_string(height) + " @ " + std::to_string(targetFps) +
-        "fps");
+    Log("Virtual Camera: Started at {}x{} @ {}fps", width, height, targetFps);
     return true;
 }
 
@@ -610,7 +609,7 @@ bool EnsureVirtualCameraSize(uint32_t width, uint32_t height) {
 
     StopVirtualCamera();
     if (!StartVirtualCamera(width, height)) {
-        Log("Virtual Camera: Resize failed - " + g_vcLastError);
+        Log("Virtual Camera: Resize failed - {}", g_vcLastError);
         return false;
     }
 
@@ -674,8 +673,7 @@ bool WriteVirtualCameraFrame(const uint8_t* rgba_data, uint32_t width, uint32_t 
     static int frameCount = 0;
     if (frameCount < 3) {
         uint32_t frameSize = width * height * 3 / 2;
-        Log("Virtual Camera: Wrote frame " + std::to_string(frameCount) + " at idx " + std::to_string(idx) +
-            " ts=" + std::to_string(timestamp) + " size=" + std::to_string(frameSize));
+        Log("Virtual Camera: Wrote frame {} at idx {} ts={} size={}", frameCount, idx, timestamp, frameSize);
         frameCount++;
     }
 

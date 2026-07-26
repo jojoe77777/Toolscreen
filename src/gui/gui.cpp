@@ -1260,8 +1260,8 @@ std::optional<std::string> BrowseForFontPath(const char* dialogTitle, const std:
             dialogError = CommDlgExtendedError();
         }
         if (dialogError != 0) {
-            Log("Font picker dialog failed for '" + std::string(dialogTitle == nullptr ? "Select Font" : dialogTitle) +
-                "' with CommDlgExtendedError=" + std::to_string(dialogError));
+            Log("Font picker dialog failed for '{}' with CommDlgExtendedError={}",
+                dialogTitle == nullptr ? "Select Font" : dialogTitle, std::to_string(dialogError));
         }
         return std::nullopt;
     }
@@ -1527,23 +1527,17 @@ std::string UrlEncodeFormField(const std::string& value) {
     return encoded;
 }
 
-std::string FormatResponseBodyForLog(const std::string& responseBody) {
-    if (responseBody.empty()) {
-        return "<empty>";
-    }
-    return responseBody;
-}
-
 bool IsSuccessfulHttpStatusCode(DWORD statusCode) {
     return statusCode >= 200 && statusCode < 300;
 }
 
 void LogMclogsHttpResponse(const char* serviceName, const HttpJsonResponse& response) {
-    Log(std::string(serviceName) + " response HTTP status: " +
-        (response.statusCode == 0 ? std::string("<unavailable>") : std::to_string(response.statusCode)));
-    Log(std::string(serviceName) + " response content type: " +
-        (response.contentType.empty() ? std::string("<unavailable>") : response.contentType));
-    Log(std::string(serviceName) + " response body: " + FormatResponseBodyForLog(response.body));
+    const auto type = response.contentType.empty() ? "<unavailable>" : std::string_view{response.contentType};
+    const auto body = response.body.empty() ? "<empty>" : std::string_view{response.body};
+
+    Log("{} response HTTP status: {}", serviceName, response.statusCode);
+    Log("{} response content type: {}", serviceName, type);
+    Log("{} response body: {}", serviceName, body);
 }
 
 UploadUiState GetDebugInfoUploadUiState() {
@@ -1964,12 +1958,12 @@ void StartDebugInfoUpload() {
         std::string shareUrl;
         std::string error;
         if (!UploadDebugInfoToMclogs(debugInfoText, shareUrl, error)) {
-            Log("ERROR: Failed to upload debug info bundle: " + error);
+            Log("ERROR: Failed to upload debug info bundle: {}", error);
             SetDebugInfoUploadUiStateError(std::move(error));
             return;
         }
 
-        Log("Uploaded debug info bundle to " + shareUrl);
+        Log("Uploaded debug info bundle to {}", shareUrl);
         SetDebugInfoUploadUiStateSuccess(std::move(shareUrl));
     }).detach();
 }

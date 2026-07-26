@@ -440,7 +440,7 @@ void PopulateSystemFontAssets() {
     }
 
     if (iteratorError) {
-        Log("WARNING: Failed to enumerate Windows fonts from " + WideToUtf8(fontsDirectory.wstring()) + ": " + iteratorError.message());
+        Log("WARNING: Failed to enumerate Windows fonts from {}: {}", WideToUtf8(fontsDirectory.wstring()), iteratorError.message());
     }
 
     std::sort(assets.begin(), assets.end(), [](const SystemFontAsset& left, const SystemFontAsset& right) {
@@ -459,7 +459,7 @@ void PopulateSystemFontAssets() {
                  assets.end());
 
     s_systemFontAssets = std::move(assets);
-    Log("Loaded " + std::to_string(s_systemFontAssets.size()) + " system .ttf fonts from " + WideToUtf8(fontsDirectory.wstring()) + ".");
+    Log("Loaded {} system .ttf fonts from {}.", s_systemFontAssets.size(), WideToUtf8(fontsDirectory.wstring()));
 }
 
 void EnsureSystemFontAssetsLoaded() {
@@ -520,7 +520,7 @@ bool WriteEmbeddedResourceToFile(WORD resourceId, const std::filesystem::path& d
     std::error_code directoryError;
     std::filesystem::create_directories(destination.parent_path(), directoryError);
     if (directoryError) {
-        Log("WARNING: Failed to create bundled font directory: " + WideToUtf8(destination.parent_path().wstring()));
+        Log("WARNING: Failed to create bundled font directory: {}", WideToUtf8(destination.parent_path().wstring()));
         return false;
     }
 
@@ -529,26 +529,26 @@ bool WriteEmbeddedResourceToFile(WORD resourceId, const std::filesystem::path& d
         GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
         reinterpret_cast<LPCWSTR>(moduleAnchor), &moduleHandle);
     if (gotModule != TRUE || moduleHandle == nullptr) {
-        Log("WARNING: Failed to resolve module handle while staging bundled font resource " + std::to_string(resourceId) + ".");
+        Log("WARNING: Failed to resolve module handle while staging bundled font resource {}.", resourceId);
         return false;
     }
 
     HRSRC resourceHandle = FindResourceW(moduleHandle, MAKEINTRESOURCEW(resourceId), RT_RCDATA);
     if (resourceHandle == nullptr) {
-        Log("WARNING: Failed to find bundled font resource " + std::to_string(resourceId) + ".");
+        Log("WARNING: Failed to find bundled font resource {}.", resourceId);
         return false;
     }
 
     HGLOBAL resourceDataHandle = LoadResource(moduleHandle, resourceHandle);
     if (resourceDataHandle == nullptr) {
-        Log("WARNING: Failed to load bundled font resource " + std::to_string(resourceId) + ".");
+        Log("WARNING: Failed to load bundled font resource {}.", resourceId);
         return false;
     }
 
     const DWORD resourceSize = SizeofResource(moduleHandle, resourceHandle);
     const void* resourceData = LockResource(resourceDataHandle);
     if (resourceData == nullptr || resourceSize == 0) {
-        Log("WARNING: Bundled font resource was empty: " + std::to_string(resourceId) + ".");
+        Log("WARNING: Bundled font resource was empty: {}.", resourceId);
         return false;
     }
 
@@ -560,8 +560,8 @@ bool WriteEmbeddedResourceToFile(WORD resourceId, const std::filesystem::path& d
             return true;
         }
 
-        Log("WARNING: Failed to open bundled font path for writing: " + WideToUtf8(destination.wstring()) +
-            " (error " + std::to_string(lastError) + ").");
+        Log("WARNING: Failed to open bundled font path for writing: {} (error {}).",
+            WideToUtf8(destination.wstring()), lastError);
         return false;
     }
 
@@ -569,7 +569,7 @@ bool WriteEmbeddedResourceToFile(WORD resourceId, const std::filesystem::path& d
     const BOOL wroteFile = WriteFile(fileHandle, resourceData, resourceSize, &written, nullptr);
     CloseHandle(fileHandle);
     if (wroteFile != TRUE || written != resourceSize) {
-        Log("WARNING: Failed to stage bundled font resource to: " + WideToUtf8(destination.wstring()));
+        Log("WARNING: Failed to stage bundled font resource to: {}", WideToUtf8(destination.wstring()));
         return false;
     }
 

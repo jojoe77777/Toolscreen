@@ -224,7 +224,7 @@ static void PopulateSupporterTierImages(std::vector<SupporterRoleEntry>& roles) 
         std::string imageBody;
         std::string fetchError;
         if (!HttpGetToString(Utf8ToWide(role.imageUrl), imageBody, fetchError)) {
-            Log("Supporters metadata: failed to fetch tier image '" + role.imageUrl + "': " + fetchError);
+            Log("Supporters metadata: failed to fetch tier image '{}': {}", role.imageUrl, fetchError);
             decodeCache.emplace(role.imageUrl, DecodedSupporterTierImage{});
             continue;
         }
@@ -232,7 +232,7 @@ static void PopulateSupporterTierImages(std::vector<SupporterRoleEntry>& roles) 
         DecodedSupporterTierImage decoded;
         std::string decodeError;
         if (!DecodeSupporterTierImage(imageBody, decoded, decodeError)) {
-            Log("Supporters metadata: failed to decode tier image '" + role.imageUrl + "': " + decodeError);
+            Log("Supporters metadata: failed to decode tier image '{}': {}", role.imageUrl, decodeError);
             decodeCache.emplace(role.imageUrl, DecodedSupporterTierImage{});
             continue;
         }

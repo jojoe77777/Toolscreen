@@ -606,7 +606,7 @@ static void UpdateSharedConfigFromMergedConfig(const Config& mergedConfig, const
 
 static void ApplyProfileSwitchRuntimeConfig(const Config& previousConfig) {
     if (!LoadTranslation(g_config.lang)) {
-        Log("SwitchProfile: failed to load translations for '" + g_config.lang + "'");
+        Log("SwitchProfile: failed to load translations for '{}'", g_config.lang);
     }
 
     SaveTheme();
@@ -664,7 +664,7 @@ void SaveProfile(const std::string& name) {
 
     std::lock_guard<std::mutex> lock(g_profilesMutex);
     if (!SaveProfileSnapshotLocked(resolvedName, profileConfig)) {
-        Log("SaveProfile: failed to write profile '" + resolvedName + "'");
+        Log("SaveProfile: failed to write profile '{}'", resolvedName);
     }
 }
 
@@ -696,7 +696,7 @@ bool LoadProfile(const std::string& name) {
 
     Config profileConfig;
     if (!LoadProfileConfigFromPath(path, profileConfig)) {
-        Log("LoadProfile: failed to parse profile '" + name + "', using current config");
+        Log("LoadProfile: failed to parse profile '{}', using current config", name);
         return false;
     }
 
@@ -747,7 +747,7 @@ void SwitchProfile(const std::string& newProfileName) {
         (void)TryGetProfileMetadataLocked(resolvedNewProfileName, newProfileMetadata);
 
         if (!LoadProfileConfigFromPath(GetProfilePath(resolvedNewProfileName), newProfileConfig)) {
-            Log("LoadProfile: failed to parse profile '" + resolvedNewProfileName + "', using current config");
+            Log("LoadProfile: failed to parse profile '{}', using current config", resolvedNewProfileName);
             return;
         }
 
@@ -915,7 +915,7 @@ void DeleteProfile(const std::string& name) {
 
     if (!SaveProfilesConfigLocked()) {
         g_profilesConfig.profiles = previousProfiles;
-        Log("DeleteProfile: failed to update profiles metadata for '" + trackedName + "'");
+        Log("DeleteProfile: failed to update profiles metadata for '{}'", trackedName);
         return;
     }
 
@@ -924,11 +924,11 @@ void DeleteProfile(const std::string& name) {
     } catch (const std::exception& e) {
         g_profilesConfig.profiles = previousProfiles;
         SaveProfilesConfigLocked();
-        Log("DeleteProfile: failed to delete file for '" + trackedName + "': " + e.what());
+        Log("DeleteProfile: failed to delete file for '{}': {}", trackedName, e.what());
     } catch (...) {
         g_profilesConfig.profiles = previousProfiles;
         SaveProfilesConfigLocked();
-        Log("DeleteProfile: failed to delete file for '" + trackedName + "'");
+        Log("DeleteProfile: failed to delete file for '{}'", trackedName);
     }
 }
 

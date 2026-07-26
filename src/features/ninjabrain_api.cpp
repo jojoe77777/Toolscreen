@@ -43,7 +43,7 @@ void LogIfPresent(const NinjabrainLogCallback& callback, const std::string& mess
 }
 
 void LogNinjabrainApiMessage(const std::string& message) {
-    LogCategory("ninjabrain", message);
+    LogCategory(Log_Ninjabrain, message);
 }
 
 long long DurationToMilliseconds(SteadyClock::duration duration) {

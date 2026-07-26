@@ -47,37 +47,37 @@ static bool g_cursorDefsInitialized = false;
 static std::mutex g_cursorDefsMutex;
 
 static void ScanCursorDefinitionsLocked() {
-    LogCategory("cursor_textures", "[CursorTextures] ScanCursorDefinitionsLocked starting...");
+    LogCategory(Log_CursorTextures, "[CursorTextures] ScanCursorDefinitionsLocked starting...");
 
     AVAILABLE_CURSORS = SYSTEM_CURSORS;
-    LogCategory("cursor_textures", "[CursorTextures] Loaded " + std::to_string(SYSTEM_CURSORS.size()) + " system cursor definitions");
+    LogCategory(Log_CursorTextures, "[CursorTextures] Loaded {} system cursor definitions", SYSTEM_CURSORS.size());
 
     int validSystemCursors = 0;
     for (const auto& cursor : SYSTEM_CURSORS) {
         if (std::filesystem::exists(cursor.path)) {
             validSystemCursors++;
         } else {
-            LogCategory("cursor_textures", "[CursorTextures] WARNING: System cursor not found: " + WideToUtf8(cursor.path));
+            LogCategory(Log_CursorTextures, "[CursorTextures] WARNING: System cursor not found: {}", WideToUtf8(cursor.path));
         }
     }
-    LogCategory("cursor_textures", "[CursorTextures] Verified " + std::to_string(validSystemCursors) + "/" +
-                                       std::to_string(SYSTEM_CURSORS.size()) + " system cursors exist on disk");
+    LogCategory(Log_CursorTextures, "[CursorTextures] Verified {}/{} system cursors exist on disk",
+        validSystemCursors, SYSTEM_CURSORS.size());
 
     try {
         std::wstring toolscreenPath = GetToolscreenPath();
         if (toolscreenPath.empty()) {
-            LogCategory("cursor_textures", "[CursorTextures] ERROR: Failed to get toolscreen path - custom cursors will not be available");
+            LogCategory(Log_CursorTextures, "[CursorTextures] ERROR: Failed to get toolscreen path - custom cursors will not be available");
             return;
         }
 
         std::filesystem::path cursorsPath = std::filesystem::path(toolscreenPath) / "cursors";
-        LogCategory("cursor_textures", "[CursorTextures] Scanning for custom cursors at: " + cursorsPath.string());
+        LogCategory(Log_CursorTextures, "[CursorTextures] Scanning for custom cursors at: {}", cursorsPath.string());
 
         if (!std::filesystem::exists(cursorsPath)) {
-            LogCategory("cursor_textures", "[CursorTextures] Custom cursors folder does not exist: " + cursorsPath.string());
-            LogCategory("cursor_textures", "[CursorTextures] To add custom cursors, create this folder and add .cur or .ico files");
+            LogCategory(Log_CursorTextures, "[CursorTextures] Custom cursors folder does not exist: {}", cursorsPath.string());
+            LogCategory(Log_CursorTextures, "[CursorTextures] To add custom cursors, create this folder and add .cur or .ico files");
         } else if (!std::filesystem::is_directory(cursorsPath)) {
-            LogCategory("cursor_textures", "[CursorTextures] ERROR: Cursors path exists but is not a directory: " + cursorsPath.string());
+            LogCategory(Log_CursorTextures, "[CursorTextures] ERROR: Cursors path exists but is not a directory: {}", cursorsPath.string());
         } else {
             int customCursorsFound = 0;
             int filesSkipped = 0;
@@ -93,39 +93,39 @@ static void ScanCursorDefinitionsLocked() {
                         UINT loadType = (ext == ".ico") ? IMAGE_ICON : IMAGE_CURSOR;
 
                         AVAILABLE_CURSORS.push_back({ filename, filepath, loadType });
-                        LogCategory("cursor_textures", "[CursorTextures] Found custom cursor: " + filename + " (" + ext + ")");
+                        LogCategory(Log_CursorTextures, "[CursorTextures] Found custom cursor: {} ({})", filename, ext);
                         customCursorsFound++;
                     } else {
                         filesSkipped++;
                     }
                 }
             }
-            LogCategory("cursor_textures", "[CursorTextures] Found " + std::to_string(customCursorsFound) + " custom cursor(s), skipped " +
-                                               std::to_string(filesSkipped) + " non-cursor file(s)");
+            LogCategory(Log_CursorTextures, "[CursorTextures] Found {} custom cursor(s), skipped {} non-cursor file(s)",
+                customCursorsFound, filesSkipped);
         }
     } catch (const std::filesystem::filesystem_error& e) {
-        LogCategory("cursor_textures", "[CursorTextures] ERROR: Filesystem error scanning cursors folder: " + std::string(e.what()));
-        LogCategory("cursor_textures", "[CursorTextures] Error code: " + std::to_string(e.code().value()) + " - " + e.code().message());
+        LogCategory(Log_CursorTextures, "[CursorTextures] ERROR: Filesystem error scanning cursors folder: {}", e.what());
+        LogCategory(Log_CursorTextures, "[CursorTextures] Error code: {} - {}", e.code().value(), e.code().message());
     } catch (const std::exception& e) {
-        LogCategory("cursor_textures", "[CursorTextures] ERROR: Exception scanning cursors folder: " + std::string(e.what()));
-    } catch (...) { LogCategory("cursor_textures", "[CursorTextures] ERROR: Unknown exception scanning cursors folder"); }
+        LogCategory(Log_CursorTextures, "[CursorTextures] ERROR: Exception scanning cursors folder: {}", e.what());
+    } catch (...) { LogCategory(Log_CursorTextures, "[CursorTextures] ERROR: Unknown exception scanning cursors folder"); }
 
-    LogCategory("cursor_textures", "[CursorTextures] ScanCursorDefinitionsLocked complete. Total cursors available: " +
-                                       std::to_string(AVAILABLE_CURSORS.size()));
+    LogCategory(Log_CursorTextures, "[CursorTextures] ScanCursorDefinitionsLocked complete. Total cursors available: {}",
+        AVAILABLE_CURSORS.size());
 }
 
 void InitializeCursorDefinitions() {
     std::lock_guard<std::mutex> lock(g_cursorDefsMutex);
     if (g_cursorDefsInitialized) return;
 
-    LogCategory("cursor_textures", "[CursorTextures] InitializeCursorDefinitions starting...");
+    LogCategory(Log_CursorTextures, "[CursorTextures] InitializeCursorDefinitions starting...");
     ScanCursorDefinitionsLocked();
     g_cursorDefsInitialized = true;
 }
 
 void RefreshCursorDefinitions() {
     std::lock_guard<std::mutex> lock(g_cursorDefsMutex);
-    LogCategory("cursor_textures", "[CursorTextures] RefreshCursorDefinitions starting...");
+    LogCategory(Log_CursorTextures, "[CursorTextures] RefreshCursorDefinitions starting...");
     ScanCursorDefinitionsLocked();
     g_cursorDefsInitialized = true;
 }
@@ -195,11 +195,11 @@ static const std::vector<int> STANDARD_SIZES = {
 
 static bool LoadSingleCursor(const std::wstring& path, UINT loadType, int size, CursorData& outData) {
     if (path.empty()) {
-        LogCategory("cursor_textures", "[CursorTextures] ERROR: LoadSingleCursor called with empty path");
+        LogCategory(Log_CursorTextures, "[CursorTextures] ERROR: LoadSingleCursor called with empty path");
         return false;
     }
     if (size <= 0 || size > 512) {
-        LogCategory("cursor_textures", "[CursorTextures] ERROR: LoadSingleCursor called with invalid size: " + std::to_string(size));
+        LogCategory(Log_CursorTextures, "[CursorTextures] ERROR: LoadSingleCursor called with invalid size: {}", size);
         return false;
     }
 
@@ -207,16 +207,16 @@ static bool LoadSingleCursor(const std::wstring& path, UINT loadType, int size, 
     try {
         if (!std::filesystem::path(path).is_absolute()) { resolvedPath = ResolveCwdPath(path); }
     } catch (const std::exception& e) {
-        LogCategory("cursor_textures", "[CursorTextures] ERROR: Failed to resolve path: " + std::string(e.what()));
+        LogCategory(Log_CursorTextures, "[CursorTextures] ERROR: Failed to resolve path: {}", e.what());
         return false;
     }
 
     std::string pathStr = WideToUtf8(resolvedPath);
-    LogCategory("cursor_textures", "[CursorTextures] Loading cursor: " + pathStr + " at size " + std::to_string(size) +
-                                       " (type: " + (loadType == IMAGE_ICON ? "ICON" : "CURSOR") + ")");
+    LogCategory(Log_CursorTextures, "[CursorTextures] Loading cursor: {} at size {} (type: {})",
+        pathStr, size, loadType == IMAGE_ICON ? "ICON" : "CURSOR");
 
     if (!std::filesystem::exists(resolvedPath)) {
-        LogCategory("cursor_textures", "[CursorTextures] ERROR: Cursor file does not exist: " + pathStr);
+        LogCategory(Log_CursorTextures, "[CursorTextures] ERROR: Cursor file does not exist: {}", pathStr);
         return false;
     }
 
@@ -252,8 +252,8 @@ static bool LoadSingleCursor(const std::wstring& path, UINT loadType, int size, 
             errMsg = "Unknown error";
             break;
         }
-        LogCategory("cursor_textures",
-                    "[CursorTextures] ERROR: LoadImageW failed for '" + pathStr + "' - Error " + std::to_string(err) + ": " + errMsg);
+        LogCategory(Log_CursorTextures,
+                    "[CursorTextures] ERROR: LoadImageW failed for '{}' - Error {}: {}", pathStr, err, errMsg);
         return false;
     }
 
@@ -267,8 +267,8 @@ static bool LoadSingleCursor(const std::wstring& path, UINT loadType, int size, 
                 hCursor = hScaled;
             }
         } else {
-            LogCategory("cursor_textures", "[CursorTextures] WARNING: CopyImage failed to force size to " + std::to_string(size) +
-                                               "px for " + pathStr + " (err=" + std::to_string(GetLastError()) + ")");
+            LogCategory(Log_CursorTextures, "[CursorTextures] WARNING: CopyImage failed to force size to {}px for {} (err={})",
+                size, pathStr, GetLastError());
         }
     }
 
@@ -280,7 +280,7 @@ static bool LoadSingleCursor(const std::wstring& path, UINT loadType, int size, 
 
     if (!hasIconInfoEx) {
         DWORD err = GetLastError();
-        LogCategory("cursor_textures", "[CursorTextures] ERROR: GetIconInfoExW failed with error " + std::to_string(err));
+        LogCategory(Log_CursorTextures, "[CursorTextures] ERROR: GetIconInfoExW failed with error {}", err);
         DestroyCursorOrIcon(hCursor, loadType);
         outData.hCursor = nullptr;
         return false;
@@ -288,18 +288,18 @@ static bool LoadSingleCursor(const std::wstring& path, UINT loadType, int size, 
 
     BITMAP bmp;
     bool isMonochrome = (iconInfoEx.hbmColor == NULL);
-    LogCategory("cursor_textures", "[CursorTextures] Cursor type: " + std::string(isMonochrome ? "monochrome" : "color"));
+    LogCategory(Log_CursorTextures, "[CursorTextures] Cursor type: {}", isMonochrome ? "monochrome" : "color");
 
     if (isMonochrome) {
         if (!iconInfoEx.hbmMask) {
-            LogCategory("cursor_textures", "[CursorTextures] ERROR: Monochrome cursor has no mask bitmap");
+            LogCategory(Log_CursorTextures, "[CursorTextures] ERROR: Monochrome cursor has no mask bitmap");
             DestroyCursorOrIcon(hCursor, loadType);
             outData.hCursor = nullptr;
             return false;
         }
         if (!GetObject(iconInfoEx.hbmMask, sizeof(BITMAP), &bmp)) {
             DWORD err = GetLastError();
-            LogCategory("cursor_textures", "[CursorTextures] ERROR: GetObject for mask bitmap failed with error " + std::to_string(err));
+            LogCategory(Log_CursorTextures, "[CursorTextures] ERROR: GetObject for mask bitmap failed with error {}", err);
             DeleteObject(iconInfoEx.hbmMask);
             DestroyCursorOrIcon(hCursor, loadType);
             outData.hCursor = nullptr;
@@ -308,7 +308,7 @@ static bool LoadSingleCursor(const std::wstring& path, UINT loadType, int size, 
     } else {
         if (!GetObject(iconInfoEx.hbmColor, sizeof(BITMAP), &bmp)) {
             DWORD err = GetLastError();
-            LogCategory("cursor_textures", "[CursorTextures] ERROR: GetObject for color bitmap failed with error " + std::to_string(err));
+            LogCategory(Log_CursorTextures, "[CursorTextures] ERROR: GetObject for color bitmap failed with error {}", err);
             if (iconInfoEx.hbmMask) DeleteObject(iconInfoEx.hbmMask);
             if (iconInfoEx.hbmColor) DeleteObject(iconInfoEx.hbmColor);
             DestroyCursorOrIcon(hCursor, loadType);
@@ -321,8 +321,8 @@ static bool LoadSingleCursor(const std::wstring& path, UINT loadType, int size, 
     int height = isMonochrome ? bmp.bmHeight / 2 : bmp.bmHeight;
 
     if (width <= 0 || height <= 0 || width > 1024 || height > 1024) {
-        LogCategory("cursor_textures",
-                    "[CursorTextures] ERROR: Invalid bitmap dimensions: " + std::to_string(width) + "x" + std::to_string(height));
+        LogCategory(Log_CursorTextures,
+                    "[CursorTextures] ERROR: Invalid bitmap dimensions: {}x{}", width, height);
         if (iconInfoEx.hbmMask) DeleteObject(iconInfoEx.hbmMask);
         if (iconInfoEx.hbmColor) DeleteObject(iconInfoEx.hbmColor);
         DestroyCursorOrIcon(hCursor, loadType);
@@ -330,9 +330,8 @@ static bool LoadSingleCursor(const std::wstring& path, UINT loadType, int size, 
         return false;
     }
 
-    LogCategory("cursor_textures", "[CursorTextures] Bitmap size: " + std::to_string(width) + "x" + std::to_string(height) +
-                                       ", hotspot: (" + std::to_string(iconInfoEx.xHotspot) + ", " + std::to_string(iconInfoEx.yHotspot) +
-                                       ")");
+    LogCategory(Log_CursorTextures, "[CursorTextures] Bitmap size: {}x{}, hotspot: ({}, {})",
+        width, height, iconInfoEx.xHotspot, iconInfoEx.yHotspot);
 
     outData.bitmapWidth = width;
     outData.bitmapHeight = height;
@@ -342,7 +341,7 @@ static bool LoadSingleCursor(const std::wstring& path, UINT loadType, int size, 
     HDC hdcScreen = GetDC(NULL);
     if (!hdcScreen) {
         DWORD err = GetLastError();
-        LogCategory("cursor_textures", "[CursorTextures] ERROR: GetDC(NULL) failed with error " + std::to_string(err));
+        LogCategory(Log_CursorTextures, "[CursorTextures] ERROR: GetDC(NULL) failed with error {}", err);
         if (iconInfoEx.hbmMask) DeleteObject(iconInfoEx.hbmMask);
         if (iconInfoEx.hbmColor) DeleteObject(iconInfoEx.hbmColor);
         DestroyCursorOrIcon(hCursor, loadType);
@@ -353,7 +352,7 @@ static bool LoadSingleCursor(const std::wstring& path, UINT loadType, int size, 
     HDC hdcMem = CreateCompatibleDC(hdcScreen);
     if (!hdcMem) {
         DWORD err = GetLastError();
-        LogCategory("cursor_textures", "[CursorTextures] ERROR: CreateCompatibleDC failed with error " + std::to_string(err));
+        LogCategory(Log_CursorTextures, "[CursorTextures] ERROR: CreateCompatibleDC failed with error {}", err);
         ReleaseDC(NULL, hdcScreen);
         if (iconInfoEx.hbmMask) DeleteObject(iconInfoEx.hbmMask);
         if (iconInfoEx.hbmColor) DeleteObject(iconInfoEx.hbmColor);
@@ -441,7 +440,7 @@ static bool LoadSingleCursor(const std::wstring& path, UINT loadType, int size, 
 
             glGenTextures(1, &outData.invertMaskTexture);
             if (outData.invertMaskTexture == 0) {
-                LogCategory("cursor_textures", "[CursorTextures] WARNING: Failed to create invert mask texture - glGenTextures returned 0");
+                LogCategory(Log_CursorTextures, "[CursorTextures] WARNING: Failed to create invert mask texture - glGenTextures returned 0");
                 outData.hasInvertedPixels = false;
             } else {
                 BindTextureDirect(GL_TEXTURE_2D, outData.invertMaskTexture);
@@ -453,14 +452,14 @@ static bool LoadSingleCursor(const std::wstring& path, UINT loadType, int size, 
 
                 GLenum glErr = glGetError();
                 if (glErr != GL_NO_ERROR) {
-                    LogCategory("cursor_textures",
-                                "[CursorTextures] WARNING: OpenGL error creating invert mask texture: " + std::to_string(glErr));
+                    LogCategory(Log_CursorTextures,
+                                "[CursorTextures] WARNING: OpenGL error creating invert mask texture: {}", glErr);
                     glDeleteTextures(1, &outData.invertMaskTexture);
                     outData.invertMaskTexture = 0;
                     outData.hasInvertedPixels = false;
                 } else {
-                    LogCategory("cursor_textures",
-                                "[CursorTextures] Created invert mask texture ID " + std::to_string(outData.invertMaskTexture));
+                    LogCategory(Log_CursorTextures, "[CursorTextures] Created invert mask texture ID {}",
+                        outData.invertMaskTexture);
                 }
                 BindTextureDirect(GL_TEXTURE_2D, 0);
             }
@@ -514,7 +513,7 @@ static bool LoadSingleCursor(const std::wstring& path, UINT loadType, int size, 
 
     glGenTextures(1, &outData.texture);
     if (outData.texture == 0) {
-        LogCategory("cursor_textures", "[CursorTextures] ERROR: glGenTextures returned 0 - OpenGL context may not be valid");
+        LogCategory(Log_CursorTextures, "[CursorTextures] ERROR: glGenTextures returned 0 - OpenGL context may not be valid");
         DestroyCursorOrIcon(outData.hCursor, outData.loadType);
         outData.hCursor = nullptr;
         return false;
@@ -547,7 +546,7 @@ static bool LoadSingleCursor(const std::wstring& path, UINT loadType, int size, 
             errStr = "Unknown (" + std::to_string(err) + ")";
             break;
         }
-        LogCategory("cursor_textures", "[CursorTextures] ERROR: OpenGL error during texture creation: " + errStr);
+        LogCategory(Log_CursorTextures, "[CursorTextures] ERROR: OpenGL error during texture creation: {}", errStr);
         glDeleteTextures(1, &outData.texture);
         outData.texture = 0;
         if (outData.invertMaskTexture) {
@@ -561,8 +560,8 @@ static bool LoadSingleCursor(const std::wstring& path, UINT loadType, int size, 
 
     BindTextureDirect(GL_TEXTURE_2D, 0);
 
-    LogCategory("cursor_textures", "[CursorTextures] Successfully created texture ID " + std::to_string(outData.texture) + " (" +
-                                       std::to_string(width) + "x" + std::to_string(height) + ") for " + WideToUtf8(path));
+    LogCategory(Log_CursorTextures, "[CursorTextures] Successfully created texture ID {} ({}x{}) for {}",
+        outData.texture, width, height, WideToUtf8(path));
     return true;
 }
 
@@ -577,7 +576,7 @@ void LoadCursorTextures() {
         cursorDefs = AVAILABLE_CURSORS;
     }
 
-    LogCategory("cursor_textures", "[CursorTextures] LoadCursorTextures called - loading initial cursors at default size (64px)");
+    LogCategory(Log_CursorTextures, "[CursorTextures] LoadCursorTextures called - loading initial cursors at default size (64px)");
 
     int totalLoaded = 0;
     const int defaultSize = 64;
@@ -586,16 +585,16 @@ void LoadCursorTextures() {
         CursorData cursorData;
         if (LoadSingleCursor(cursorDef.path, cursorDef.loadType, defaultSize, cursorData)) {
             g_cursorList.push_back(cursorData);
-            LogCategory("cursor_textures",
-                        "[CursorTextures] Loaded " + WideToUtf8(cursorDef.path) + " at size " + std::to_string(defaultSize));
+            LogCategory(Log_CursorTextures, "[CursorTextures] Loaded {} at size {}",
+                WideToUtf8(cursorDef.path), defaultSize);
             totalLoaded++;
         } else {
-            LogCategory("cursor_textures",
-                        "[CursorTextures] Failed to load " + WideToUtf8(cursorDef.path) + " at size " + std::to_string(defaultSize));
+            LogCategory(Log_CursorTextures, "[CursorTextures] Failed to load {} at size {}",
+                WideToUtf8(cursorDef.path), defaultSize);
         }
     }
 
-    LogCategory("cursor_textures", "[CursorTextures] Finished loading " + std::to_string(totalLoaded) + " default cursor variants");
+    LogCategory(Log_CursorTextures, "[CursorTextures] Finished loading {} default cursor variants");
 }
 
 // NOTE: Caller must NOT hold g_cursorListMutex when calling this function
@@ -603,7 +602,7 @@ const CursorData* LoadOrFindCursor(const std::wstring& path, UINT loadType, int 
     std::string pathStr = WideToUtf8(path);
 
     if (path.empty()) {
-        LogCategory("cursor_textures", "[CursorTextures] ERROR: LoadOrFindCursor called with empty path");
+        LogCategory(Log_CursorTextures, "[CursorTextures] ERROR: LoadOrFindCursor called with empty path");
         return nullptr;
     }
 
@@ -616,23 +615,23 @@ const CursorData* LoadOrFindCursor(const std::wstring& path, UINT loadType, int 
         }
     }
 
-    LogCategory("cursor_textures", "[CursorTextures] Loading cursor on-demand: " + pathStr + " at size " + std::to_string(size));
+    LogCategory(Log_CursorTextures, "[CursorTextures] Loading cursor on-demand: {} at size {}", pathStr, size);
     CursorData newCursorData;
     if (LoadSingleCursor(path, loadType, size, newCursorData)) {
         std::lock_guard<std::mutex> lock(g_cursorListMutex);
         g_cursorList.push_back(newCursorData);
-        LogCategory("cursor_textures",
-                    "[CursorTextures] Successfully loaded on-demand cursor. Total loaded: " + std::to_string(g_cursorList.size()));
+        LogCategory(Log_CursorTextures,
+                    "[CursorTextures] Successfully loaded on-demand cursor. Total loaded: {}", g_cursorList.size());
         return &g_cursorList.back();
     } else {
-        LogCategory("cursor_textures", "[CursorTextures] ERROR: Failed to load cursor on-demand: " + pathStr);
+        LogCategory(Log_CursorTextures, "[CursorTextures] ERROR: Failed to load cursor on-demand: {}", pathStr);
         return nullptr;
     }
 }
 
 const CursorData* FindCursor(const std::wstring& path, int size) {
     if (path.empty()) {
-        LogCategory("cursor_textures", "[CursorTextures] ERROR: FindCursor called with empty path");
+        LogCategory(Log_CursorTextures, "[CursorTextures] ERROR: FindCursor called with empty path");
         return nullptr;
     }
 
@@ -651,11 +650,11 @@ const CursorData* FindCursor(const std::wstring& path, int size) {
         if (ext == ".ico") {
             loadType = IMAGE_ICON;
         } else if (ext != ".cur" && ext != ".ani") {
-            LogCategory("cursor_textures", "[CursorTextures] WARNING: Unexpected cursor file extension: " + ext + ", treating as cursor");
+            LogCategory(Log_CursorTextures, "[CursorTextures] WARNING: Unexpected cursor file extension: {}, treating as cursor", ext);
         }
     } catch (const std::exception& e) {
-        LogCategory("cursor_textures",
-                    "[CursorTextures] WARNING: Failed to parse path extension: " + std::string(e.what()) + ", defaulting to IMAGE_CURSOR");
+        LogCategory(Log_CursorTextures,
+                    "[CursorTextures] WARNING: Failed to parse path extension: {}, defaulting to IMAGE_CURSOR", e.what());
     }
 
     return LoadOrFindCursor(path, loadType, size);
@@ -949,20 +948,20 @@ const CursorData* GetSelectedCursor(const std::string& gameState, int size) {
     const CursorData* cursorData = FindCursor(cursorPath, selectedSize);
     if (cursorData) { return cursorData; }
 
-    Log("[GetSelectedCursor] Cursor '" + selectedCursorName + "' not found at size " + std::to_string(selectedSize) + ", trying fallback");
+    Log("[GetSelectedCursor] Cursor '{}' not found at size {}, trying fallback", selectedCursorName, selectedSize);
 
     {
         std::lock_guard<std::mutex> lock(g_cursorListMutex);
         for (const auto& cursor : g_cursorList) {
             if (cursor.size == selectedSize && cursor.texture != 0) {
-                Log("[GetSelectedCursor] Fallback: using cursor from " + WideToUtf8(cursor.filePath));
+                Log("[GetSelectedCursor] Fallback: using cursor from {}", WideToUtf8(cursor.filePath));
                 return &cursor;
             }
         }
         for (const auto& cursor : g_cursorList) {
             if (cursor.texture != 0) {
-                Log("[GetSelectedCursor] Fallback: using cursor from " + WideToUtf8(cursor.filePath) + " at size " +
-                    std::to_string(cursor.size));
+                Log("[GetSelectedCursor] Fallback: using cursor from {} at size {}",
+                    WideToUtf8(cursor.filePath), std::to_string(cursor.size));
                 return &cursor;
             }
         }
@@ -989,20 +988,20 @@ bool GetCursorPathByName(const std::string& cursorName, std::wstring& outPath, U
         outLoadType = selectedDef->loadType;
         return true;
     } else {
-        LogCategory("cursor_textures", "[CursorTextures] WARNING: Unknown cursor name '" + cursorName + "'");
-        LogCategory("cursor_textures", "[CursorTextures] Available cursors: " + std::to_string(AVAILABLE_CURSORS.size()));
-        for (const auto& def : AVAILABLE_CURSORS) { LogCategory("cursor_textures", "[CursorTextures]   - " + def.name); }
+        LogCategory(Log_CursorTextures, "[CursorTextures] WARNING: Unknown cursor name '{}'", cursorName);
+        LogCategory(Log_CursorTextures, "[CursorTextures] Available cursors: {}", AVAILABLE_CURSORS.size());
+        for (const auto& def : AVAILABLE_CURSORS) { LogCategory(Log_CursorTextures, "[CursorTextures]   - {}", def.name); }
 
         if (!AVAILABLE_CURSORS.empty()) {
             outPath = AVAILABLE_CURSORS[0].path;
             outLoadType = AVAILABLE_CURSORS[0].loadType;
-            LogCategory("cursor_textures", "[CursorTextures] Using first available cursor as fallback: " + AVAILABLE_CURSORS[0].name);
+            LogCategory(Log_CursorTextures, "[CursorTextures] Using first available cursor as fallback: {}", AVAILABLE_CURSORS[0].name);
             return false;
         }
 
         outPath = L"";
         outLoadType = IMAGE_CURSOR;
-        LogCategory("cursor_textures", "[CursorTextures] ERROR: No cursors available for fallback");
+        LogCategory(Log_CursorTextures, "[CursorTextures] ERROR: No cursors available for fallback");
         return false;
     }
 }
@@ -1013,7 +1012,7 @@ bool IsCursorFileValid(const std::string& cursorName) {
     std::lock_guard<std::mutex> lock(g_cursorDefsMutex);
 
     if (cursorName.empty()) {
-        LogCategory("cursor_textures", "[CursorTextures] IsCursorFileValid: Empty cursor name provided");
+        LogCategory(Log_CursorTextures, "[CursorTextures] IsCursorFileValid: Empty cursor name provided");
         return false;
     }
 
@@ -1026,7 +1025,7 @@ bool IsCursorFileValid(const std::string& cursorName) {
     }
 
     if (!selectedDef) {
-        LogCategory("cursor_textures", "[CursorTextures] IsCursorFileValid: Cursor '" + cursorName + "' not found in definitions");
+        LogCategory(Log_CursorTextures, "[CursorTextures] IsCursorFileValid: Cursor '{}' not found in definitions", cursorName);
         return false;
     }
 
@@ -1034,14 +1033,14 @@ bool IsCursorFileValid(const std::string& cursorName) {
     try {
         if (!std::filesystem::path(selectedDef->path).is_absolute()) { resolvedPath = ResolveCwdPath(selectedDef->path); }
     } catch (const std::exception& e) {
-        LogCategory("cursor_textures",
-                    "[CursorTextures] IsCursorFileValid: Failed to resolve path for '" + cursorName + "': " + std::string(e.what()));
+        LogCategory(Log_CursorTextures,
+                    "[CursorTextures] IsCursorFileValid: Failed to resolve path for '{}': {}", cursorName, e.what());
         return false;
     }
 
     bool exists = std::filesystem::exists(resolvedPath);
     if (!exists) {
-        LogCategory("cursor_textures", "[CursorTextures] IsCursorFileValid: Cursor file does not exist: " + WideToUtf8(resolvedPath));
+        LogCategory(Log_CursorTextures, "[CursorTextures] IsCursorFileValid: Cursor file does not exist: {}", WideToUtf8(resolvedPath));
     }
     return exists;
 }
@@ -1049,8 +1048,8 @@ bool IsCursorFileValid(const std::string& cursorName) {
 void Cleanup() {
     std::lock_guard<std::mutex> lock(g_cursorListMutex);
 
-    LogCategory("cursor_textures",
-                "[CursorTextures] Cleanup: Starting cleanup of " + std::to_string(g_cursorList.size()) + " cursor entries");
+    LogCategory(Log_CursorTextures,
+                "[CursorTextures] Cleanup: Starting cleanup of {} cursor entries", g_cursorList.size());
 
     int texturesDeleted = 0;
     int invertMasksDeleted = 0;
@@ -1077,9 +1076,8 @@ void Cleanup() {
     }
 
     g_cursorList.clear();
-    LogCategory("cursor_textures", "[CursorTextures] Cleanup complete: " + std::to_string(texturesDeleted) + " textures, " +
-                                       std::to_string(invertMasksDeleted) + " invert masks, " + std::to_string(cursorsDestroyed) +
-                                       " cursor handles");
+    LogCategory(Log_CursorTextures, "[CursorTextures] Cleanup complete: {} textures, {} invert masks, {} cursor handles",
+        texturesDeleted, invertMasksDeleted, cursorsDestroyed);
 }
 
 std::vector<std::string> GetAvailableCursorNames() {
@@ -1117,8 +1115,7 @@ static void RenderFakeCursorInternal(HWND hwnd,
     cursorInfo.cbSize = sizeof(CURSORINFO);
     if (!GetCursorInfo(&cursorInfo)) {
         if (shouldLog) {
-            DWORD err = GetLastError();
-            Log("[FakeCursor] GetCursorInfo failed with error " + std::to_string(err));
+            Log("[FakeCursor] GetCursorInfo failed with error {}", GetLastError());
         }
         return;
     }
@@ -1129,8 +1126,8 @@ static void RenderFakeCursorInternal(HWND hwnd,
 
     if (!cursorData) {
         if (shouldLog) {
-            Log("[FakeCursor] Cursor handle 0x" + std::to_string(reinterpret_cast<uintptr_t>(cursorInfo.hCursor)) +
-                " could not be resolved to a texture");
+            Log("[FakeCursor] Cursor handle 0x{:X} could not be resolved to a texture",
+                reinterpret_cast<uintptr_t>(cursorInfo.hCursor));
         }
         return;
     }
@@ -1138,8 +1135,7 @@ static void RenderFakeCursorInternal(HWND hwnd,
     RECT gameClientRectInScreen;
     if (!GetWindowClientRectInScreen(hwnd, gameClientRectInScreen)) {
         if (shouldLog) {
-            DWORD err = GetLastError();
-            Log("[FakeCursor] GetWindowClientRectInScreen failed with error " + std::to_string(err));
+            Log("[FakeCursor] GetWindowClientRectInScreen failed with error {}", GetLastError());
         }
         return;
     }
