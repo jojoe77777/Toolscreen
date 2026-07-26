@@ -24,6 +24,64 @@ if (BeginSelectableSettingsTopTabItem(trc("tabs.modes"))) {
     SliderCtrlClickTip();
     const std::string g_currentModeId = GetPublishedCurrentModeId();
 
+    auto renderBackgroundImageOptions = [&](ModeConfig& mode, const std::string& idSuffix) {
+        if (mode.background.image.empty()) {
+            ImGui::TextDisabled("%s", trc("modes.image_fit.no_image"));
+            return;
+        }
+        const char* fitLabels[] = { trc("modes.image_fit.fill"), trc("modes.image_fit.fit"), trc("modes.image_fit.stretch"),
+                                    trc("modes.image_fit.center"), trc("modes.image_fit.tile") };
+        const char* fitValues[] = { "fill", "fit", "stretch", "center", "tile" };
+
+        int currentFit = 0;
+        for (int fitIndex = 0; fitIndex < IM_ARRAYSIZE(fitValues); ++fitIndex) {
+            if (mode.background.imageFit == fitValues[fitIndex]) {
+                currentFit = fitIndex;
+                break;
+            }
+        }
+
+        ImGui::SetNextItemWidth(160);
+        if (ImGui::Combo((tr("modes.image_fit") + "##" + idSuffix).c_str(), &currentFit, fitLabels, IM_ARRAYSIZE(fitLabels))) {
+            mode.background.imageFit = fitValues[currentFit];
+            g_configIsDirty = true;
+        }
+        ImGui::SameLine();
+        HelpMarker(trc("modes.tooltip.image_fit"));
+
+        const BackgroundImageFit fit = ParseBackgroundImageFit(mode.background.imageFit);
+
+        if (fit == BackgroundImageFit::Center) {
+            float scalePercent = mode.background.imageCenterScale * 100.0f;
+            ImGui::SetNextItemWidth(160);
+            if (ImGui::SliderFloat((tr("modes.image_scale") + "##" + idSuffix).c_str(), &scalePercent, kBackgroundImageScaleMin * 100.0f,
+                                   kBackgroundImageScaleMax * 100.0f, "%.0f%%")) {
+                mode.background.imageCenterScale = scalePercent / 100.0f;
+                g_configIsDirty = true;
+            }
+        } else if (fit == BackgroundImageFit::Tile) {
+            float tilePercent = mode.background.imageTileScale * 100.0f;
+            ImGui::SetNextItemWidth(160);
+            if (ImGui::SliderFloat((tr("modes.image_tile_size") + "##" + idSuffix).c_str(), &tilePercent, kBackgroundImageScaleMin * 100.0f,
+                                   kBackgroundImageScaleMax * 100.0f, "%.0f%%")) {
+                mode.background.imageTileScale = tilePercent / 100.0f;
+                g_configIsDirty = true;
+            }
+            ImGui::SetNextItemWidth(160);
+            if (ImGui::SliderInt((tr("modes.image_tile_spacing") + "##" + idSuffix).c_str(), &mode.background.imageTileSpacing, 0,
+                                 kBackgroundImageSpacingMax, "%dpx")) {
+                g_configIsDirty = true;
+            }
+        }
+
+        if (BackgroundImageFitShowsBackdrop(fit)) {
+            ImGui::SetNextItemWidth(160);
+            if (ImGui::ColorEdit3((tr("modes.background_color") + "##" + idSuffix).c_str(), &mode.background.color.r)) {
+                g_configIsDirty = true;
+            }
+        }
+    };
+
     auto applyManualModeDimensionChange = [&](ModeConfig& mode, bool updateWidth, int requestedValue, int minValue,
                                               const char* resizeSource) {
         int clampedValue = (std::max)(minValue, requestedValue);
@@ -1198,6 +1256,8 @@ if (BeginSelectableSettingsTopTabItem(trc("tabs.modes"))) {
                             }
                         }
 
+                        renderBackgroundImageOptions(mode, "eyezoom_bg_fit");
+
                         std::string bgError = GetImageError("eyezoom_bg");
                         if (!bgError.empty()) { ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "%s", bgError.c_str()); }
                     }
@@ -1489,6 +1549,8 @@ if (BeginSelectableSettingsTopTabItem(trc("tabs.modes"))) {
                                 }
                             }
                         }
+
+                        renderBackgroundImageOptions(mode, "preemptive_bg_fit");
 
                         std::string bgError = GetImageError("preemptive_bg");
                         if (!bgError.empty()) { ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "%s", bgError.c_str()); }
@@ -1833,6 +1895,7 @@ if (BeginSelectableSettingsTopTabItem(trc("tabs.modes"))) {
                                 }
                             }
                         }
+                        renderBackgroundImageOptions(mode, "thin_bg_fit");
                         std::string thinBgError = GetImageError(thinErrorKey);
                         if (!thinBgError.empty()) { ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "%s", thinBgError.c_str()); }
                     }
@@ -2142,6 +2205,7 @@ if (BeginSelectableSettingsTopTabItem(trc("tabs.modes"))) {
                                 }
                             }
                         }
+                        renderBackgroundImageOptions(mode, "wide_bg_fit");
                         std::string wideBgError = GetImageError(wideErrorKey);
                         if (!wideBgError.empty()) { ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "%s", wideBgError.c_str()); }
                     }
@@ -2166,6 +2230,7 @@ if (BeginSelectableSettingsTopTabItem(trc("tabs.modes"))) {
                 }
 
                 renderModeSourceAssignments(mode, mode.id);
+
                 if (ImGui::TreeNode(trc("modes.sensitivity_override"))) {
                     if (ImGui::Checkbox(trc("modes.override_sensitivity"), &mode.sensitivityOverrideEnabled)) { g_configIsDirty = true; }
                     HelpMarker(trc("modes.tooltip.override_sensitivity"));
@@ -2572,6 +2637,8 @@ if (BeginSelectableSettingsTopTabItem(trc("tabs.modes"))) {
                                 }
                             }
                         }
+
+                        renderBackgroundImageOptions(mode, "custom_bg_fit_" + mode.id);
 
                         std::string bgError = GetImageError(modeErrorKey);
                         if (!bgError.empty()) { ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "%s", bgError.c_str()); }
