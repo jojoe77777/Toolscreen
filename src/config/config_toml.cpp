@@ -4,8 +4,10 @@
 #include "gui/gui.h"
 #include "runtime/logic_thread.h"
 #include "common/utils.h"
+#include "render/background_fit_layout.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
@@ -667,6 +669,10 @@ void BackgroundConfigToToml(const BackgroundConfig& cfg, toml::table& out) {
 
     out.insert("selectedMode", cfg.selectedMode);
     out.insert("image", cfg.image);
+    out.insert("imageFit", cfg.imageFit);
+    out.insert("imageCenterScale", cfg.imageCenterScale);
+    out.insert("imageTileScale", cfg.imageTileScale);
+    out.insert("imageTileSpacing", cfg.imageTileSpacing);
     out.insert("color", ColorToTomlArray(cfg.color));
 
     GradientConfig gradientCfg;
@@ -681,6 +687,15 @@ void BackgroundConfigToToml(const BackgroundConfig& cfg, toml::table& out) {
 void BackgroundConfigFromToml(const toml::table& tbl, BackgroundConfig& cfg) {
     cfg.selectedMode = GetStringOr(tbl, "selectedMode", ConfigDefaults::BACKGROUND_SELECTED_MODE);
     cfg.image = GetStringOr(tbl, "image", "");
+    cfg.imageFit = BackgroundImageFitToString(ParseBackgroundImageFit(GetStringOr(tbl, "imageFit", ConfigDefaults::BACKGROUND_IMAGE_FIT)));
+    cfg.imageCenterScale = (std::min)(kBackgroundImageScaleMax,
+                                      (std::max)(kBackgroundImageScaleMin,
+                                                 GetOr(tbl, "imageCenterScale", ConfigDefaults::BACKGROUND_IMAGE_CENTER_SCALE)));
+    cfg.imageTileScale = (std::min)(kBackgroundImageScaleMax,
+                                    (std::max)(kBackgroundImageScaleMin,
+                                               GetOr(tbl, "imageTileScale", ConfigDefaults::BACKGROUND_IMAGE_TILE_SCALE)));
+    cfg.imageTileSpacing = (std::min)(kBackgroundImageSpacingMax,
+                                      (std::max)(0, GetOr(tbl, "imageTileSpacing", ConfigDefaults::BACKGROUND_IMAGE_TILE_SPACING)));
     cfg.color = ColorFromTomlArray(GetArray(tbl, "color"), { 0.0f, 0.0f, 0.0f });
 
     GradientConfig gradientCfg;
@@ -2237,7 +2252,10 @@ void ConfigToToml(const Config& config, toml::table& out) {
     out.insert("basicModeEnabled", config.basicModeEnabled);
     out.insert("restoreWindowedModeOnFullscreenExit", config.restoreWindowedModeOnFullscreenExit);
     out.insert("disableFullscreenPrompt", config.disableFullscreenPrompt);
-    out.insert("disableConfigurePrompt", config.disableConfigurePrompt);
+    out.insert("startupIndicatorMode", config.startupIndicatorMode);
+    if (!config.startupIndicatorImagePath.empty()) {
+        out.insert("startupIndicatorImagePath", config.startupIndicatorImagePath);
+    }
 
     toml::array guiHotkeyArr;
     for (const auto& key : config.guiHotkey) { guiHotkeyArr.push_back(static_cast<int64_t>(key)); }
@@ -2519,7 +2537,16 @@ void ConfigFromToml(const toml::table& tbl, Config& config) {
     config.restoreWindowedModeOnFullscreenExit =
         GetOr(tbl, "restoreWindowedModeOnFullscreenExit", ConfigDefaults::CONFIG_RESTORE_WINDOWED_MODE_ON_FULLSCREEN_EXIT);
     config.disableFullscreenPrompt = GetOr(tbl, "disableFullscreenPrompt", ConfigDefaults::CONFIG_DISABLE_FULLSCREEN_PROMPT);
-    config.disableConfigurePrompt = GetOr(tbl, "disableConfigurePrompt", ConfigDefaults::CONFIG_DISABLE_CONFIGURE_PROMPT);
+
+    if (tbl.contains("startupIndicatorMode")) {
+        int m = GetOr(tbl, "startupIndicatorMode", ConfigDefaults::STARTUP_INDICATOR_MODE);
+        if (m < 0 || m > 2) m = ConfigDefaults::STARTUP_INDICATOR_MODE;
+        config.startupIndicatorMode = m;
+    } else {
+        config.startupIndicatorMode = ConfigDefaults::STARTUP_INDICATOR_MODE;
+    }
+    config.startupIndicatorImagePath =
+        GetStringOr(tbl, "startupIndicatorImagePath", ConfigDefaults::STARTUP_INDICATOR_IMAGE_PATH);
 
     config.guiHotkey.clear();
     if (auto arr = GetArray(tbl, "guiHotkey")) {
@@ -2979,7 +3006,8 @@ const std::vector<std::string>& GetConfigTomlOrderedKeys() {
         "basicModeEnabled",
         "restoreWindowedModeOnFullscreenExit",
         "disableFullscreenPrompt",
-        "disableConfigurePrompt",
+        "startupIndicatorMode",
+        "startupIndicatorImagePath",
         "guiHotkey",
         "borderlessHotkey",
         "autoBorderless",

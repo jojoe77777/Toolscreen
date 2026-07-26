@@ -1303,6 +1303,54 @@ foreach(test_case IN LISTS TOOLSCREEN_PATH_SANITIZE_TEST_CASES)
     )
 endforeach()
 
+add_executable(toolscreen_background_fit_layout_tests
+    tests/background_fit_layout_tests.cpp
+    src/render/background_fit_layout.cpp
+)
+
+target_include_directories(toolscreen_background_fit_layout_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_compile_definitions(toolscreen_background_fit_layout_tests PRIVATE
+    NOMINMAX
+    UNICODE
+    _UNICODE
+)
+
+if(MSVC)
+    target_compile_options(toolscreen_background_fit_layout_tests PRIVATE
+        /W3
+        /MP
+        /EHsc
+    )
+endif()
+
+toolscreen_configure_target_outputs(toolscreen_background_fit_layout_tests)
+toolscreen_enable_release_symbols(toolscreen_background_fit_layout_tests)
+
+set(TOOLSCREEN_BACKGROUND_FIT_TEST_CASES
+    parse_normalizes_case_and_unknown
+    to_string_round_trips
+    backdrop_only_for_visible_modes
+    stretch_fills_whole_area
+    fit_letterboxes_and_centers
+    fill_covers_and_crops
+    center_uses_native_size_by_default
+    center_scale_adjusts_size
+    degenerate_dims_fall_back_to_area
+    tile_grid_covers_area_centered
+    tile_spacing_reduces_count
+    tile_degenerate_and_capped
+)
+
+foreach(test_case IN LISTS TOOLSCREEN_BACKGROUND_FIT_TEST_CASES)
+    add_test(
+        NAME toolscreen_background_fit_${test_case}
+        COMMAND $<TARGET_FILE:toolscreen_background_fit_layout_tests> --run ${test_case}
+    )
+endforeach()
+
 add_executable(toolscreen_game_state_source_tests
     tests/game_state_source_tests.cpp
     src/features/game_state_source.cpp

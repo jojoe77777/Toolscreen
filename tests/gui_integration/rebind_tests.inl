@@ -648,6 +648,52 @@ void RunHotkeyRuntimeExclusionDetectsLowLevelSuppressedKeyTest(TestRunMode runMo
            "Expected hotkey to match when Caps Lock exclusion is listed but key is neither pressed nor suppressed.");
 }
 
+void RunKeyRebindDeepSuppressionEligibilityTest(TestRunMode runMode = TestRunMode::Automated) {
+    (void)runMode;
+
+    Expect(IsDeepSuppressionEligibleSourceVkForTest(VK_CONTROL), "Expected VK_CONTROL to be deep-suppression eligible.");
+    Expect(IsDeepSuppressionEligibleSourceVkForTest(VK_LCONTROL), "Expected VK_LCONTROL to be deep-suppression eligible.");
+    Expect(IsDeepSuppressionEligibleSourceVkForTest(VK_RCONTROL), "Expected VK_RCONTROL to be deep-suppression eligible.");
+    Expect(IsDeepSuppressionEligibleSourceVkForTest(VK_SHIFT), "Expected VK_SHIFT to be deep-suppression eligible.");
+    Expect(IsDeepSuppressionEligibleSourceVkForTest(VK_LSHIFT), "Expected VK_LSHIFT to be deep-suppression eligible.");
+    Expect(IsDeepSuppressionEligibleSourceVkForTest(VK_RSHIFT), "Expected VK_RSHIFT to be deep-suppression eligible.");
+    Expect(IsDeepSuppressionEligibleSourceVkForTest(VK_LMENU), "Expected VK_LMENU to remain deep-suppression eligible.");
+    Expect(IsDeepSuppressionEligibleSourceVkForTest(VK_LWIN), "Expected VK_LWIN to remain deep-suppression eligible.");
+    Expect(!IsDeepSuppressionEligibleSourceVkForTest('A'), "Expected a regular key to NOT be deep-suppression eligible.");
+    Expect(!IsDeepSuppressionEligibleSourceVkForTest(VK_F3), "Expected F3 to NOT be deep-suppression eligible.");
+
+    Expect(ShouldDeepSuppressRebindForTest(VK_CONTROL, VK_F3),
+           "Expected Ctrl->F3 to deep-suppress the physical Ctrl so chord reads (narrator/GUI) do not see it.");
+    Expect(ShouldDeepSuppressRebindForTest(VK_SHIFT, VK_F3),
+           "Expected Shift->F3 to deep-suppress the physical Shift.");
+    Expect(ShouldDeepSuppressRebindForTest(VK_CONTROL, 0),
+           "Expected a consume-only Ctrl rebind to deep-suppress the physical Ctrl.");
+    Expect(!ShouldDeepSuppressRebindForTest(VK_CONTROL, VK_CONTROL),
+           "Expected Ctrl->Ctrl (preserving) to NOT deep-suppress.");
+    Expect(!ShouldDeepSuppressRebindForTest(VK_SHIFT, VK_SHIFT),
+           "Expected Shift->Shift (preserving) to NOT deep-suppress.");
+}
+
+void RunHotkeyRuntimeExclusionDetectsSuppressedCtrlShiftTest(TestRunMode runMode = TestRunMode::Automated) {
+    (void)runMode;
+
+    const std::filesystem::path root = PrepareCaseDirectory("hotkey_runtime_exclusion_detects_suppressed_ctrl_shift");
+    ResetGlobalTestState(root);
+
+    QueueSuppressedLowLevelKeyForTest(VK_LCONTROL, 0x001D, false);
+    Expect(!CheckHotkeyMatch({ 0x46 }, 0x46, { VK_CONTROL }, false, 1, 0x46, true, true),
+           "Expected hotkey to NOT match when low-level-suppressed Ctrl is listed as exclusion.");
+    ClearLowLevelSuppressedKeysForTest();
+
+    QueueSuppressedLowLevelKeyForTest(VK_LSHIFT, 0x002A, false);
+    Expect(!CheckHotkeyMatch({ 0x46 }, 0x46, { VK_SHIFT }, false, 1, 0x46, true, true),
+           "Expected hotkey to NOT match when low-level-suppressed Shift is listed as exclusion.");
+    ClearLowLevelSuppressedKeysForTest();
+
+    Expect(CheckHotkeyMatch({ 0x46 }, 0x46, { VK_CONTROL, VK_SHIFT }, false, 1, 0x46, true, true),
+           "Expected hotkey to match when Ctrl/Shift exclusions are neither pressed nor suppressed.");
+}
+
 void RunKeyRebindRuntimeSplitVkOutputTest(TestRunMode runMode = TestRunMode::Automated) {
     DummyWindow window(kWindowWidth, kWindowHeight, runMode == TestRunMode::Visual);
     KeyRebind rebind = MakeEnabledRebind('A', 'B');

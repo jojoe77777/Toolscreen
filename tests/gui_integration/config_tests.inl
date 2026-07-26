@@ -575,6 +575,99 @@ void RunConfigDowngradeSourcesCompatTest(TestRunMode runMode = TestRunMode::Auto
                        "Expected sources to also serialize legacy browserOverlayIds for downgrade.");
 }
 
+void RunStartupIndicatorConfigTest(TestRunMode runMode = TestRunMode::Automated) {
+    (void)runMode;
+
+    auto baseTable = []() {
+        Config base;
+        toml::table tbl;
+        ConfigToToml(base, tbl);
+        return tbl;
+    };
+
+    {
+        toml::table tbl = baseTable();
+        tbl.erase("startupIndicatorMode");
+        tbl.erase("startupIndicatorImagePath");
+        Config config;
+        ConfigFromToml(tbl, config);
+        Expect(config.startupIndicatorMode == 1, "Expected a missing startupIndicatorMode key to default to 1.");
+        Expect(config.startupIndicatorImagePath.empty(), "Expected a missing startupIndicatorImagePath key to default to empty.");
+    }
+
+    for (bool legacy : { true, false }) {
+        toml::table tbl = baseTable();
+        tbl.erase("startupIndicatorMode");
+        tbl.insert_or_assign("disableConfigurePrompt", legacy);
+        Config config;
+        ConfigFromToml(tbl, config);
+        Expect(config.startupIndicatorMode == 1, "Expected the legacy disableConfigurePrompt value to be ignored (mode 1).");
+    }
+
+    for (int bad : { -1, 3, 7 }) {
+        toml::table tbl = baseTable();
+        tbl.insert_or_assign("startupIndicatorMode", bad);
+        Config config;
+        ConfigFromToml(tbl, config);
+        Expect(config.startupIndicatorMode == 1, "Expected an out-of-range startupIndicatorMode to clamp to 1.");
+    }
+
+    {
+        toml::table tbl = baseTable();
+        tbl.insert_or_assign("startupIndicatorMode", "foo");
+        Config config;
+        ConfigFromToml(tbl, config);
+        Expect(config.startupIndicatorMode == 1, "Expected a non-integer startupIndicatorMode to fall back to 1.");
+    }
+
+    for (int good : { 0, 1, 2 }) {
+        toml::table tbl = baseTable();
+        tbl.insert_or_assign("startupIndicatorMode", good);
+        Config config;
+        ConfigFromToml(tbl, config);
+        Expect(config.startupIndicatorMode == good, "Expected a valid startupIndicatorMode to load verbatim.");
+    }
+
+    {
+        Config config;
+        config.startupIndicatorMode = 0;
+        config.startupIndicatorImagePath.clear();
+        toml::table serialized;
+        ConfigToToml(config, serialized);
+        Expect(serialized.contains("startupIndicatorMode"), "Expected startupIndicatorMode to always serialize.");
+        Expect(!serialized.contains("startupIndicatorImagePath"), "Expected an empty image path to be omitted from serialization.");
+        Expect(!serialized.contains("disableConfigurePrompt"), "Expected the legacy disableConfigurePrompt key to no longer serialize.");
+        Config loaded;
+        ConfigFromToml(serialized, loaded);
+        Expect(loaded.startupIndicatorMode == 0, "Expected None to roundtrip to 0.");
+    }
+
+    {
+        Config config;
+        config.startupIndicatorMode = 2;
+        config.startupIndicatorImagePath = "C:\\images\\startup.gif";
+        toml::table serialized;
+        ConfigToToml(config, serialized);
+        Expect(serialized.contains("startupIndicatorImagePath"), "Expected a non-empty image path to serialize.");
+        Config loaded;
+        ConfigFromToml(serialized, loaded);
+        Expect(loaded.startupIndicatorMode == 2, "Expected Custom mode to roundtrip to 2.");
+        Expect(loaded.startupIndicatorImagePath == "C:\\images\\startup.gif", "Expected the custom image path to roundtrip byte-exact.");
+    }
+
+    {
+        const std::string unicodePath = std::string("D:\\") + "\xC3\x9C" "n" "\xC3\xAF" "c" "\xC3\xB6" "d" "\xC3\xA9" + "\\ziel.gif";
+        Config config;
+        config.startupIndicatorMode = 2;
+        config.startupIndicatorImagePath = unicodePath;
+        toml::table serialized;
+        ConfigToToml(config, serialized);
+        Config loaded;
+        ConfigFromToml(serialized, loaded);
+        Expect(loaded.startupIndicatorImagePath == unicodePath, "Expected a Unicode custom image path to roundtrip byte-exact.");
+    }
+}
+
 void RunConfigLoadModePercentageDimensionsDetectedTest(TestRunMode runMode = TestRunMode::Automated) {
     int expectedWidth = 1;
     int expectedHeight = 1;

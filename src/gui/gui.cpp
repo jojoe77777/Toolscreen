@@ -14,6 +14,7 @@
 #include "common/profiler.h"
 #include "render/obs_thread.h"
 #include "render/render.h"
+#include "render/background_fit_layout.h"
 #include "platform/resource.h"
 #include <nlohmann/json.hpp>
 #include "common/i18n.h"
@@ -2688,7 +2689,6 @@ void RenderSettingsGUI() {
 
         ImGui::Text(trc("hotkeys.bind_hotkey.tooltip.prompt"));
         ImGui::Text(trc("hotkeys.bind_hotkey.tooltip.confirm"));
-        ImGui::Text(trc("hotkeys.bind_hotkey.tooltip.clear"));
         ImGui::Text(trc("hotkeys.bind_hotkey.tooltip.cancel"));
         ImGui::Separator();
 
@@ -2788,14 +2788,6 @@ void RenderSettingsGUI() {
                 ImGui::CloseCurrentPopup();
                 (void)capturedLParam;
                 (void)capturedIsMouse;
-                ImGui::EndPopup();
-                return;
-            }
-
-            const bool canClear = (s_exclusionToBind.hotkey_idx == -1);
-            if (canClear && (capturedVk == VK_BACK || capturedVk == VK_DELETE)) {
-                Log("Binding cleared from Backspace/Delete.");
-                finalize_bind({});
                 ImGui::EndPopup();
                 return;
             }

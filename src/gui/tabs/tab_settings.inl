@@ -51,6 +51,9 @@ if (BeginSelectableSettingsTopTabItem(trc("tabs.other"))) {
         "fps limit",
         "video cache"
     });
+    const bool showStartupIndicatorSection = ShouldRenderConfigSearchSection(
+        showAllSettingsSections,
+        {"startup", "indicator", "toast", "reminder", "hotkey", "welcome", "launch"});
     const bool showFontSection = ShouldRenderConfigSearchSection(showAllSettingsSections, {
         trc("label.font"),
         trc("label.font_path"),
@@ -196,14 +199,82 @@ if (BeginSelectableSettingsTopTabItem(trc("tabs.other"))) {
         HelpMarker(trc("settings.tooltip.video_cache_budget_mib"));
     }
 
-/*    if (ImGui::Checkbox("Disable Fullscreen Prompt", &g_config.disableFullscreenPrompt)) { g_configIsDirty = true; }
-    ImGui::SameLine();
-    HelpMarker("Disables the fullscreen toast prompt (toast2).\n"
-               "When disabled, toast2 appears in fullscreen and starts fading out after 10 seconds.");
+    if (showStartupIndicatorSection) {
+        ImGui::Spacing();
+        ImGui::PushID("startup_indicator");
+        ImGui::SeparatorText(trc("startup_indicator.section"));
+        RecordConfigSearchSectionInteractionRect("config.section.settings.startup_indicator");
 
-    if (ImGui::Checkbox("Disable Configure Prompt", &g_config.disableConfigurePrompt)) { g_configIsDirty = true; }
-    ImGui::SameLine();
-    HelpMarker("Disables the configure toast prompt (toast1) shown in windowed mode.");*/
+        if (g_config.startupIndicatorMode == 0) {
+            ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.0f, 1.0f), trc("label.warning"));
+            ImGui::TextWrapped("%s", trc("startup_indicator.warning"));
+        }
+
+        std::string startupHotkey = GetKeyComboString(g_config.guiHotkey);
+        if (startupHotkey.empty()) startupHotkey = trc("startup_indicator.hotkey_unset");
+        ImGui::TextUnformatted(trc("startup_indicator.current_hotkey", startupHotkey));
+
+        ImGui::Spacing();
+
+        int startupMode = g_config.startupIndicatorMode;
+        bool startupModeChanged = false;
+        startupModeChanged |= ImGui::RadioButton(trc("startup_indicator.none"), &startupMode, 0);
+        ImGui::SameLine(); HelpMarker(trc("startup_indicator.none_help"));
+        startupModeChanged |= ImGui::RadioButton(trc("startup_indicator.shortcut_reminder"), &startupMode, 1);
+        ImGui::SameLine(); HelpMarker(trc("startup_indicator.shortcut_reminder_help"));
+        startupModeChanged |= ImGui::RadioButton(trc("startup_indicator.custom"), &startupMode, 2);
+        ImGui::SameLine(); HelpMarker(trc("startup_indicator.custom_help"));
+
+        if (startupModeChanged) {
+            g_config.startupIndicatorMode = startupMode;
+            g_configIsDirty = true;
+        }
+
+        if (g_config.startupIndicatorMode == 2) {
+            ImGui::Indent();
+            ImGui::TextUnformatted(trc("startup_indicator.image_path"));
+
+            if (ImGui::Button(trc("button.browse"))) {
+                ImagePickerResult result = OpenImagePickerAndValidate(g_minecraftHwnd.load(), g_toolscreenPath, g_toolscreenPath);
+                if (result.completed && result.success) {
+                    if (DetectVisualMediaKindFromPath(result.path) == VisualMediaKind::VideoMpeg1) {
+                        SetImageError("startup_indicator", trc("startup_indicator.error.video_unsupported"));
+                    } else {
+                        g_config.startupIndicatorImagePath = result.path;
+                        ClearImageError("startup_indicator");
+                        g_configIsDirty = true;
+                        InvalidateStartupIndicatorTexture();
+                    }
+                } else if (result.completed && !result.success && !result.error.empty()) {
+                    SetImageError("startup_indicator", result.error);
+                }
+            }
+
+            ImGui::SameLine();
+            if (RenderMaskedPathInput("##startup_ind_path", g_config.startupIndicatorImagePath)) {
+                g_configIsDirty = true;
+                InvalidateStartupIndicatorTexture();
+                const std::string& p = g_config.startupIndicatorImagePath;
+                if (p.empty()) {
+                    ClearImageError("startup_indicator");
+                } else {
+                    std::string err = ValidateImageFile(p, g_toolscreenPath);
+                    if (err.empty()) ClearImageError("startup_indicator");
+                    else SetImageError("startup_indicator", err);
+                }
+            }
+
+            if (g_config.startupIndicatorImagePath.empty()) {
+                ImGui::TextDisabled("%s", trc("startup_indicator.custom_no_image"));
+            }
+            std::string startupImgErr = GetImageError("startup_indicator");
+            if (!startupImgErr.empty()) {
+                ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "%s", startupImgErr.c_str());
+            }
+            ImGui::Unindent();
+        }
+        ImGui::PopID();
+    }
 
     if (showFontSection) {
         ImGui::Spacing();

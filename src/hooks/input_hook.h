@@ -98,6 +98,8 @@ void QueueSuppressedLowLevelKeyForTest(DWORD vk, UINT scanCodeWithFlags, bool is
 void QueueLowLevelExactModifierKeydownForTest(DWORD vk);
 void QueueLowLevelExactModifierKeyupForTest(DWORD vk);
 DWORD ResolveTrackedKeyboardVkFromMessageForTest(UINT uMsg, WPARAM wParam, LPARAM lParam);
+bool IsDeepSuppressionEligibleSourceVkForTest(DWORD vk);
+bool ShouldDeepSuppressRebindForTest(DWORD fromKey, DWORD toKey);
 #endif
 
 LRESULT CALLBACK SubclassedWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);

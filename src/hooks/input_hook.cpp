@@ -756,7 +756,7 @@ static bool IsPhysicalShiftKeyDown(DWORD vk) {
     }
 #endif
 
-    return (GetAsyncKeyState(static_cast<int>(vk)) & 0x8000) != 0;
+    return (GetAsyncKeyState(static_cast<int>(vk)) & 0x8000) != 0 || IsKeyCurrentlyLowLevelSuppressed(vk);
 }
 
 static bool IsAltCurrentlyDown() {
@@ -3537,7 +3537,7 @@ static bool IsMenuActivationModifierVk(DWORD vk) {
     return vk == VK_MENU || vk == VK_LMENU || vk == VK_RMENU || vk == VK_LWIN || vk == VK_RWIN;
 }
 
-static bool DoesRebindPreserveMenuModifier(const KeyRebind& rebind, DWORD triggerVk) {
+static bool DoesRebindPreserveSourceModifier(const KeyRebind& rebind, DWORD triggerVk) {
     if (rebind.useCustomOutput) return false;
 
     switch (rebind.fromKey) {
@@ -3551,6 +3551,18 @@ static bool DoesRebindPreserveMenuModifier(const KeyRebind& rebind, DWORD trigge
         return triggerVk == VK_LWIN;
     case VK_RWIN:
         return triggerVk == VK_RWIN;
+    case VK_CONTROL:
+        return triggerVk == VK_CONTROL || triggerVk == VK_LCONTROL || triggerVk == VK_RCONTROL;
+    case VK_LCONTROL:
+        return triggerVk == VK_LCONTROL;
+    case VK_RCONTROL:
+        return triggerVk == VK_RCONTROL;
+    case VK_SHIFT:
+        return triggerVk == VK_SHIFT || triggerVk == VK_LSHIFT || triggerVk == VK_RSHIFT;
+    case VK_LSHIFT:
+        return triggerVk == VK_LSHIFT;
+    case VK_RSHIFT:
+        return triggerVk == VK_RSHIFT;
     default:
         return false;
     }
@@ -3564,11 +3576,25 @@ static bool ShouldMaskMenuModifierForRebind(const KeyRebind& rebind, DWORD incom
         return false;
     }
 
-    return !DoesRebindPreserveMenuModifier(rebind, triggerVk);
+    return !DoesRebindPreserveSourceModifier(rebind, triggerVk);
+}
+
+static bool IsCtrlVk(DWORD vk) {
+    return vk == VK_CONTROL || vk == VK_LCONTROL || vk == VK_RCONTROL;
 }
 
 static bool IsDeepSuppressionEligibleSourceVk(DWORD vk) {
-    return IsMenuActivationModifierVk(vk);
+    return IsMenuActivationModifierVk(vk) || IsCtrlVk(vk) || IsShiftVk(vk);
+}
+
+static bool ShouldDeepSuppressModifierForRebind(const KeyRebind& rebind, DWORD incomingVk, DWORD incomingRawVk, bool isKeyDown,
+                                                bool isAutoRepeatKeyDown, DWORD triggerVk) {
+    if (!isKeyDown || isAutoRepeatKeyDown) return false;
+    if (!IsDeepSuppressionEligibleSourceVk(incomingVk) && !IsDeepSuppressionEligibleSourceVk(incomingRawVk) &&
+        !IsDeepSuppressionEligibleSourceVk(rebind.fromKey)) {
+        return false;
+    }
+    return !DoesRebindPreserveSourceModifier(rebind, triggerVk);
 }
 
 static UINT BuildScanCodeWithFlagsFromLowLevelEvent(const KBDLLHOOKSTRUCT& info) {
@@ -3599,7 +3625,7 @@ static bool IsCapsLockSuppressionEnabled() {
     return cfg->keyRebinds.suppressCapsLockToggle;
 }
 
-static bool ShouldSuppressLowLevelMenuModifierKey(DWORD rawVk) {
+static bool ShouldDeepSuppressLowLevelModifierKey(DWORD rawVk) {
     if (!IsDeepSuppressionEligibleSourceVk(rawVk)) return false;
     if (g_isShuttingDown.load(std::memory_order_acquire)) return false;
     if (!DoesSubclassedWindowOwnForegroundInput()) return false;
@@ -3624,7 +3650,7 @@ static bool ShouldSuppressLowLevelMenuModifierKey(DWORD rawVk) {
     if (matchedRebind != nullptr) {
         const DWORD triggerVk = NormalizeModifierVkFromConfig(matchedRebind->toKey,
                                                               (matchedRebind->useCustomOutput ? matchedRebind->customOutputScanCode : 0));
-        if (ShouldMaskMenuModifierForRebind(*matchedRebind, rawVk, rawVk, true, false, triggerVk)) {
+        if (ShouldDeepSuppressModifierForRebind(*matchedRebind, rawVk, rawVk, true, false, triggerVk)) {
             return true;
         }
     }
@@ -3698,7 +3724,7 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int code, WPARAM wParam, LPARAM lPa
     }
 
     const bool suppressCapsLock = (rawVk == VK_CAPITAL) && IsCapsLockSuppressionEnabled();
-    if (!suppressCapsLock && !ShouldSuppressLowLevelMenuModifierKey(rawVk)) {
+    if (!suppressCapsLock && !ShouldDeepSuppressLowLevelModifierKey(rawVk)) {
         return CallNextHookEx(s_lowLevelKeyboardHook, code, wParam, lParam);
     }
 
@@ -3750,7 +3776,7 @@ static bool HasDeepSuppressionEligibleEnabledRebind() {
 
         const DWORD triggerVk = NormalizeModifierVkFromConfig(rebind.toKey,
                                                               (rebind.useCustomOutput ? rebind.customOutputScanCode : 0));
-        if (ShouldMaskMenuModifierForRebind(rebind, rebind.fromKey, rebind.fromKey, true, false, triggerVk)) {
+        if (ShouldDeepSuppressModifierForRebind(rebind, rebind.fromKey, rebind.fromKey, true, false, triggerVk)) {
             return true;
         }
     }
@@ -4101,6 +4127,17 @@ void QueueLowLevelExactModifierKeyupForTest(DWORD vk) { RecordLowLevelExactModif
 
 DWORD ResolveTrackedKeyboardVkFromMessageForTest(UINT uMsg, WPARAM wParam, LPARAM lParam) {
     return ResolveTrackedKeyboardVkFromMessage(uMsg, wParam, lParam);
+}
+
+bool IsDeepSuppressionEligibleSourceVkForTest(DWORD vk) { return IsDeepSuppressionEligibleSourceVk(vk); }
+
+bool ShouldDeepSuppressRebindForTest(DWORD fromKey, DWORD toKey) {
+    KeyRebind rebind{};
+    rebind.enabled = true;
+    rebind.fromKey = fromKey;
+    rebind.toKey = toKey;
+    const DWORD triggerVk = NormalizeModifierVkFromConfig(rebind.toKey, 0);
+    return ShouldDeepSuppressModifierForRebind(rebind, fromKey, fromKey, true, false, triggerVk);
 }
 #endif
 

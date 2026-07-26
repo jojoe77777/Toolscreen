@@ -1616,7 +1616,8 @@ void PopulateRichConfigFixture() {
     g_config.basicModeEnabled = false;
     g_config.restoreWindowedModeOnFullscreenExit = false;
     g_config.disableFullscreenPrompt = true;
-    g_config.disableConfigurePrompt = true;
+    g_config.startupIndicatorMode = 2;
+    g_config.startupIndicatorImagePath = "C:\\images\\startup.gif";
     g_config.guiHotkey = { VK_CONTROL, VK_SHIFT, 'G' };
     g_config.borderlessHotkey = { VK_MENU, VK_RETURN };
     g_config.autoBorderless = true;
@@ -1944,6 +1945,7 @@ void PopulateRichConfigFixture() {
     primaryMode.manualWidth = 1280;
     primaryMode.manualHeight = 720;
     primaryMode.background.selectedMode = "gradient";
+    primaryMode.background.imageFit = "fit";
     primaryMode.background.gradientStops = {
         { { 0.15f, 0.2f, 0.35f, 1.0f }, 0.0f },
         { { 0.7f, 0.4f, 0.2f, 1.0f }, 1.0f },
@@ -2057,7 +2059,8 @@ void VerifyRichGlobalSettings() {
     Expect(!g_config.basicModeEnabled, "Expected basicModeEnabled to roundtrip.");
     Expect(!g_config.restoreWindowedModeOnFullscreenExit, "Expected restoreWindowedModeOnFullscreenExit to roundtrip.");
     Expect(g_config.disableFullscreenPrompt, "Expected disableFullscreenPrompt to roundtrip.");
-    Expect(g_config.disableConfigurePrompt, "Expected disableConfigurePrompt to roundtrip.");
+    Expect(g_config.startupIndicatorMode == 2, "Expected startupIndicatorMode to roundtrip.");
+    Expect(g_config.startupIndicatorImagePath == "C:\\images\\startup.gif", "Expected startupIndicatorImagePath to roundtrip.");
     ExpectVectorEquals(g_config.guiHotkey, std::vector<DWORD>{ VK_CONTROL, VK_SHIFT, 'G' }, "Expected GUI hotkey to roundtrip.");
     ExpectVectorEquals(g_config.borderlessHotkey, std::vector<DWORD>{ VK_MENU, VK_RETURN }, "Expected borderless hotkey to roundtrip.");
     Expect(g_config.autoBorderless, "Expected autoBorderless to roundtrip.");
@@ -2104,6 +2107,7 @@ void VerifyRichModes() {
         Expect(primaryMode.manualWidth == 1280, "Expected primary mode manualWidth to roundtrip.");
         Expect(primaryMode.manualHeight == 720, "Expected primary mode manualHeight to roundtrip.");
         Expect(primaryMode.background.selectedMode == "gradient", "Expected primary mode background mode to roundtrip.");
+        Expect(primaryMode.background.imageFit == "fit", "Expected primary mode background image fit to roundtrip.");
         Expect(primaryMode.background.gradientStops.size() == 2, "Expected primary mode gradient stops to roundtrip.");
         ExpectColorNear(primaryMode.background.gradientStops[0].color, { 0.15f, 0.2f, 0.35f, 1.0f },
                   "Expected primary mode first gradient color to roundtrip.");
