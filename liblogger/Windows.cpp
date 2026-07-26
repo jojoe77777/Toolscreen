@@ -157,10 +157,10 @@ JNIEnv* AttachThreadWithName(const std::string& threadName) {
             args.name = const_cast<char*>(threadName.c_str());
             args.group = nullptr;
             
-            if (jvm->AttachCurrentThread(reinterpret_cast<void**>(&env), &args) != JNI_OK) {
+            if (jvm->AttachCurrentThreadAsDaemon(reinterpret_cast<void**>(&env), &args) != JNI_OK) {
                 return nullptr;
             }
-            
+
             return env;
         } else if (getEnvResult == JNI_OK) {
             // Already attached, try to rename

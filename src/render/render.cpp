@@ -1,4 +1,5 @@
 #include "render.h"
+#include "render/background_fit_layout.h"
 #include "platform/resource.h"
 #include "features/cursor_trail.h"
 #include "features/ninjabrain_data.h"
@@ -8,6 +9,7 @@
 #include "runtime/logic_thread.h"
 #include "mirror_thread.h"
 #include "obs_thread.h"
+#include "animated_texture_playback.h"
 #include "common/i18n.h"
 #include "common/ninjabrain_information_messages.h"
 #include "common/profiler.h"
@@ -516,6 +518,7 @@ GLuint g_backgroundProgram = 0;
 GLuint g_solidColorProgram = 0;
 GLuint g_imageRenderProgram = 0;
 GLuint g_passthroughProgram = 0;
+GLuint g_backgroundPassthroughProgram = 0;
 GLuint g_gradientProgram = 0;
 static GLuint g_staticBorderProgram = 0;
 static GLuint g_virtualCameraNv12Program = 0;
@@ -527,6 +530,7 @@ BackgroundShaderLocs g_backgroundShaderLocs;
 SolidColorShaderLocs g_solidColorShaderLocs;
 ImageRenderShaderLocs g_imageRenderShaderLocs;
 PassthroughShaderLocs g_passthroughShaderLocs;
+PassthroughShaderLocs g_backgroundPassthroughShaderLocs;
 GradientShaderLocs g_gradientShaderLocs;
 static struct {
     GLint shape = -1;
@@ -1887,6 +1891,29 @@ void main() {
     FragColor = vec4(texture(screenTexture, sampleCoord).rgb, u_opacity);
 })";
 
+const char* background_passthrough_frag_shader = R"(#version 330 core
+out vec4 FragColor;
+in vec2 TexCoord;
+in vec2 BaseTexCoord;
+uniform sampler2D screenTexture;
+uniform vec4 u_sourceRect;
+uniform float u_opacity;
+uniform vec2 u_sourceTexelSize;
+uniform vec2 u_sourcePixelSize;
+uniform int u_snapToSourcePixels;
+
+void main() {
+    vec2 sampleCoord = TexCoord;
+    if (u_snapToSourcePixels != 0) {
+        vec2 sourcePixel = floor(BaseTexCoord * u_sourcePixelSize);
+        vec2 sourcePixelMax = max(u_sourcePixelSize - vec2(1.0), vec2(0.0));
+        sourcePixel = clamp(sourcePixel, vec2(0.0), sourcePixelMax);
+        sampleCoord = u_sourceRect.xy + (sourcePixel + vec2(0.5)) * u_sourceTexelSize;
+    }
+    vec4 texColor = texture(screenTexture, sampleCoord);
+    FragColor = vec4(texColor.rgb, texColor.a * u_opacity);
+})";
+
 const char* gradient_frag_shader = R"(#version 330 core
 out vec4 FragColor;
 in vec2 TexCoord;
@@ -2040,13 +2067,14 @@ void InitializeShaders() {
     g_solidColorProgram = CreateShaderProgram(solid_vert_shader, solid_color_frag_shader);
     g_imageRenderProgram = CreateShaderProgram(passthrough_vert_shader, image_render_frag_shader);
     g_passthroughProgram = CreateShaderProgram(filter_vert_shader, passthrough_frag_shader);
+    g_backgroundPassthroughProgram = CreateShaderProgram(filter_vert_shader, background_passthrough_frag_shader);
     g_gradientProgram = CreateShaderProgram(passthrough_vert_shader, gradient_frag_shader);
     g_staticBorderProgram = CreateShaderProgram(passthrough_vert_shader, static_border_frag_shader);
     g_virtualCameraNv12Program = CreateShaderProgram(passthrough_vert_shader, virtual_camera_nv12_frag_shader);
 
     if (!g_filterProgram || !g_renderProgram || !g_renderPassthroughProgram || !g_backgroundProgram || !g_solidColorProgram ||
-        !g_imageRenderProgram || !g_passthroughProgram || !g_gradientProgram || !g_staticBorderProgram ||
-        !g_virtualCameraNv12Program) {
+        !g_imageRenderProgram || !g_passthroughProgram || !g_backgroundPassthroughProgram || !g_gradientProgram
+        || !g_staticBorderProgram || !g_virtualCameraNv12Program) {
         Log("FATAL: Failed to create one or more shader programs. Aborting shader initialization.");
         return;
     }
@@ -2094,6 +2122,13 @@ void InitializeShaders() {
     g_passthroughShaderLocs.sourceTexelSize = glGetUniformLocation(g_passthroughProgram, "u_sourceTexelSize");
     g_passthroughShaderLocs.sourcePixelSize = glGetUniformLocation(g_passthroughProgram, "u_sourcePixelSize");
     g_passthroughShaderLocs.snapToSourcePixels = glGetUniformLocation(g_passthroughProgram, "u_snapToSourcePixels");
+
+    g_backgroundPassthroughShaderLocs.screenTexture = glGetUniformLocation(g_backgroundPassthroughProgram, "screenTexture");
+    g_backgroundPassthroughShaderLocs.sourceRect = glGetUniformLocation(g_backgroundPassthroughProgram, "u_sourceRect");
+    g_backgroundPassthroughShaderLocs.opacity = glGetUniformLocation(g_backgroundPassthroughProgram, "u_opacity");
+    g_backgroundPassthroughShaderLocs.sourceTexelSize = glGetUniformLocation(g_backgroundPassthroughProgram, "u_sourceTexelSize");
+    g_backgroundPassthroughShaderLocs.sourcePixelSize = glGetUniformLocation(g_backgroundPassthroughProgram, "u_sourcePixelSize");
+    g_backgroundPassthroughShaderLocs.snapToSourcePixels = glGetUniformLocation(g_backgroundPassthroughProgram, "u_snapToSourcePixels");
 
     g_gradientShaderLocs.numStops = glGetUniformLocation(g_gradientProgram, "u_numStops");
     g_gradientShaderLocs.stopColors = glGetUniformLocation(g_gradientProgram, "u_stopColors");
@@ -2172,6 +2207,10 @@ void CleanupShaders() {
     if (g_passthroughProgram) {
         glDeleteProgram(g_passthroughProgram);
         g_passthroughProgram = 0;
+    }
+    if (g_backgroundPassthroughProgram) {
+        glDeleteProgram(g_backgroundPassthroughProgram);
+        g_backgroundPassthroughProgram = 0;
     }
     if (g_gradientProgram) {
         glDeleteProgram(g_gradientProgram);
@@ -2821,9 +2860,6 @@ void UploadDecodedImageToGPU(const DecodedImageData& imgData) {
     UploadDecodedImageToGPU_Internal(imgData);
 }
 
-template <typename TextureInstance>
-static void InitializeAnimatedTexturePlayback(TextureInstance& inst, size_t frameCount);
-
 void UploadDecodedImageToGPU_Internal(const DecodedImageData& imgData) {
     PROFILE_SCOPE_CAT("GPU Image Upload", "GPU Operations");
 
@@ -3117,7 +3153,7 @@ void InitializeGPUResources() {
     InitializeShaders();
 
     if (!g_filterProgram || !g_renderProgram || !g_renderPassthroughProgram || !g_backgroundProgram || !g_solidColorProgram ||
-        !g_imageRenderProgram || !g_passthroughProgram) {
+        !g_imageRenderProgram || !g_passthroughProgram || !g_backgroundPassthroughProgram) {
         Log("FATAL: Failed to create one or more shader programs. Aborting GPU resource initialization.");
         glBindFramebuffer(GL_FRAMEBUFFER, last_framebuffer);
         glBindVertexArray(last_vertex_array);
@@ -3341,105 +3377,6 @@ static void LogInvalidTextureSampleThrottled(const std::string& stage, GLuint te
     LogCategory("texture_ops", "Main Render: Invalid texture sample stage=" + stage + " tex=" + std::to_string(texture) +
                                    " valid=" + std::to_string(valid ? 1 : 0) + " actual=" + std::to_string(actualW) + "x" +
                                    std::to_string(actualH) + expected);
-}
-
-static int GetAnimatedTextureDelayMs(const std::vector<int>& frameDelays, size_t frameIndex) {
-    int delay = 100;
-    if (frameIndex < frameDelays.size() && frameDelays[frameIndex] > 0) {
-        delay = frameDelays[frameIndex];
-    }
-    if (delay < 10) {
-        delay = 100;
-    }
-    return delay;
-}
-
-template <typename TextureInstance>
-static void InitializeAnimatedTexturePlayback(TextureInstance& inst, size_t frameCount) {
-    inst.frameEndTimesMs.clear();
-    inst.frameEndTimesMs.reserve(frameCount);
-
-    uint64_t totalDurationMs = 0;
-    for (size_t frameIndex = 0; frameIndex < frameCount; ++frameIndex) {
-        totalDurationMs += static_cast<uint64_t>(GetAnimatedTextureDelayMs(inst.frameDelays, frameIndex));
-        inst.frameEndTimesMs.push_back(totalDurationMs);
-    }
-
-    inst.totalAnimationDurationMs = totalDurationMs;
-    inst.currentFrame = 0;
-    inst.lastFrameTime = std::chrono::steady_clock::now();
-}
-
-template <typename TextureInstance>
-struct AnimatedTextureResolveResult {
-    GLuint textureId = 0;
-    float sourceRect[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
-};
-
-template <typename TextureInstance>
-static AnimatedTextureResolveResult<TextureInstance> ResolveAnimatedTexture(TextureInstance& inst) {
-    AnimatedTextureResolveResult<TextureInstance> result;
-    result.textureId = inst.textureId;
-
-    if (!inst.isAnimated) {
-        return result;
-    }
-
-    const size_t frameCount = inst.frameCount > 1 ? static_cast<size_t>(inst.frameCount)
-                                                  : (!inst.frameTextures.empty() ? inst.frameTextures.size() : 1u);
-    if (frameCount <= 1) {
-        return result;
-    }
-
-    if (inst.frameEndTimesMs.size() != frameCount || inst.totalAnimationDurationMs == 0) {
-        InitializeAnimatedTexturePlayback(inst, frameCount);
-    }
-
-    if (inst.lastFrameTime.time_since_epoch().count() == 0) {
-        inst.lastFrameTime = std::chrono::steady_clock::now();
-    }
-
-    const auto now = std::chrono::steady_clock::now();
-    const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - inst.lastFrameTime).count();
-    const uint64_t cyclePositionMs = inst.totalAnimationDurationMs > 0
-                                         ? static_cast<uint64_t>((std::max)(int64_t{ 0 }, elapsedMs)) % inst.totalAnimationDurationMs
-                                         : 0;
-    auto frameIt = std::upper_bound(inst.frameEndTimesMs.begin(), inst.frameEndTimesMs.end(), cyclePositionMs);
-    size_t resolvedFrame = static_cast<size_t>(std::distance(inst.frameEndTimesMs.begin(), frameIt));
-    if (resolvedFrame >= frameCount) {
-        resolvedFrame = frameCount - 1;
-    }
-    inst.currentFrame = resolvedFrame;
-
-    if (!inst.frameTextures.empty()) {
-        const size_t framesPerTexture = static_cast<size_t>((std::max)(1, inst.framesPerTexture));
-        const size_t pageIndex = (std::min)(resolvedFrame / framesPerTexture, inst.frameTextures.size() - 1);
-        const size_t frameIndexWithinPage = resolvedFrame - pageIndex * framesPerTexture;
-        inst.textureId = inst.frameTextures[pageIndex];
-        result.textureId = inst.textureId;
-
-        int pageHeight = inst.textureStorageHeight > 0 ? inst.textureStorageHeight : inst.height;
-        if (pageIndex < inst.frameTextureHeights.size() && inst.frameTextureHeights[pageIndex] > 0) {
-            pageHeight = inst.frameTextureHeights[pageIndex];
-        }
-        const int frameHeight = inst.height > 0 ? inst.height : pageHeight;
-        if (pageHeight > 0 && frameHeight > 0) {
-            const float frameScale = static_cast<float>(frameHeight) / static_cast<float>(pageHeight);
-            result.sourceRect[1] = frameScale * static_cast<float>(frameIndexWithinPage);
-            result.sourceRect[3] = frameScale;
-        }
-        return result;
-    }
-
-    const int storageHeight = inst.textureStorageHeight > 0 ? inst.textureStorageHeight : inst.height;
-    const int frameHeight = inst.height > 0 ? inst.height : storageHeight;
-    if (storageHeight > 0 && frameHeight > 0) {
-        const float frameScale = static_cast<float>(frameHeight) / static_cast<float>(storageHeight);
-        result.sourceRect[1] = frameScale * static_cast<float>(resolvedFrame);
-        result.sourceRect[3] = frameScale;
-    }
-
-    return result;
 }
 
 struct TextureSampleabilityCacheEntry {
@@ -4748,6 +4685,8 @@ struct SameThreadOverlayState {
 
     bool showWelcomeToast = false;
     bool welcomeToastIsFullscreen = false;
+    int startupIndicatorMode = 1;
+    std::string startupIndicatorImagePath;
     bool showRebindIndicator = false;
     bool showCursorTrail = false;
     bool modeHasMirrors = false;
@@ -5405,7 +5344,9 @@ static bool RenderSameThreadOverlayPass(const SameThreadOverlayState& request, c
     RenderSameThreadImGui(request, renderNinjabrainOverlay);
     if (request.showWelcomeToast) {
         PROFILE_SCOPE_CAT("Render Welcome Toast", "Rendering");
-        RenderWelcomeToast(request.welcomeToastIsFullscreen);
+        RenderWelcomeToast(request.welcomeToastIsFullscreen,
+                           request.startupIndicatorMode,
+                           request.startupIndicatorImagePath);
     }
     return !activeMirrors.empty() || !eyeZoomSlideOutMirrors->empty() || !transitionSlideOutMirrors->empty() || !activeImages.empty() ||
             !activeWindowOverlays.empty() || !activeBrowserOverlays.empty() || request.shouldRenderGui || request.showPerformanceOverlay || request.showProfiler ||
@@ -5750,25 +5691,26 @@ void CaptureSameThreadVirtualCameraFrame() {
     slot->height = outH;
 }
 
-static GLuint ResolveModeBackgroundTextureId(const std::string& modeId, float outSourceRect[4] = nullptr) {
+struct ResolvedBackgroundTexture {
+    GLuint textureId = 0;
+    float sourceRect[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
+    int width = 0;
+    int height = 0;
+};
+
+static ResolvedBackgroundTexture ResolveModeBackgroundTexture(const std::string& modeId) {
+    ResolvedBackgroundTexture result;
     std::lock_guard<std::mutex> bgLock(g_backgroundTexturesMutex);
     auto bgTexIt = g_backgroundTextures.find(modeId);
-    if (bgTexIt == g_backgroundTextures.end()) {
-        if (outSourceRect) {
-            outSourceRect[0] = 0.0f;
-            outSourceRect[1] = 0.0f;
-            outSourceRect[2] = 1.0f;
-            outSourceRect[3] = 1.0f;
-        }
-        return 0;
-    }
+    if (bgTexIt == g_backgroundTextures.end()) { return result; }
 
     BackgroundTextureInstance& bgInst = bgTexIt->second;
     const auto animatedTexture = ResolveAnimatedTexture(bgInst);
-    if (outSourceRect) {
-        memcpy(outSourceRect, animatedTexture.sourceRect, sizeof(animatedTexture.sourceRect));
-    }
-    return animatedTexture.textureId;
+    result.textureId = animatedTexture.textureId;
+    memcpy(result.sourceRect, animatedTexture.sourceRect, sizeof(result.sourceRect));
+    result.width = bgInst.width;
+    result.height = bgInst.height;
+    return result;
 }
 
 static void DrawFullscreenSolidColor(const Color& color) {
@@ -5833,20 +5775,67 @@ static void DrawFullscreenPassthroughTexture(GLuint textureId, float opacity) {
     glDrawArrays(GL_TRIANGLES, 0, 6);
 }
 
-static void DrawFullscreenPassthroughTexture(GLuint textureId, const float sourceRect[4], float opacity) {
-    if (textureId == 0) { return; }
+static void DrawBackgroundImageToSurface(const BackgroundConfig& bg, GLuint textureId, const float sourceRect[4], int imageW, int imageH,
+                                         int fullW, int fullH, float opacity) {
+    if (textureId == 0 || fullW <= 0 || fullH <= 0) { return; }
 
-    glUseProgram(g_passthroughProgram);
+    const BackgroundImageFit fit = ParseBackgroundImageFit(bg.imageFit);
+
+    glUseProgram(g_backgroundPassthroughProgram);
     glActiveTexture(GL_TEXTURE0);
     BindTextureDirect(GL_TEXTURE_2D, textureId);
-    glUniform4f(g_passthroughShaderLocs.sourceRect, sourceRect[0], sourceRect[1], sourceRect[2], sourceRect[3]);
-    glUniform1f(g_passthroughShaderLocs.opacity, opacity);
-    glUniform2f(g_passthroughShaderLocs.sourceTexelSize, 1.0f, 1.0f);
-    glUniform2f(g_passthroughShaderLocs.sourcePixelSize, 1.0f, 1.0f);
-    glUniform1i(g_passthroughShaderLocs.snapToSourcePixels, 0);
+    glUniform1f(g_backgroundPassthroughShaderLocs.opacity, opacity);
+    glUniform2f(g_backgroundPassthroughShaderLocs.sourceTexelSize, 1.0f, 1.0f);
+    glUniform2f(g_backgroundPassthroughShaderLocs.sourcePixelSize, 1.0f, 1.0f);
+    glUniform1i(g_backgroundPassthroughShaderLocs.snapToSourcePixels, 0);
     glBindVertexArray(g_fullscreenQuadVAO);
+
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    auto drawDestRect = [&](const BackgroundFitRect& dst) {
+        const int clippedLeft = (std::max)(0, dst.left);
+        const int clippedBottom = (std::max)(0, dst.bottom);
+        const int clippedRight = (std::min)(fullW, dst.right);
+        const int clippedTop = (std::min)(fullH, dst.top);
+        if (clippedRight <= clippedLeft || clippedTop <= clippedBottom) { return; }
+
+        const float dstW = static_cast<float>(dst.right - dst.left);
+        const float dstH = static_cast<float>(dst.top - dst.bottom);
+        if (dstW <= 0.0f || dstH <= 0.0f) { return; }
+
+        const float clippedSourceRect[4] = {
+            sourceRect[0] + (static_cast<float>(clippedLeft - dst.left) / dstW) * sourceRect[2],
+            sourceRect[1] + (static_cast<float>(clippedBottom - dst.bottom) / dstH) * sourceRect[3],
+            (static_cast<float>(clippedRight - clippedLeft) / dstW) * sourceRect[2],
+            (static_cast<float>(clippedTop - clippedBottom) / dstH) * sourceRect[3],
+        };
+
+        glUniform4f(g_backgroundPassthroughShaderLocs.sourceRect, clippedSourceRect[0], clippedSourceRect[1], clippedSourceRect[2],
+                    clippedSourceRect[3]);
+        if (oglViewport) {
+            oglViewport(clippedLeft, clippedBottom, clippedRight - clippedLeft, clippedTop - clippedBottom);
+        } else {
+            glViewport(clippedLeft, clippedBottom, clippedRight - clippedLeft, clippedTop - clippedBottom);
+        }
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+    };
+
+    if (fit == BackgroundImageFit::Tile) {
+        for (const BackgroundFitRect& dst :
+             ComputeBackgroundTileRects(bg.imageTileScale, bg.imageTileSpacing, imageW, imageH, fullW, fullH)) {
+            drawDestRect(dst);
+        }
+    } else {
+        drawDestRect(ResolveBackgroundImageDestRect(fit, bg.imageCenterScale, imageW, imageH, fullW, fullH));
+    }
+
     glDisable(GL_BLEND);
-    glDrawArrays(GL_TRIANGLES, 0, 6);
+    if (oglViewport) {
+        oglViewport(0, 0, fullW, fullH);
+    } else {
+        glViewport(0, 0, fullW, fullH);
+    }
 }
 
 static void RenderSameThreadObsBackground(const ModeConfig* modeToRender, int fullW, int fullH) {
@@ -5854,10 +5843,11 @@ static void RenderSameThreadObsBackground(const ModeConfig* modeToRender, int fu
 
     const BackgroundConfig& bg = modeToRender->background;
     if (bg.selectedMode == "image") {
-        float sourceRect[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
-        const GLuint backgroundTexture = ResolveModeBackgroundTextureId(modeToRender->id, sourceRect);
-        if (backgroundTexture != 0) {
-            DrawFullscreenPassthroughTexture(backgroundTexture, sourceRect, 1.0f);
+        const ResolvedBackgroundTexture resolved = ResolveModeBackgroundTexture(modeToRender->id);
+        if (resolved.textureId != 0) {
+            DrawFullscreenSolidColor(bg.color);
+            DrawBackgroundImageToSurface(bg, resolved.textureId, resolved.sourceRect, resolved.width, resolved.height, fullW, fullH,
+                                         1.0f);
             return;
         }
     }
@@ -5871,11 +5861,12 @@ static void RenderSameThreadObsBackground(const ModeConfig* modeToRender, int fu
 }
 
 static void RenderSameThreadObsBackgroundConfig(const BackgroundConfig& bg, GLuint backgroundTexture, const float sourceRect[4], int fullW,
-                                               int fullH) {
+                                               int fullH, int imageW = 0, int imageH = 0) {
     if (fullW <= 0 || fullH <= 0) { return; }
 
     if (bg.selectedMode == "image" && backgroundTexture != 0) {
-        DrawFullscreenPassthroughTexture(backgroundTexture, sourceRect, 1.0f);
+        DrawFullscreenSolidColor(bg.color);
+        DrawBackgroundImageToSurface(bg, backgroundTexture, sourceRect, imageW, imageH, fullW, fullH, 1.0f);
         return;
     }
 
@@ -6001,23 +5992,33 @@ bool RenderSameThreadObsFrame(const ModeConfig* modeToRender, const GLState& s, 
 
     GLuint obsBackgroundTexture = 0;
     float obsBackgroundSourceRect[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
+    int obsBackgroundImageW = 0;
+    int obsBackgroundImageH = 0;
     {
         PROFILE_SCOPE_CAT("Resolve OBS Background Texture", "OBS");
+        const std::string* resolveModeId = nullptr;
         if (useFromBackground) {
-            if (fromBackground.selectedMode == "image") {
-                obsBackgroundTexture = ResolveModeBackgroundTextureId(fromModeId, obsBackgroundSourceRect);
-            }
+            if (fromBackground.selectedMode == "image") { resolveModeId = &fromModeId; }
         } else if (modeToRender->background.selectedMode == "image") {
-            obsBackgroundTexture = ResolveModeBackgroundTextureId(modeToRender->id, obsBackgroundSourceRect);
+            resolveModeId = &modeToRender->id;
+        }
+        if (resolveModeId) {
+            const ResolvedBackgroundTexture resolved = ResolveModeBackgroundTexture(*resolveModeId);
+            obsBackgroundTexture = resolved.textureId;
+            memcpy(obsBackgroundSourceRect, resolved.sourceRect, sizeof(obsBackgroundSourceRect));
+            obsBackgroundImageW = resolved.width;
+            obsBackgroundImageH = resolved.height;
         }
     }
 
     {
         PROFILE_SCOPE_CAT("Render OBS Background", "OBS");
         if (useFromBackground) {
-            RenderSameThreadObsBackgroundConfig(fromBackground, obsBackgroundTexture, obsBackgroundSourceRect, fullW, fullH);
+            RenderSameThreadObsBackgroundConfig(fromBackground, obsBackgroundTexture, obsBackgroundSourceRect, fullW, fullH,
+                                                obsBackgroundImageW, obsBackgroundImageH);
         } else {
-            RenderSameThreadObsBackgroundConfig(modeToRender->background, obsBackgroundTexture, obsBackgroundSourceRect, fullW, fullH);
+            RenderSameThreadObsBackgroundConfig(modeToRender->background, obsBackgroundTexture, obsBackgroundSourceRect, fullW, fullH,
+                                                obsBackgroundImageW, obsBackgroundImageH);
         }
     }
 
@@ -6130,6 +6131,8 @@ bool RenderSameThreadObsFrame(const ModeConfig* modeToRender, const GLState& s, 
             request.textureGridModeHeight = 0;
             request.showWelcomeToast = false;
             request.welcomeToastIsFullscreen = false;
+            request.startupIndicatorMode = 0;
+            request.startupIndicatorImagePath.clear();
             request.showCursorTrail = cfgSnap->cursorTrail.enabled && IsCursorVisible();
             request.modeHasMirrors = ModeHasAnyMirrorSources(*modeToRender);
             request.modeHasImages = g_imageOverlaysVisible.load(std::memory_order_acquire) &&
@@ -6905,6 +6908,8 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
         BackgroundConfig fromBackground;
         BorderConfig fromBorder;
         GLuint fromBgTex = 0;
+        int fromBgW = 0;
+        int fromBgH = 0;
         float fromBgSourceRect[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
         bool useFromBackground = false;
 
@@ -6926,11 +6931,15 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
                     const auto animatedTexture = ResolveAnimatedTexture(bgInst);
                     fromBgTex = animatedTexture.textureId;
                     memcpy(fromBgSourceRect, animatedTexture.sourceRect, sizeof(fromBgSourceRect));
+                    fromBgW = bgInst.width;
+                    fromBgH = bgInst.height;
                 }
             }
         }
 
         GLuint bgTex = 0;
+        int bgW = 0;
+        int bgH = 0;
         float bgSourceRect[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
         {
             PROFILE_SCOPE_CAT("Background Texture Lookup", "Rendering");
@@ -6941,27 +6950,36 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
                 const auto animatedTexture = ResolveAnimatedTexture(bgInst);
                 bgTex = animatedTexture.textureId;
                 memcpy(bgSourceRect, animatedTexture.sourceRect, sizeof(bgSourceRect));
+                bgW = bgInst.width;
+                bgH = bgInst.height;
             }
         }
 
-        auto drawTexturedRegion = [&](int rx, int ry_gl, int rw, int rh, const float sourceRect[4]) {
+        auto drawTexturedDestRegionClipped = [&](int clipX, int clipYGl, int clipW, int clipH, int dstLeft, int dstBottom,
+                                                 int dstRight, int dstTop, const float sourceRect[4]) {
+            if (clipW <= 0 || clipH <= 0 || dstRight <= dstLeft || dstTop <= dstBottom) return;
+
+            const int rx = (std::max)(clipX, dstLeft);
+            const int ryGl = (std::max)(clipYGl, dstBottom);
+            const int rr = (std::min)(clipX + clipW, dstRight);
+            const int rt = (std::min)(clipYGl + clipH, dstTop);
+            const int rw = rr - rx;
+            const int rh = rt - ryGl;
             if (rw <= 0 || rh <= 0) return;
-            glScissor(rx, ry_gl, rw, rh);
 
-            float baseU1 = static_cast<float>(rx) / fullW;
-            float baseU2 = static_cast<float>(rx + rw) / fullW;
-            float baseV1 = static_cast<float>(ry_gl) / fullH;
-            float baseV2 = static_cast<float>(ry_gl + rh) / fullH;
+            glScissor(rx, ryGl, rw, rh);
 
-            float u1 = sourceRect[0] + baseU1 * sourceRect[2];
-            float u2 = sourceRect[0] + baseU2 * sourceRect[2];
-            float v1 = sourceRect[1] + baseV1 * sourceRect[3];
-            float v2 = sourceRect[1] + baseV2 * sourceRect[3];
+            const float dstW = static_cast<float>(dstRight - dstLeft);
+            const float dstH = static_cast<float>(dstTop - dstBottom);
+            float u1 = sourceRect[0] + (static_cast<float>(rx - dstLeft) / dstW) * sourceRect[2];
+            float u2 = sourceRect[0] + (static_cast<float>(rr - dstLeft) / dstW) * sourceRect[2];
+            float v1 = sourceRect[1] + (static_cast<float>(ryGl - dstBottom) / dstH) * sourceRect[3];
+            float v2 = sourceRect[1] + (static_cast<float>(rt - dstBottom) / dstH) * sourceRect[3];
 
-            float nx1 = baseU1 * 2.0f - 1.0f;
-            float nx2 = baseU2 * 2.0f - 1.0f;
-            float ny1 = baseV1 * 2.0f - 1.0f;
-            float ny2 = baseV2 * 2.0f - 1.0f;
+            float nx1 = (static_cast<float>(rx) / fullW) * 2.0f - 1.0f;
+            float nx2 = (static_cast<float>(rr) / fullW) * 2.0f - 1.0f;
+            float ny1 = (static_cast<float>(ryGl) / fullH) * 2.0f - 1.0f;
+            float ny2 = (static_cast<float>(rt) / fullH) * 2.0f - 1.0f;
 
             float quad[] = { nx1, ny1, u1, v1, nx2, ny1, u2, v1, nx2, ny2, u2, v2, nx1, ny1, u1, v1, nx2, ny2, u2, v2, nx1, ny2, u1, v2 };
             glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(quad), quad);
@@ -7001,7 +7019,8 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
             glDrawArrays(GL_TRIANGLES, 0, 6);
         };
 
-        auto renderBackgroundImage = [&](GLuint texId, const float sourceRect[4], float opacity) {
+        auto renderBackgroundImage = [&](const BackgroundConfig& bg, GLuint texId, const float sourceRect[4], int imageW, int imageH,
+                                         float opacity) {
             if (texId == 0) return;
 
             PROFILE_SCOPE_CAT("Scissor Background Image", "Rendering");
@@ -7040,24 +7059,36 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
             glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
             glBlendColor(0.0f, 0.0f, 0.0f, 0.0f);
 
-            if (opacity < 1.0f) {
-                glEnable(GL_BLEND);
-                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-            } else {
-                glDisable(GL_BLEND);
-            }
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
             int vpLeft = finalX + letterboxExtendX;
             int vpRight = finalX + finalW - letterboxExtendX;
             int vpBottom_gl = finalY_gl + letterboxExtendY;
             int vpTop_gl = finalY_gl + finalH - letterboxExtendY;
 
-            drawTexturedRegion(0, 0, fullW, vpBottom_gl, sourceRect);
-            drawTexturedRegion(0, vpTop_gl, fullW, fullH - vpTop_gl, sourceRect);
-            drawTexturedRegion(0, vpBottom_gl, vpLeft, vpTop_gl - vpBottom_gl, sourceRect);
-            drawTexturedRegion(vpRight, vpBottom_gl, fullW - vpRight, vpTop_gl - vpBottom_gl, sourceRect);
+            const BackgroundImageFit fit = ParseBackgroundImageFit(bg.imageFit);
+
+            auto drawDestRect = [&](const BackgroundFitRect& dst) {
+                drawTexturedDestRegionClipped(0, 0, fullW, vpBottom_gl, dst.left, dst.bottom, dst.right, dst.top, sourceRect);
+                drawTexturedDestRegionClipped(0, vpTop_gl, fullW, fullH - vpTop_gl, dst.left, dst.bottom, dst.right, dst.top, sourceRect);
+                drawTexturedDestRegionClipped(0, vpBottom_gl, vpLeft, vpTop_gl - vpBottom_gl, dst.left, dst.bottom, dst.right, dst.top,
+                                              sourceRect);
+                drawTexturedDestRegionClipped(vpRight, vpBottom_gl, fullW - vpRight, vpTop_gl - vpBottom_gl, dst.left, dst.bottom,
+                                              dst.right, dst.top, sourceRect);
+            };
+
+            if (fit == BackgroundImageFit::Tile) {
+                for (const BackgroundFitRect& dst :
+                     ComputeBackgroundTileRects(bg.imageTileScale, bg.imageTileSpacing, imageW, imageH, fullW, fullH)) {
+                    drawDestRect(dst);
+                }
+            } else {
+                drawDestRect(ResolveBackgroundImageDestRect(fit, bg.imageCenterScale, imageW, imageH, fullW, fullH));
+            }
 
             glDisable(GL_SCISSOR_TEST);
+            glDisable(GL_BLEND);
 
             BindTextureDirect(GL_TEXTURE_2D, savedTexture);
             if (SupportsSamplerObjects()) { glBindSampler(0, static_cast<GLuint>(savedSampler)); }
@@ -7162,7 +7193,8 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
         if (useFromBackground) {
             PROFILE_SCOPE_CAT("Render From Background", "Rendering");
             if (fromBackground.selectedMode == "image" && fromBgTex != 0) {
-                renderBackgroundImage(fromBgTex, fromBgSourceRect, 1.0f);
+                renderBackgroundColor(fromBackground.color, 1.0f);
+                renderBackgroundImage(fromBackground, fromBgTex, fromBgSourceRect, fromBgW, fromBgH, 1.0f);
             } else if (fromBackground.selectedMode == "gradient" && fromBackground.gradientStops.size() >= 2) {
                 renderBackgroundGradient(fromBackground, 1.0f);
             } else {
@@ -7173,7 +7205,8 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
         if (!useFromBackground) {
             PROFILE_SCOPE_CAT("Render To Background", "Rendering");
             if (modeToRender->background.selectedMode == "image" && bgTex != 0) {
-                renderBackgroundImage(bgTex, bgSourceRect, 1.0f);
+                renderBackgroundColor(modeToRender->background.color, 1.0f);
+                renderBackgroundImage(modeToRender->background, bgTex, bgSourceRect, bgW, bgH, 1.0f);
             } else if (modeToRender->background.selectedMode == "gradient" && modeToRender->background.gradientStops.size() >= 2) {
                 renderBackgroundGradient(modeToRender->background, 1.0f);
             } else {
@@ -8513,6 +8546,7 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
     const bool wantRebindIndicator = IsRebindIndicatorVisible();
     const bool isFullscreenMode = EqualsIgnoreCase(modeToRender->id, "Fullscreen");
 
+    const int startupIndicatorMode = configSnap ? configSnap->startupIndicatorMode : 1;
     bool wantWelcomeToast = false;
     {
         static bool s_prevFullscreen = false;
@@ -8521,7 +8555,8 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
         if (isFullscreenMode && !s_prevFullscreen) { s_fullscreenEnterTime = now; }
         s_prevFullscreen = isFullscreenMode;
 
-        if (isFullscreenMode && !g_configurePromptDismissedThisSession.load(std::memory_order_relaxed)) {
+        if (isFullscreenMode && startupIndicatorMode != 0 &&
+            !g_configurePromptDismissedThisSession.load(std::memory_order_relaxed)) {
             constexpr float kHoldSeconds = 10.0f;
             constexpr float kFadeSeconds = 1.5f;
             const float elapsed = std::chrono::duration_cast<std::chrono::duration<float>>(now - s_fullscreenEnterTime).count();
@@ -8634,6 +8669,8 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
             PROFILE_SCOPE_CAT("Populate Overlay Element State", "Rendering");
             target.welcomeToastIsFullscreen = isFullscreenMode;
             target.showWelcomeToast = wantWelcomeToast;
+            target.startupIndicatorMode = startupIndicatorMode;
+            target.startupIndicatorImagePath = configSnap ? configSnap->startupIndicatorImagePath : std::string{};
             target.showRebindIndicator = wantRebindIndicator;
             target.showCursorTrail = wantCursorTrail;
             target.modeHasMirrors = hasMirrors;

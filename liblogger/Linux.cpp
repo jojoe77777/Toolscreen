@@ -173,7 +173,7 @@ JNIEnv* AttachThreadWithName(JavaVM* jvm, const char* threadName, bool* needsDet
 		args.name = const_cast<char*>(threadName);
 		args.group = nullptr;
 
-		if (jvm->AttachCurrentThread(reinterpret_cast<void**>(&env), &args) != JNI_OK || env == nullptr) {
+		if (jvm->AttachCurrentThreadAsDaemon(reinterpret_cast<void**>(&env), &args) != JNI_OK || env == nullptr) {
 			return nullptr;
 		}
 

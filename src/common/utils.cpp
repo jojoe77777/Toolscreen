@@ -2748,17 +2748,17 @@ bool CheckHotkeyMatch(const std::vector<DWORD>& keys, WPARAM wParam, const std::
         for (DWORD excluded_key : exclusionKeys) {
             bool excludedPressed = false;
             if (excluded_key == VK_CONTROL) {
-                excludedPressed = ctrl_down_now;
+                excludedPressed = ctrl_down_now || IsKeyCurrentlyLowLevelSuppressed(VK_LCONTROL) || IsKeyCurrentlyLowLevelSuppressed(VK_RCONTROL);
             } else if (excluded_key == VK_LCONTROL) {
-                excludedPressed = lctrl_down;
+                excludedPressed = lctrl_down || IsKeyCurrentlyLowLevelSuppressed(VK_LCONTROL);
             } else if (excluded_key == VK_RCONTROL) {
-                excludedPressed = rctrl_down;
+                excludedPressed = rctrl_down || IsKeyCurrentlyLowLevelSuppressed(VK_RCONTROL);
             } else if (excluded_key == VK_SHIFT) {
-                excludedPressed = shift_down_now;
+                excludedPressed = shift_down_now || IsKeyCurrentlyLowLevelSuppressed(VK_LSHIFT) || IsKeyCurrentlyLowLevelSuppressed(VK_RSHIFT);
             } else if (excluded_key == VK_LSHIFT) {
-                excludedPressed = lshift_down;
+                excludedPressed = lshift_down || IsKeyCurrentlyLowLevelSuppressed(VK_LSHIFT);
             } else if (excluded_key == VK_RSHIFT) {
-                excludedPressed = rshift_down;
+                excludedPressed = rshift_down || IsKeyCurrentlyLowLevelSuppressed(VK_RSHIFT);
             } else if (excluded_key == VK_MENU) {
                 excludedPressed = alt_down_now || IsKeyCurrentlyLowLevelSuppressed(VK_LMENU) || IsKeyCurrentlyLowLevelSuppressed(VK_RMENU);
             } else if (excluded_key == VK_LMENU) {

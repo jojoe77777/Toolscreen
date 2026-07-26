@@ -178,6 +178,10 @@ struct GradientConfig {
 struct BackgroundConfig {
     std::string selectedMode = "color";
     std::string image;
+    std::string imageFit = ConfigDefaults::BACKGROUND_IMAGE_FIT;
+    float imageCenterScale = ConfigDefaults::BACKGROUND_IMAGE_CENTER_SCALE;
+    float imageTileScale = ConfigDefaults::BACKGROUND_IMAGE_TILE_SCALE;
+    int imageTileSpacing = ConfigDefaults::BACKGROUND_IMAGE_TILE_SPACING;
     Color color;
 
     std::vector<GradientColorStop> gradientStops;
@@ -1027,6 +1031,8 @@ struct Config {
     bool restoreWindowedModeOnFullscreenExit = ConfigDefaults::CONFIG_RESTORE_WINDOWED_MODE_ON_FULLSCREEN_EXIT;
     bool disableFullscreenPrompt = false;
     bool disableConfigurePrompt = false;
+    int startupIndicatorMode = ConfigDefaults::STARTUP_INDICATOR_MODE;
+    std::string startupIndicatorImagePath = ConfigDefaults::STARTUP_INDICATOR_IMAGE_PATH;
     NinjabrainOverlayConfig ninjabrainOverlay;
 };
 
@@ -1341,11 +1347,12 @@ void ClearGuiTabSelectionOverride();
 
 extern std::atomic<bool> g_welcomeToastVisible;
 extern std::atomic<bool> g_configurePromptDismissedThisSession;
-void RenderWelcomeToast(bool isFullscreen);
+void RenderWelcomeToast(bool isFullscreen, int startupIndicatorMode, const std::string& customImagePath);
 
 void RenderRebindIndicator();
 bool IsRebindIndicatorVisible();
 void InvalidateRebindIndicatorTexture();
+void InvalidateStartupIndicatorTexture();
 
 void HandleConfigLoadFailed(HDC hDc, BOOL (*oWglSwapBuffers)(HDC));
 void RenderImGuiWithStateProtection(bool useFullProtection);
