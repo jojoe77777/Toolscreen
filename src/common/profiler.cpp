@@ -201,6 +201,12 @@ void Profiler::SubmitEvent(const char* sectionName, double durationMs, uint8_t d
     buffer.writeIndex.store(nextWritePos, std::memory_order_release);
 }
 
+void Profiler::SubmitExternalTiming(const char* sectionName, double durationMs) {
+    if (!m_enabled.load(std::memory_order_relaxed) || !sectionName) { return; }
+    ThreadRingBuffer& buffer = GetThreadBuffer();
+    SubmitEvent(sectionName, durationMs, static_cast<uint8_t>(buffer.scopeStack.size()), buffer);
+}
+
 void Profiler::StartProcessingThread() {
     if (m_processingThreadRunning.load()) return;
 

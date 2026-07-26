@@ -1357,6 +1357,8 @@ void InvalidateStartupIndicatorTexture();
 void HandleConfigLoadFailed(HDC hDc, BOOL (*oWglSwapBuffers)(HDC));
 void RenderImGuiWithStateProtection(bool useFullProtection);
 void SyncImGuiDisplayMetrics(HWND hwnd);
+float ComputeGuiScaleFactorFromCachedWindowSize();
+void ConfigureImGuiFontsAndStyleForCurrentContext(float scaleFactor);
 void SaveConfig();
 void SaveConfigImmediate();
 bool WaitForConfigSaveIdle(int timeoutMs = 3000);

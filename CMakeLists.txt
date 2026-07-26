@@ -199,6 +199,15 @@ FetchContent_Declare(
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 
+# Header-only. The DLL resolves every Vulkan entry point at runtime, so this
+# does not introduce a Vulkan SDK or vulkan-1.dll runtime dependency.
+FetchContent_Declare(
+    vulkan_headers
+    GIT_REPOSITORY https://github.com/KhronosGroup/Vulkan-Headers.git
+    GIT_TAG v1.4.350
+    GIT_SHALLOW TRUE
+)
+
 FetchContent_GetProperties(glew)
 if(NOT glew_POPULATED)
     FetchContent_Populate(glew)
@@ -240,6 +249,11 @@ if(NOT webview2_sdk_POPULATED)
     FetchContent_Populate(webview2_sdk)
 endif()
 
+FetchContent_GetProperties(vulkan_headers)
+if(NOT vulkan_headers_POPULATED)
+    FetchContent_Populate(vulkan_headers)
+endif()
+
 set(TOOLSCREEN_WEBVIEW2_NATIVE_DIR "${webview2_sdk_SOURCE_DIR}/build/native")
 set(TOOLSCREEN_WEBVIEW2_INCLUDE_DIR "${TOOLSCREEN_WEBVIEW2_NATIVE_DIR}/include")
 if(CMAKE_SIZEOF_VOID_P EQUAL 8)
@@ -267,6 +281,7 @@ add_library(toolscreen_imgui STATIC
     ${TOOLSCREEN_IMGUI_DIR}/imgui_demo.cpp
     ${TOOLSCREEN_IMGUI_DIR}/misc/cpp/imgui_stdlib.cpp
     ${TOOLSCREEN_IMGUI_DIR}/backends/imgui_impl_opengl3.cpp
+    ${TOOLSCREEN_IMGUI_DIR}/backends/imgui_impl_vulkan.cpp
     ${TOOLSCREEN_IMGUI_DIR}/backends/imgui_impl_win32.cpp
 )
 
@@ -274,9 +289,13 @@ target_include_directories(toolscreen_imgui PUBLIC
     ${TOOLSCREEN_IMGUI_DIR}
     ${TOOLSCREEN_IMGUI_DIR}/backends
     ${TOOLSCREEN_IMGUI_DIR}/misc/cpp
+    ${vulkan_headers_SOURCE_DIR}/include
 )
 
-target_compile_definitions(toolscreen_imgui PUBLIC IMGUI_IMPL_OPENGL_LOADER_GLEW)
+target_compile_definitions(toolscreen_imgui PUBLIC
+    IMGUI_IMPL_OPENGL_LOADER_GLEW
+    IMGUI_IMPL_VULKAN_NO_PROTOTYPES
+)
 
 target_link_libraries(toolscreen_imgui PUBLIC
     Toolscreen::glew
@@ -304,6 +323,7 @@ set(TOOLSCREEN_MODULE_DIRS
     hooks
     platform
     render
+    render/vulkan
     runtime
     third_party
 )
@@ -362,6 +382,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     ${TOOLSCREEN_WEBVIEW2_INCLUDE_DIR}
     ${nlohmann_json_SOURCE_DIR}/single_include
     ${cpp_httplib_SOURCE_DIR}
+    ${vulkan_headers_SOURCE_DIR}/include
 )
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE
@@ -622,6 +643,52 @@ if(TOOLSCREEN_ENABLE_JAR_PACKAGING OR TOOLSCREEN_ENABLE_EXE_PACKAGING)
     FetchContent_GetProperties(easyinjectbundled)
     if(NOT easyinjectbundled_POPULATED)
         FetchContent_Populate(easyinjectbundled)
+    endif()
+
+    # EasyInjectBundled normally waits for Minecraft's first visible window and
+    # then waits another 500 ms before loading bundled DLLs. Minecraft 26.2 can
+    # create its Vulkan instance and device before that window exists, which is
+    # too late for Toolscreen to observe proc-address resolution. Patch only the
+    # branded Toolscreen watcher so it injects as soon as the matching JVM is
+    # identified; retain the upstream timing for every other brand.
+    set(TOOLSCREEN_EASYINJECT_MAIN_JAVA
+        "${easyinjectbundled_SOURCE_DIR}/src/main/java/com/easyinject/Main.java")
+    file(READ "${TOOLSCREEN_EASYINJECT_MAIN_JAVA}" TOOLSCREEN_EASYINJECT_MAIN_CONTENT)
+    if(NOT TOOLSCREEN_EASYINJECT_MAIN_CONTENT MATCHES
+       "Toolscreen early injection: matching JVM identified")
+        set(TOOLSCREEN_EASYINJECT_WINDOW_WAIT_ANCHOR
+            "                if (!loggedWindowWaitForCurrentTarget) {")
+        string(CONCAT TOOLSCREEN_EASYINJECT_WINDOW_WAIT_REPLACEMENT
+            "                if (\"Toolscreen\".equalsIgnoreCase(PROJECT_NAME)) {\n"
+            "                    log(\"[\" + PROJECT_NAME + \"] Toolscreen early injection: matching JVM identified; skipping visible-window wait\");\n"
+            "                    break;\n"
+            "                }\n\n"
+            "                if (!loggedWindowWaitForCurrentTarget) {")
+        string(REPLACE
+            "${TOOLSCREEN_EASYINJECT_WINDOW_WAIT_ANCHOR}"
+            "${TOOLSCREEN_EASYINJECT_WINDOW_WAIT_REPLACEMENT}"
+            TOOLSCREEN_EASYINJECT_MAIN_CONTENT
+            "${TOOLSCREEN_EASYINJECT_MAIN_CONTENT}")
+
+        set(TOOLSCREEN_EASYINJECT_POST_WINDOW_DELAY_ANCHOR
+            "            sleep(500);\n\n            // Inject logger DLL first")
+        string(CONCAT TOOLSCREEN_EASYINJECT_POST_WINDOW_DELAY_REPLACEMENT
+            "            if (!\"Toolscreen\".equalsIgnoreCase(PROJECT_NAME)) {\n"
+            "                sleep(500);\n"
+            "            }\n\n"
+            "            // Inject logger DLL first")
+        string(REPLACE
+            "${TOOLSCREEN_EASYINJECT_POST_WINDOW_DELAY_ANCHOR}"
+            "${TOOLSCREEN_EASYINJECT_POST_WINDOW_DELAY_REPLACEMENT}"
+            TOOLSCREEN_EASYINJECT_MAIN_CONTENT
+            "${TOOLSCREEN_EASYINJECT_MAIN_CONTENT}")
+
+        if(NOT TOOLSCREEN_EASYINJECT_MAIN_CONTENT MATCHES
+           "Toolscreen early injection: matching JVM identified")
+            message(FATAL_ERROR
+                "EasyInjectBundled watcher layout changed; could not apply Toolscreen's early-injection patch.")
+        endif()
+        file(WRITE "${TOOLSCREEN_EASYINJECT_MAIN_JAVA}" "${TOOLSCREEN_EASYINJECT_MAIN_CONTENT}")
     endif()
 
     file(REMOVE "${easyinjectbundled_SOURCE_DIR}/custom-dlls/WebView2Loader.dll")

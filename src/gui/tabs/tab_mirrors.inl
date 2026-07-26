@@ -62,6 +62,15 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.mirrors"))) {
     };
 
     auto sampleReadyGamePixel = [&](int gameX, int gameY, Color& outColor) {
+        if (GetRenderBackend() == RenderBackend::Vulkan) {
+            std::array<float, 4> sampled{};
+            if (!VulkanRenderer::TryGetColorPickerSample(gameX, gameY, sampled)) {
+                return false;
+            }
+            outColor = { sampled[0], sampled[1], sampled[2], sampled[3] };
+            return true;
+        }
+
         const GLuint readyTexture = GetReadyGameTexture();
         const int gameW = GetReadyGameWidth();
         const int gameH = GetReadyGameHeight();
@@ -254,12 +263,23 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.mirrors"))) {
             };
 
             auto drawMirrorTargetColorPickerPreview = [&](int targetColorIndex) {
-                g_mirrorColorPickerCaptureRequestMs.store(
-                    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(),
-                    std::memory_order_release);
-                const GLuint readyTexture = GetReadyGameTexture();
-                const int gameW = GetReadyGameWidth();
-                const int gameH = GetReadyGameHeight();
+                ImTextureID readyTexture = 0;
+                int gameW = 0;
+                int gameH = 0;
+                if (GetRenderBackend() == RenderBackend::Vulkan) {
+                    uintptr_t textureId = 0;
+                    if (VulkanRenderer::GetColorPickerFrame(textureId, gameW, gameH)) {
+                        readyTexture = static_cast<ImTextureID>(textureId);
+                    }
+                } else {
+                    g_mirrorColorPickerCaptureRequestMs.store(
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch()).count(),
+                        std::memory_order_release);
+                    readyTexture = static_cast<ImTextureID>(GetReadyGameTexture());
+                    gameW = GetReadyGameWidth();
+                    gameH = GetReadyGameHeight();
+                }
                 if (readyTexture == 0 || gameW <= 0 || gameH <= 0 || mirror.input.empty() || mirror.captureWidth <= 0 ||
                     mirror.captureHeight <= 0) {
                     ImGui::TextDisabled("%s", trc("mirrors.color_picker_unavailable"));
@@ -315,7 +335,7 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.mirrors"))) {
                     const float v0 = static_cast<float>(gameH - capY - mirror.captureHeight) / gameH;
                     const float u1 = static_cast<float>(capX + mirror.captureWidth) / gameW;
                     const float v1 = static_cast<float>(gameH - capY) / gameH;
-                    drawList->AddImage((ImTextureID)(intptr_t)readyTexture, tileMin, tileMax, ImVec2(u0, v1), ImVec2(u1, v0));
+                    drawList->AddImage(readyTexture, tileMin, tileMax, ImVec2(u0, v1), ImVec2(u1, v0));
                     drawList->AddRect(tileMin, tileMax, ImGui::GetColorU32(ImGuiCol_Border), 4.0f);
                 }
 
@@ -381,7 +401,7 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.mirrors"))) {
                             const ImVec2 magnifierMin(previewMin.x + 8.0f, previewMin.y + 8.0f);
                             const ImVec2 magnifierMax(magnifierMin.x + kMagnifierSize, magnifierMin.y + kMagnifierSize);
                             drawList->AddRectFilled(magnifierMin, magnifierMax, IM_COL32(12, 12, 12, 230), 4.0f);
-                            drawList->AddImage((ImTextureID)(intptr_t)readyTexture, magnifierMin, magnifierMax,
+                            drawList->AddImage(readyTexture, magnifierMin, magnifierMax,
                                                ImVec2(static_cast<float>(zoomMinX) / gameW, static_cast<float>(gameH - zoomMinY) / gameH),
                                                ImVec2(static_cast<float>(zoomMaxX) / gameW, static_cast<float>(gameH - zoomMaxY) / gameH));
                             const ImVec2 magnifierCenter((magnifierMin.x + magnifierMax.x) * 0.5f, (magnifierMin.y + magnifierMax.y) * 0.5f);

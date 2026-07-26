@@ -9,6 +9,8 @@
 #include "common/font_assets.h"
 #include "common/profiler.h"
 #include "render/render.h"
+#include "render/render_backend.h"
+#include "render/vulkan/vulkan_hooks.h"
 #include "platform/resource.h"
 #include "common/i18n.h"
 #include "hooks/hook_chain.h"
@@ -3037,6 +3039,12 @@ static void RestoreGLStateNoThrow(const GLState& s) {
 static BOOL SwapBuffersHook_Impl(WGLSWAPBUFFERS next, HDC hDc) {
     if (!next) return FALSE;
 
+    // Merely loading opengl32.dll is not backend detection. A real swap from a
+    // live WGL context is the first authoritative OpenGL frame.
+    if (wglGetCurrentContext() != NULL && !TryLatchRenderBackend(RenderBackend::OpenGL)) {
+        return next(hDc);
+    }
+
     thread_local int s_swapBuffersHookDepth = 0;
     struct SwapBuffersHookDepthScope {
         int& depth;
@@ -3586,6 +3594,53 @@ BOOL WINAPI hkwglSwapBuffers_ThirdParty(HDC hDc) {
     return SwapBuffersHook_Impl(next, hDc);
 }
 
+using LOADLIBRARYAPROC = HMODULE(WINAPI*)(LPCSTR);
+using LOADLIBRARYWPROC = HMODULE(WINAPI*)(LPCWSTR);
+using LOADLIBRARYEXAPROC = HMODULE(WINAPI*)(LPCSTR, HANDLE, DWORD);
+using LOADLIBRARYEXWPROC = HMODULE(WINAPI*)(LPCWSTR, HANDLE, DWORD);
+using GETPROCADDRESSPROC = FARPROC(WINAPI*)(HMODULE, LPCSTR);
+LOADLIBRARYAPROC oLoadLibraryA = nullptr;
+LOADLIBRARYWPROC oLoadLibraryW = nullptr;
+LOADLIBRARYEXAPROC oLoadLibraryExA = nullptr;
+LOADLIBRARYEXWPROC oLoadLibraryExW = nullptr;
+GETPROCADDRESSPROC oGetProcAddress = nullptr;
+
+static void NotifyLateGraphicsModule(HMODULE module) {
+    if (module && IsMinecraft26_2FinalOrNewer(g_gameVersion)) {
+        VulkanHooks::NotifyModuleLoaded(module);
+    }
+}
+
+HMODULE WINAPI hkLoadLibraryA(LPCSTR path) {
+    HMODULE module = oLoadLibraryA ? oLoadLibraryA(path) : nullptr;
+    NotifyLateGraphicsModule(module);
+    return module;
+}
+
+HMODULE WINAPI hkLoadLibraryW(LPCWSTR path) {
+    HMODULE module = oLoadLibraryW ? oLoadLibraryW(path) : nullptr;
+    NotifyLateGraphicsModule(module);
+    return module;
+}
+
+HMODULE WINAPI hkLoadLibraryExA(LPCSTR path, HANDLE file, DWORD flags) {
+    HMODULE module = oLoadLibraryExA ? oLoadLibraryExA(path, file, flags) : nullptr;
+    NotifyLateGraphicsModule(module);
+    return module;
+}
+
+HMODULE WINAPI hkLoadLibraryExW(LPCWSTR path, HANDLE file, DWORD flags) {
+    HMODULE module = oLoadLibraryExW ? oLoadLibraryExW(path, file, flags) : nullptr;
+    NotifyLateGraphicsModule(module);
+    return module;
+}
+
+FARPROC WINAPI hkGetProcAddress(HMODULE module, LPCSTR name) {
+    FARPROC realFunction = oGetProcAddress ? oGetProcAddress(module, name) : nullptr;
+    if (!IsMinecraft26_2FinalOrNewer(g_gameVersion)) return realFunction;
+    return VulkanHooks::InterceptLoaderGetProcAddress(module, name, realFunction);
+}
+
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
     if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hModule);
@@ -3764,23 +3819,22 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         HMODULE hOpenGL32 = GetModuleHandle(L"opengl32.dll");
         HMODULE hUser32 = GetModuleHandle(L"user32.dll");
         HMODULE hGlfw = GetModuleHandle(L"glfw.dll");
+        HMODULE hKernel32 = GetModuleHandle(L"kernel32.dll");
 
-        if (!hOpenGL32) {
-            Log("ERROR: GetModuleHandle(opengl32.dll) returned NULL");
-            return TRUE;
-        }
         if (!hUser32) {
             Log("ERROR: GetModuleHandle(user32.dll) returned NULL");
             return TRUE;
         }
 
 #define HOOK(mod, name) CreateHookOrDie(GetProcAddress(mod, #name), &hk##name, &o##name, #name)
-        HOOK(hOpenGL32, wglSwapBuffers);
-        HOOK(hOpenGL32, glBindTexture);
+        if (hOpenGL32) {
+            HOOK(hOpenGL32, wglSwapBuffers);
+            HOOK(hOpenGL32, glBindTexture);
+        }
         // Keep the established export-hook range intact and add the 26.2 renderer.
         if (IsVersionInRange(g_gameVersion, GameVersion(1, 0, 0), GameVersion(1, 21, 0)) ||
             IsMinecraft26_2FinalOrNewer(g_gameVersion)) {
-            if (HOOK(hOpenGL32, glViewport)) {
+            if (hOpenGL32 && HOOK(hOpenGL32, glViewport)) {
                 g_glViewportHookCount.fetch_add(1);
                 LogCategory("init", "Initial glViewport hook created via opengl32.dll");
             }
@@ -3790,6 +3844,13 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         HOOK(hUser32, ClipCursor);
         HOOK(hUser32, SetCursor);
         HOOK(hUser32, GetRawInputData);
+        if (IsMinecraft26_2FinalOrNewer(g_gameVersion) && hKernel32) {
+            HOOK(hKernel32, GetProcAddress);
+            HOOK(hKernel32, LoadLibraryA);
+            HOOK(hKernel32, LoadLibraryW);
+            HOOK(hKernel32, LoadLibraryExA);
+            HOOK(hKernel32, LoadLibraryExW);
+        }
         if (hGlfw) {
             HOOK(hGlfw, glfwSetInputMode);
             HOOK(hGlfw, glfwSetCursor);
@@ -3803,7 +3864,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         }
 #undef HOOK
 
-        LPVOID pGlBindFramebuffer = GetProcAddress(hOpenGL32, "glBindFramebuffer");
+        LPVOID pGlBindFramebuffer = hOpenGL32 ? GetProcAddress(hOpenGL32, "glBindFramebuffer") : nullptr;
         if (pGlBindFramebuffer != NULL) {
             CreateHookOrDie(pGlBindFramebuffer, &hkglBindFramebuffer, &oglBindFramebuffer, "glBindFramebuffer");
         } else {
@@ -3811,7 +3872,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
                         "WARNING: glBindFramebuffer not found in opengl32.dll - will attempt to hook via WGL/GLEW after context init");
         }
 
-        LPVOID pGlBlitNamedFramebuffer = GetProcAddress(hOpenGL32, "glBlitNamedFramebuffer");
+        LPVOID pGlBlitNamedFramebuffer = hOpenGL32 ? GetProcAddress(hOpenGL32, "glBlitNamedFramebuffer") : nullptr;
         if (pGlBlitNamedFramebuffer != NULL) {
             CreateHookOrDie(pGlBlitNamedFramebuffer, &hkglBlitNamedFramebuffer, &oglBlitNamedFramebuffer, "glBlitNamedFramebuffer");
         } else {
@@ -3819,7 +3880,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
                         "WARNING: glBlitNamedFramebuffer not found in opengl32.dll - will attempt to hook via GLEW after context init");
         }
 
-        LPVOID pGlBlitFramebuffer = GetProcAddress(hOpenGL32, "glBlitFramebuffer");
+        LPVOID pGlBlitFramebuffer = hOpenGL32 ? GetProcAddress(hOpenGL32, "glBlitFramebuffer") : nullptr;
         if (pGlBlitFramebuffer != NULL) {
             if (CreateHookOrDie(pGlBlitFramebuffer, &hkglBlitFramebuffer, &oglBlitFramebuffer, "glBlitFramebuffer")) {
                 g_glBlitFramebufferHooked.store(true, std::memory_order_release);
@@ -3835,6 +3896,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         }
 
         LogCategory("init", "Hooks enabled.");
+        if (IsMinecraft26_2FinalOrNewer(g_gameVersion)) {
+            VulkanHooks::InstallIfAvailable();
+        }
 
         // This thread periodically detects those detours (prolog or IAT) and chains behind them.
         g_stopHookCompat.store(false, std::memory_order_release);
@@ -3842,6 +3906,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             while (!g_stopHookCompat.load(std::memory_order_acquire) && !g_isShuttingDown.load(std::memory_order_acquire)) {
                 HookChain::RefreshAllThirdPartyHookChains();
+                if (IsMinecraft26_2FinalOrNewer(g_gameVersion)) {
+                    VulkanHooks::InstallIfAvailable();
+                }
 
                 for (int i = 0; i < 20; i++) {
                     if (g_stopHookCompat.load(std::memory_order_acquire) || g_isShuttingDown.load(std::memory_order_acquire)) break;
@@ -3895,6 +3962,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         // Stop background threads
         StopBrowserOverlayThread();
         StopWindowCaptureThread();
+        VulkanHooks::Shutdown();
 
         Log("Background threads stopped.");
 

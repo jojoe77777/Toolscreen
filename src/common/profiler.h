@@ -110,6 +110,7 @@ class Profiler {
 
     // Lock-free event submission (called from ScopedTimer destructor)
     void SubmitEvent(const char* sectionName, double durationMs, uint8_t depth, ThreadRingBuffer& buffer);
+    void SubmitExternalTiming(const char* sectionName, double durationMs);
 
     void EndFrame();
 

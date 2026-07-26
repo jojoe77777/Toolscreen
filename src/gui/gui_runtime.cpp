@@ -11,6 +11,7 @@
 #include "render/animated_texture_playback.h"
 #include "render/obs_thread.h"
 #include "render/render.h"
+#include "render/render_backend.h"
 #include "runtime/logic_thread.h"
 #include "third_party/stb_image.h"
 
@@ -253,7 +254,7 @@ static void RebuildImGuiFontAtlas(float scaleFactor, float keyboardPrimarySize, 
 
     io.Fonts->Build();
 
-    if (io.BackendRendererUserData != nullptr) {
+    if (io.BackendRendererUserData != nullptr && GetRenderBackend() == RenderBackend::OpenGL) {
         ImGui_ImplOpenGL3_DestroyDeviceObjects();
         ImGui_ImplOpenGL3_CreateDeviceObjects();
     }
@@ -279,6 +280,10 @@ static void ConfigureImGuiFontsAndStyle(float scaleFactor) {
     s_mainGuiFontRefreshState.resolvedFontPath = resolvedFontPath;
 }
 
+void ConfigureImGuiFontsAndStyleForCurrentContext(float scaleFactor) {
+    ConfigureImGuiFontsAndStyle(scaleFactor);
+}
+
 static ImGuiContext* s_mainThreadImGuiContext = nullptr;
 static HWND s_mainThreadImGuiHwnd = NULL;
 static HGLRC s_mainThreadImGuiGlContext = NULL;
@@ -299,6 +304,10 @@ float ComputeGuiScaleFactorFromCachedWindowSize() {
 
 void LoadEmbeddedResourceTexture(GLuint& tex, int resourceId, int filterMode) {
     if (tex != 0) return;
+    // This is the established OpenGL texture loader. Vulkan UI resources are
+    // handled by the Vulkan backend; never enter the OpenGL dispatch table
+    // when Minecraft has latched Vulkan and no GL context exists.
+    if (GetRenderBackend() == RenderBackend::Vulkan || wglGetCurrentContext() == nullptr) return;
     HMODULE hModule = NULL;
     GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                        (LPCWSTR)&g_showGui, &hModule);

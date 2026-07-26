@@ -14,6 +14,8 @@
 #include "common/profiler.h"
 #include "render/obs_thread.h"
 #include "render/render.h"
+#include "render/render_backend.h"
+#include "render/vulkan/vulkan_renderer.h"
 #include "render/background_fit_layout.h"
 #include "platform/resource.h"
 #include <nlohmann/json.hpp>
@@ -3046,7 +3048,8 @@ void RenderSettingsGUI() {
             {
                 static GLuint s_languageTexture = 0;
                 static HGLRC s_languageLastCtx = NULL;
-                HGLRC currentCtx = wglGetCurrentContext();
+                HGLRC currentCtx =
+                    GetRenderBackend() == RenderBackend::Vulkan ? NULL : wglGetCurrentContext();
                 if (currentCtx != s_languageLastCtx) {
                     s_languageTexture = 0;
                     s_languageLastCtx = currentCtx;
@@ -3054,9 +3057,9 @@ void RenderSettingsGUI() {
 
                 LoadEmbeddedResourceTexture(s_languageTexture, IDR_LANGUAGE_PNG);
 
+                float iconSize = ImGui::GetFrameHeight();
+                ImGui::SetCursorPos(ImVec2(languageButtonX, topBarY));
                 if (s_languageTexture != 0) {
-                    float iconSize = ImGui::GetFrameHeight();
-                    ImGui::SetCursorPos(ImVec2(languageButtonX, topBarY));
                     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
                     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.1f));
                     ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1, 1, 1, 0.2f));
@@ -3066,34 +3069,37 @@ void RenderSettingsGUI() {
                     }
                     ImGui::PopStyleVar();
                     ImGui::PopStyleColor(3);
+                } else if (ImGui::Button("L##language", ImVec2(iconSize, iconSize))) {
+                    ImGui::OpenPopup("##LanguagePopup");
+                }
 
-                    if (ImGui::BeginPopup("##LanguagePopup")) {
-                        PROFILE_SCOPE_CAT("Settings Language Popup", "ImGui");
+                if (ImGui::BeginPopup("##LanguagePopup")) {
+                    PROFILE_SCOPE_CAT("Settings Language Popup", "ImGui");
 
-                        const nlohmann::json& langs = GetLangs();
-                        for (const auto& [langCode, langName] : langs.items()) {
-                            bool isSelected = (g_config.lang == langCode);
-                            if (ImGui::Selectable(langName.get<std::string>().c_str(), isSelected)) {
-                                if (g_config.lang != langCode) {
-                                    g_config.lang = langCode;
-                                    LoadTranslation(langCode);
-                                    RequestDynamicGuiFontRefresh(true);
-                                    g_configIsDirty = true;
-                                }
-                            }
-                            if (isSelected) {
-                                ImGui::SetItemDefaultFocus();
+                    const nlohmann::json& langs = GetLangs();
+                    for (const auto& [langCode, langName] : langs.items()) {
+                        bool isSelected = (g_config.lang == langCode);
+                        if (ImGui::Selectable(langName.get<std::string>().c_str(), isSelected)) {
+                            if (g_config.lang != langCode) {
+                                g_config.lang = langCode;
+                                LoadTranslation(langCode);
+                                RequestDynamicGuiFontRefresh(true);
+                                g_configIsDirty = true;
                             }
                         }
-                        ImGui::EndPopup(); 
+                        if (isSelected) {
+                            ImGui::SetItemDefaultFocus();
+                        }
                     }
+                    ImGui::EndPopup();
                 }
             }
 
             {
                 static GLuint s_discordTexture = 0;
                 static HGLRC s_discordLastCtx = NULL;
-                HGLRC currentCtx = wglGetCurrentContext();
+                HGLRC currentCtx =
+                    GetRenderBackend() == RenderBackend::Vulkan ? NULL : wglGetCurrentContext();
                 if (currentCtx != s_discordLastCtx) {
                     s_discordTexture = 0;
                     s_discordLastCtx = currentCtx;
@@ -3101,9 +3107,9 @@ void RenderSettingsGUI() {
 
                 LoadEmbeddedResourceTexture(s_discordTexture, IDR_DISCORD_PNG);
 
+                float iconSize = ImGui::GetFrameHeight();
+                ImGui::SetCursorPos(ImVec2(discordButtonX, topBarY));
                 if (s_discordTexture != 0) {
-                    float iconSize = ImGui::GetFrameHeight();
-                    ImGui::SetCursorPos(ImVec2(discordButtonX, topBarY));
                     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
                     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.1f));
                     ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1, 1, 1, 0.2f));
@@ -3116,6 +3122,8 @@ void RenderSettingsGUI() {
                     if (ImGui::IsItemHovered()) {
                         ImGui::SetTooltip(trc("tooltip.join_discord"));
                     }
+                } else if (ImGui::Button("D##discord", ImVec2(iconSize, iconSize))) {
+                    ShellExecuteW(NULL, L"open", DISCORD_URL, NULL, NULL, SW_SHOWNORMAL);
                 }
             }
 
@@ -3128,7 +3136,8 @@ void RenderSettingsGUI() {
 
             static GLuint s_editorTexture = 0;
             static HGLRC s_editorLastCtx = NULL;
-            HGLRC editorCtx = wglGetCurrentContext();
+            HGLRC editorCtx =
+                GetRenderBackend() == RenderBackend::Vulkan ? NULL : wglGetCurrentContext();
             if (editorCtx != s_editorLastCtx) { s_editorTexture = 0; s_editorLastCtx = editorCtx; }
             LoadEmbeddedResourceTexture(s_editorTexture, IDR_EDITOR_PNG);
             if (s_editorTexture != 0) {
@@ -3147,6 +3156,12 @@ void RenderSettingsGUI() {
                 ImGui::PopStyleColor(3);
                 if (ImGui::IsItemHovered()) {
                     ImGui::SetTooltip("%s", trc(editorOn ? "editor.tooltip_on" : "editor.tooltip_off"));
+                }
+            } else {
+                const bool editorOn = g_overlayEditorMode.load(std::memory_order_relaxed);
+                ImGui::SetCursorPos(ImVec2(editorButtonX, topBarY));
+                if (ImGui::Button(editorOn ? "E*##EditorToggle" : "E##EditorToggle", ImVec2(iconSize, iconSize))) {
+                    g_overlayEditorMode.store(!editorOn, std::memory_order_relaxed);
                 }
             }
 

@@ -7,6 +7,7 @@
 #include "gui/imgui_cache.h"
 #include "runtime/logic_thread.h"
 #include "common/profiler.h"
+#include "render/render_backend.h"
 #include "render/render.h"
 #include "common/utils.h"
 #include "version.h"
@@ -1349,8 +1350,8 @@ InputHandlerResult HandleGuiToggle(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
     }
     g_lastGuiToggleTimeMs.store(nowMs, std::memory_order_relaxed);
 
-    if (!g_glInitialized.load(std::memory_order_acquire)) {
-        Log("GUI toggle ignored - OpenGL not initialized yet");
+    if (!IsRenderBackendReady()) {
+        Log("GUI toggle ignored - renderer has not observed a game frame yet");
         return { true, 1 };
     }
 
