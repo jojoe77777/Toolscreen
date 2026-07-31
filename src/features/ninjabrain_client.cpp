@@ -102,7 +102,18 @@ void StartNinjabrainClient() {
     callbacks.onStrongholdMessage = [generation](const std::string& payload) {
         if (!IsActiveNinjabrainClientGeneration(generation)) { return; }
         ModifyNinjabrainData([&](NinjabrainData& data) {
+            const std::string previousResultType = data.resultType;
             ApplyNinjabrainStrongholdEvent(payload, data, LogNinjabrainMessage);
+            const bool wasReset = (previousResultType != "NONE" && data.resultType == "NONE");
+            if (wasReset) {
+                bool shouldShow = false;
+                if (const auto configSnapshot = GetConfigSnapshot()) {
+                    shouldShow = configSnapshot->ninjabrainOverlay.showOnNbbReset;
+                }
+                if (shouldShow) {
+                    g_ninjabrainOverlayVisible.store(true, std::memory_order_release);
+                }
+            }
         });
     };
     callbacks.onStrongholdConnect = [generation]() {
