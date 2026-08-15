@@ -192,6 +192,9 @@ std::atomic<bool> g_forceVisibleCursorWhileGuiOpen{ false };
 constexpr int kDeferredGuiGlfwCursorModeNone = 0;
 std::atomic<int> g_deferredGuiGlfwCursorMode{ kDeferredGuiGlfwCursorModeNone };
 std::atomic<void*> g_lastGlfwCursorWindow{ nullptr };
+constexpr int kDeferredGuiSdlRelativeMouseModeNone = -1;
+std::atomic<int> g_deferredGuiSdlRelativeMouseMode{ kDeferredGuiSdlRelativeMouseModeNone };
+std::atomic<void*> g_lastSdlCursorWindow{ nullptr };
 // Lock-free GUI toggle debounce timestamp
 std::atomic<int64_t> g_lastGuiToggleTimeMs{ 0 };
 
@@ -234,8 +237,13 @@ HMODULE g_hModule = NULL;
 
 GameVersion g_gameVersion;
 
-bool g_glewLoaded = false;
-WNDPROC g_originalWndProc = NULL;
+std::atomic<bool> g_glewLoaded{ false };
+// GLEW owns process-global dispatch tables.  Only the first real Minecraft
+// WGL context is allowed to populate them (a loader/bootstrap context must
+// never win this race).
+static std::mutex g_openGlInitializationMutex;
+static HGLRC g_openGlRenderContext = NULL;
+AtomicWndProc g_originalWndProc;
 std::atomic<HWND> g_subclassedHwnd{ NULL };
 std::atomic<bool> g_hwndChanged{ false };
 std::atomic<bool> g_isShuttingDown{ false };
@@ -331,7 +339,7 @@ void InvalidateTrackedGameTextureId(bool clearSwapThread, bool clearCachedTextur
     }
 }
 
-static void SyncVirtualCameraRuntimeState(bool enabled) {
+void SyncVirtualCameraRuntimeState(bool enabled) {
     static constexpr auto kVirtualCameraRetryInterval = std::chrono::milliseconds(100);
     static auto s_lastStartAttempt = std::chrono::steady_clock::time_point{};
     static uint32_t s_lastAttemptWidth = 0;
@@ -394,6 +402,9 @@ void CaptureBackbufferForObs(int width, int height) {
     const bool hasAllTargets = g_sameThreadObsCaptureFBOs[0] != 0 && g_sameThreadObsCaptureFBOs[1] != 0 &&
                                g_sameThreadObsCaptureTextures[0] != 0 && g_sameThreadObsCaptureTextures[1] != 0;
     if (needsResize || !hasAllTargets) {
+        for (int i = 0; i < SAME_THREAD_OBS_CAPTURE_BUFFER_COUNT; ++i) {
+            WaitForObsOverrideTextureConsumer(g_sameThreadObsCaptureTextures[i]);
+        }
         ClearObsOverride();
         for (int i = 0; i < SAME_THREAD_OBS_CAPTURE_BUFFER_COUNT; ++i) {
             if (g_sameThreadObsCaptureFBOs[i] == 0) { glGenFramebuffers(1, &g_sameThreadObsCaptureFBOs[i]); }
@@ -432,6 +443,8 @@ void CaptureBackbufferForObs(int width, int height) {
         return;
     }
 
+    WaitForObsOverrideTextureConsumer(g_sameThreadObsCaptureTextures[captureIndex]);
+
     GLint prevReadFBO = 0;
     GLint prevDrawFBO = 0;
     glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prevReadFBO);
@@ -467,7 +480,16 @@ bool SubclassGameWindow(HWND hwnd) {
 
     HWND currentSubclassed = g_subclassedHwnd.load();
     if (currentSubclassed == hwnd && g_originalWndProc != NULL) {
-        return true;
+        const WNDPROC currentProc = reinterpret_cast<WNDPROC>(
+            GetWindowLongPtr(hwnd, GWLP_WNDPROC));
+        if (currentProc == SubclassedWndProc) {
+            return true;
+        }
+        Log(
+            "Minecraft replaced the Toolscreen window procedure after initial subclassing; installing it again.");
+        g_originalWndProc = NULL;
+        g_subclassedHwnd.store(NULL);
+        currentSubclassed = NULL;
     }
 
     if (currentSubclassed != NULL && currentSubclassed != hwnd) {
@@ -810,7 +832,7 @@ void RestoreKeyRepeatSettings() {
 
 typedef BOOL(WINAPI* WGLSWAPBUFFERS)(HDC);
 WGLSWAPBUFFERS owglSwapBuffers = NULL;
-WGLSWAPBUFFERS g_owglSwapBuffersThirdParty = NULL;
+std::atomic<WGLSWAPBUFFERS> g_owglSwapBuffersThirdParty{ nullptr };
 std::atomic<void*> g_wglSwapBuffersThirdPartyHookTarget{ nullptr };
 typedef BOOL(WINAPI* SETCURSORPOSPROC)(int, int);
 SETCURSORPOSPROC oSetCursorPos = NULL;
@@ -1342,6 +1364,14 @@ GLFWSETINPUTMODE oglfwSetInputMode = NULL;
 GLFWSETINPUTMODE g_oglfwSetInputModeThirdParty = NULL;
 typedef void (*GLFWSETCURSOR)(void* window, void* cursor);
 GLFWSETCURSOR oglfwSetCursor = NULL;
+typedef void* (*GLFWCREATEWINDOW)(int width, int height, const char* title, void* monitor, void* share);
+typedef HWND (*GLFWGETWIN32WINDOW)(void* window);
+typedef void (*GLFWWINDOWHINT)(int hint, int value);
+typedef void (*GLFWDESTROYWINDOW)(void* window);
+GLFWCREATEWINDOW oglfwCreateWindow = NULL;
+GLFWGETWIN32WINDOW glfwGetWin32WindowProc = NULL;
+GLFWWINDOWHINT oglfwWindowHint = NULL;
+GLFWDESTROYWINDOW oglfwDestroyWindow = NULL;
 typedef void (*GLFWWINDOWSIZEFUN)(void* window, int width, int height);
 typedef GLFWWINDOWSIZEFUN (*GLFWSETWINDOWSIZECALLBACK)(void* window, GLFWWINDOWSIZEFUN callback);
 GLFWSETWINDOWSIZECALLBACK oglfwSetWindowSizeCallback = NULL;
@@ -1349,14 +1379,72 @@ typedef void (*GLFWFRAMEBUFFERSIZEFUN)(void* window, int width, int height);
 typedef GLFWFRAMEBUFFERSIZEFUN (*GLFWSETFRAMEBUFFERSIZECALLBACK)(void* window, GLFWFRAMEBUFFERSIZEFUN callback);
 GLFWSETFRAMEBUFFERSIZECALLBACK oglfwSetFramebufferSizeCallback = NULL;
 typedef void* (*GLFWGETCURRENTCONTEXTPROC)();
-GLFWGETCURRENTCONTEXTPROC glfwGetCurrentContextProc = NULL;
-std::atomic<bool> g_glfwCursorGrabbed{ false };
+std::atomic<GLFWGETCURRENTCONTEXTPROC> glfwGetCurrentContextProc{ nullptr };
+// Both GLFW's disabled cursor mode and SDL3's relative mouse mode represent
+// Minecraft owning the cursor. Keep the Win32 input path backend-neutral.
+std::atomic<bool> g_nativeCursorGrabbed{ false };
 std::atomic<void*> g_glfwSetInputModeThirdPartyHookTarget{ nullptr };
+// GLFW invokes all window callbacks on the owning window thread, but hooks
+// and WM_APP replay requests can arrive concurrently.  Keep every identity
+// used for a replay in one locked generation so a recycled HWND/window can
+// never receive callbacks registered on its predecessor.
+struct GlfwWindowState {
+    void* window = nullptr;
+    HWND hwnd = NULL;
+    DWORD ownerThreadId = 0;
+    uint64_t generation = 0;
+    bool noApi = false;
+    bool pendingNoApi = false;
+    GLFWWINDOWSIZEFUN windowSizeCallback = nullptr;
+    GLFWFRAMEBUFFERSIZEFUN framebufferSizeCallback = nullptr;
+    bool initialResizeReplayPosted = false;
+    bool replayPending = false;
+    uint64_t replayGeneration = 0;
+    HWND replayHwnd = NULL;
+};
+static GlfwWindowState g_glfwWindowState;
+static std::mutex g_glfwWindowStateMutex;
 std::atomic<void*> g_latestGlfwWindow{ nullptr };
-std::atomic<GLFWWINDOWSIZEFUN> g_glfwWindowSizeCallback{ nullptr };
-std::atomic<GLFWFRAMEBUFFERSIZEFUN> g_glfwFramebufferSizeCallback{ nullptr };
-std::atomic<bool> g_glfwInitialResizeCallbacksReplayed{ false };
-std::mutex g_glfwResizeCallbackMutex;
+static std::mutex g_glfwHookInstallMutex;
+static std::atomic<bool> g_glfwHooksInstalled{ false };
+static std::atomic<bool> g_minHookEnabled{ false };
+// GLFW_NO_API is the authoritative pre-window signal for the native Vulkan
+// client when a launcher does not provide a parseable Minecraft version.
+static std::atomic<bool> g_glfwNoApiRequested{ false };
+
+using SDLPROPERTIESID = uint32_t;
+using SDLCREATEWINDOW = void* (*)(const char* title, int width, int height, uint64_t flags);
+using SDLCREATEWINDOWWITHPROPERTIES = void* (*)(SDLPROPERTIESID properties);
+using SDLDESTROYWINDOW = void (*)(void* window);
+using SDLGETWINDOWPROPERTIES = SDLPROPERTIESID (*)(void* window);
+using SDLGETPOINTERPROPERTY = void* (*)(SDLPROPERTIESID properties, const char* name, void* defaultValue);
+using SDLGETWINDOWFLAGS = uint64_t (*)(void* window);
+using SDLSETWINDOWRELATIVEMOUSEMODE = bool (*)(void* window, bool enabled);
+using SDLGETWINDOWRELATIVEMOUSEMODE = bool (*)(void* window);
+using SDLGLGETCURRENTWINDOW = void* (*)();
+
+static SDLCREATEWINDOW oSdlCreateWindow = nullptr;
+static SDLCREATEWINDOWWITHPROPERTIES oSdlCreateWindowWithProperties = nullptr;
+static SDLDESTROYWINDOW oSdlDestroyWindow = nullptr;
+static SDLGETWINDOWPROPERTIES sdlGetWindowPropertiesProc = nullptr;
+static SDLGETPOINTERPROPERTY sdlGetPointerPropertyProc = nullptr;
+static SDLGETWINDOWFLAGS sdlGetWindowFlagsProc = nullptr;
+static SDLSETWINDOWRELATIVEMOUSEMODE oSdlSetWindowRelativeMouseMode = nullptr;
+static SDLGETWINDOWRELATIVEMOUSEMODE sdlGetWindowRelativeMouseModeProc = nullptr;
+static std::atomic<SDLGLGETCURRENTWINDOW> sdlGlGetCurrentWindowProc{ nullptr };
+static bool ApplySdlRelativeMouseMode_Impl(SDLSETWINDOWRELATIVEMOUSEMODE next, void* window, bool enabled);
+
+struct SdlWindowState {
+    void* window = nullptr;
+    HWND hwnd = NULL;
+    DWORD ownerThreadId = 0;
+    uint64_t generation = 0;
+    bool noApi = false;
+};
+static SdlWindowState g_sdlWindowState;
+static std::mutex g_sdlWindowStateMutex;
+static std::mutex g_sdlHookInstallMutex;
+static std::atomic<bool> g_sdlHooksInstalled{ false };
 
 typedef UINT(WINAPI* GETRAWINPUTDATAPROC)(HRAWINPUT hRawInput, UINT uiCommand, LPVOID pData, PUINT pcbSize, UINT cbSizeHeader);
 GETRAWINPUTDATAPROC oGetRawInputData = NULL;
@@ -1411,7 +1499,7 @@ static HCURSOR SetCursorHook_Impl(SETCURSORPROC next, HCURSOR hCursor) {
     if (!next) return NULL;
 
     if (g_gameVersion >= GameVersion(1, 13, 0)) {
-        if (hCursor != NULL && !g_glfwCursorGrabbed.load(std::memory_order_acquire)) {
+        if (hCursor != NULL && !g_nativeCursorGrabbed.load(std::memory_order_acquire)) {
             const std::string localGameState = g_gameStateBuffers[g_currentGameStateIndex.load(std::memory_order_acquire)];
             const CursorTextures::CursorData* cursorData = CursorTextures::GetSelectedCursor(localGameState, 64);
             if (cursorData && cursorData->hCursor) { return next(cursorData->hCursor); }
@@ -2367,11 +2455,11 @@ static void ApplyGlfwCursorMode_Impl(GLFWSETINPUTMODE next, void* window, int va
     if (!next) return;
 
     if (value == GLFW_CURSOR_DISABLED) {
-        g_glfwCursorGrabbed.store(true, std::memory_order_release);
+        g_nativeCursorGrabbed.store(true, std::memory_order_release);
         g_capturingMousePos.store(CapturingState::DISABLED, std::memory_order_release);
         next(window, GLFW_CURSOR, value);
     } else if (value == GLFW_CURSOR_NORMAL) {
-        g_glfwCursorGrabbed.store(false, std::memory_order_release);
+        g_nativeCursorGrabbed.store(false, std::memory_order_release);
         g_capturingMousePos.store(CapturingState::NORMAL, std::memory_order_release);
         next(window, GLFW_CURSOR, value);
     } else {
@@ -2383,13 +2471,18 @@ static void ApplyGlfwCursorMode_Impl(GLFWSETINPUTMODE next, void* window, int va
 
 void ApplyDeferredGuiCursorModeAfterClose() {
     const int deferredMode = g_deferredGuiGlfwCursorMode.exchange(kDeferredGuiGlfwCursorModeNone, std::memory_order_acq_rel);
-    if (deferredMode == kDeferredGuiGlfwCursorModeNone) { return; }
+    if (deferredMode != kDeferredGuiGlfwCursorModeNone) {
+        void* window = g_lastGlfwCursorWindow.load(std::memory_order_acquire);
+        GLFWSETINPUTMODE directProc = oglfwSetInputMode ? oglfwSetInputMode : g_oglfwSetInputModeThirdParty;
+        if (window && directProc) { ApplyGlfwCursorMode_Impl(directProc, window, deferredMode); }
+    }
 
-    void* window = g_lastGlfwCursorWindow.load(std::memory_order_acquire);
-    GLFWSETINPUTMODE directProc = oglfwSetInputMode ? oglfwSetInputMode : g_oglfwSetInputModeThirdParty;
-    if (!window || !directProc) { return; }
-
-    ApplyGlfwCursorMode_Impl(directProc, window, deferredMode);
+    const int deferredSdlMode =
+        g_deferredGuiSdlRelativeMouseMode.exchange(kDeferredGuiSdlRelativeMouseModeNone, std::memory_order_acq_rel);
+    void* sdlWindow = g_lastSdlCursorWindow.load(std::memory_order_acquire);
+    if (deferredSdlMode != kDeferredGuiSdlRelativeMouseModeNone && sdlWindow && oSdlSetWindowRelativeMouseMode) {
+        ApplySdlRelativeMouseMode_Impl(oSdlSetWindowRelativeMouseMode, sdlWindow, deferredSdlMode != 0);
+    }
 }
 
 void FinalizeGuiCursorStateAfterClose() {
@@ -2415,7 +2508,8 @@ static void GlfwSetInputModeHook_Impl(GLFWSETINPUTMODE next, void* window, int m
     const bool guiOpen = g_showGui.load(std::memory_order_acquire);
 
     g_lastGlfwCursorWindow.store(window, std::memory_order_release);
-    if (IsMinecraft26_2FinalOrNewer(g_gameVersion)) { g_latestGlfwWindow.store(window, std::memory_order_release); }
+    // Cursor traffic is useful for all modern GLFW windows, but never replace
+    // the generation-bound resize/window state from this independent hook.
 
     if (guiOpen) {
         g_deferredGuiGlfwCursorMode.store(value, std::memory_order_release);
@@ -2435,59 +2529,208 @@ void hkglfwSetInputMode_ThirdParty(void* window, int mode, int value) {
     GlfwSetInputModeHook_Impl(next, window, mode, value);
 }
 
+GLFWWINDOWSIZEFUN hkglfwSetWindowSizeCallback(void* window, GLFWWINDOWSIZEFUN callback);
+GLFWFRAMEBUFFERSIZEFUN hkglfwSetFramebufferSizeCallback(void* window, GLFWFRAMEBUFFERSIZEFUN callback);
+void hkglfwSetCursor(void* window, void* cursor);
+
+static constexpr int GLFW_CLIENT_API_HINT = 0x00022001;
+static constexpr int GLFW_NO_API_VALUE = 0;
+
+static bool GetTrackedGlfwWindow(void*& window, HWND& hwnd, uint64_t& generation, bool& noApi) {
+    std::lock_guard<std::mutex> lock(g_glfwWindowStateMutex);
+    window = g_glfwWindowState.window;
+    hwnd = g_glfwWindowState.hwnd;
+    generation = g_glfwWindowState.generation;
+    noApi = g_glfwWindowState.noApi;
+    return window != nullptr && hwnd != NULL && IsWindow(hwnd);
+}
+
+static bool IsTrackedGlfwNoApiWindow() {
+    void* window = nullptr;
+    HWND hwnd = NULL;
+    uint64_t generation = 0;
+    bool noApi = false;
+    return GetTrackedGlfwWindow(window, hwnd, generation, noApi) && noApi;
+}
+
+static void TrackGlfwWindow(void* window, HWND hwnd, bool noApi) {
+    if (!window || !hwnd) return;
+    std::lock_guard<std::mutex> lock(g_glfwWindowStateMutex);
+    ++g_glfwWindowState.generation;
+    g_glfwWindowState.window = window;
+    g_glfwWindowState.hwnd = hwnd;
+    g_glfwWindowState.ownerThreadId = GetCurrentThreadId();
+    g_glfwWindowState.noApi = noApi;
+    g_glfwWindowState.windowSizeCallback = nullptr;
+    g_glfwWindowState.framebufferSizeCallback = nullptr;
+    g_glfwWindowState.initialResizeReplayPosted = false;
+    g_glfwWindowState.replayPending = false;
+    g_glfwWindowState.replayGeneration = 0;
+    g_glfwWindowState.replayHwnd = NULL;
+    g_latestGlfwWindow.store(window, std::memory_order_release);
+    g_glfwNoApiRequested.store(noApi, std::memory_order_release);
+}
+
+static void ClearTrackedGlfwWindow(void* window, HWND hwnd = NULL) {
+    std::lock_guard<std::mutex> lock(g_glfwWindowStateMutex);
+    if (g_glfwWindowState.window != window || (hwnd && g_glfwWindowState.hwnd != hwnd)) return;
+    ++g_glfwWindowState.generation;
+    g_glfwWindowState.window = nullptr;
+    g_glfwWindowState.hwnd = NULL;
+    g_glfwWindowState.ownerThreadId = 0;
+    g_glfwWindowState.noApi = false;
+    g_glfwWindowState.windowSizeCallback = nullptr;
+    g_glfwWindowState.framebufferSizeCallback = nullptr;
+    g_glfwWindowState.initialResizeReplayPosted = false;
+    g_glfwWindowState.replayPending = false;
+    g_glfwWindowState.replayGeneration = 0;
+    g_glfwWindowState.replayHwnd = NULL;
+    g_latestGlfwWindow.store(nullptr, std::memory_order_release);
+    g_lastGlfwCursorWindow.store(nullptr, std::memory_order_release);
+    g_deferredGuiGlfwCursorMode.store(kDeferredGuiGlfwCursorModeNone, std::memory_order_release);
+    g_nativeCursorGrabbed.store(false, std::memory_order_release);
+    g_glfwNoApiRequested.store(false, std::memory_order_release);
+}
+
+void hkglfwWindowHint(int hint, int value) {
+    if (hint == GLFW_CLIENT_API_HINT) {
+        std::lock_guard<std::mutex> lock(g_glfwWindowStateMutex);
+        g_glfwWindowState.pendingNoApi = value == GLFW_NO_API_VALUE;
+    }
+    if (oglfwWindowHint) oglfwWindowHint(hint, value);
+}
+
+// GLFW creates Minecraft's native window before either the legacy WGL context
+// or the 26.2 Vulkan device/surface.  Capturing it here is the common,
+// version-independent readiness boundary.  Do not initialize rendering or
+// subclass here: this can run while Minecraft is still constructing Window.
+void* hkglfwCreateWindow(int width, int height, const char* title, void* monitor, void* share) {
+    void* window = oglfwCreateWindow ? oglfwCreateWindow(width, height, title, monitor, share) : nullptr;
+    if (!window || !glfwGetWin32WindowProc) return window;
+
+    HWND hwnd = glfwGetWin32WindowProc(window);
+    DWORD pid = 0;
+    if (hwnd && IsWindow(hwnd) && GetWindowThreadProcessId(hwnd, &pid) != 0 && pid == GetCurrentProcessId()) {
+        bool noApi = false;
+        {
+            std::lock_guard<std::mutex> lock(g_glfwWindowStateMutex);
+            noApi = g_glfwWindowState.pendingNoApi;
+        }
+        TrackGlfwWindow(window, hwnd, noApi);
+        g_minecraftHwnd.store(hwnd, std::memory_order_release);
+        LogCategory("init", "[WINDOW] GLFW created the Minecraft HWND; deferring window-bound initialization until a real render backend frame.");
+    }
+    return window;
+}
+
+void hkglfwDestroyWindow(void* window) {
+    HWND hwnd = NULL;
+    {
+        std::lock_guard<std::mutex> lock(g_glfwWindowStateMutex);
+        if (g_glfwWindowState.window == window) hwnd = g_glfwWindowState.hwnd;
+    }
+    ClearTrackedGlfwWindow(window, hwnd);
+    if (oglfwDestroyWindow) oglfwDestroyWindow(window);
+}
+
+static bool TryInstallGlfwHooks(HMODULE glfw) {
+    if (!glfw || g_glfwHooksInstalled.load(std::memory_order_acquire)) return g_glfwHooksInstalled.load(std::memory_order_acquire);
+    std::lock_guard<std::mutex> lock(g_glfwHookInstallMutex);
+    if (g_glfwHooksInstalled.load(std::memory_order_relaxed)) return true;
+
+    glfwGetWin32WindowProc = reinterpret_cast<GLFWGETWIN32WINDOW>(GetProcAddress(glfw, "glfwGetWin32Window"));
+    void* createWindow = reinterpret_cast<void*>(GetProcAddress(glfw, "glfwCreateWindow"));
+    void* windowHint = reinterpret_cast<void*>(GetProcAddress(glfw, "glfwWindowHint"));
+    if (!createWindow || !glfwGetWin32WindowProc ||
+        !CreateHookOrDie(createWindow, &hkglfwCreateWindow, &oglfwCreateWindow, "glfwCreateWindow")) {
+        LogCategory("init", "[WINDOW] GLFW loaded without the Win32 create-window API; waiting for a compatible GLFW module.");
+        return false;
+    }
+
+    if (windowHint) {
+        CreateHookOrDie(windowHint, &hkglfwWindowHint, &oglfwWindowHint, "glfwWindowHint");
+    }
+
+    CreateHookOrDie(GetProcAddress(glfw, "glfwSetInputMode"), &hkglfwSetInputMode, &oglfwSetInputMode, "glfwSetInputMode");
+    CreateHookOrDie(GetProcAddress(glfw, "glfwSetCursor"), &hkglfwSetCursor, &oglfwSetCursor, "glfwSetCursor");
+    CreateHookOrDie(GetProcAddress(glfw, "glfwSetWindowSizeCallback"), &hkglfwSetWindowSizeCallback,
+                    &oglfwSetWindowSizeCallback, "glfwSetWindowSizeCallback");
+    CreateHookOrDie(GetProcAddress(glfw, "glfwSetFramebufferSizeCallback"), &hkglfwSetFramebufferSizeCallback,
+                    &oglfwSetFramebufferSizeCallback, "glfwSetFramebufferSizeCallback");
+    glfwGetCurrentContextProc.store(reinterpret_cast<GLFWGETCURRENTCONTEXTPROC>(GetProcAddress(glfw, "glfwGetCurrentContext")),
+                                    std::memory_order_release);
+    CreateHookOrDie(GetProcAddress(glfw, "glfwDestroyWindow"), &hkglfwDestroyWindow, &oglfwDestroyWindow, "glfwDestroyWindow");
+    if (g_minHookEnabled.load(std::memory_order_acquire) && MH_EnableHook(createWindow) != MH_OK) {
+        Log("ERROR: Failed to enable late glfwCreateWindow hook.");
+        return false;
+    }
+    // MH_EnableHook(MH_ALL_HOOKS) will enable these during initial startup.
+    // Once startup completed, enable the remaining per-function hooks too.
+    if (g_minHookEnabled.load(std::memory_order_acquire)) {
+        MH_EnableHook(MH_ALL_HOOKS);
+    }
+    g_glfwHooksInstalled.store(true, std::memory_order_release);
+    LogCategory("init", "[WINDOW] Installed GLFW create-window readiness hook.");
+    return true;
+}
+
 GLFWWINDOWSIZEFUN hkglfwSetWindowSizeCallback(void* window, GLFWWINDOWSIZEFUN callback) {
     if (!oglfwSetWindowSizeCallback) { return nullptr; }
-    if (!IsMinecraft26_2FinalOrNewer(g_gameVersion)) { return oglfwSetWindowSizeCallback(window, callback); }
-    g_latestGlfwWindow.store(window, std::memory_order_release);
+    std::lock_guard<std::mutex> lock(g_glfwWindowStateMutex);
     const GLFWWINDOWSIZEFUN previous = oglfwSetWindowSizeCallback(window, callback);
-    g_glfwWindowSizeCallback.store(callback, std::memory_order_release);
+    if (g_glfwWindowState.window == window) g_glfwWindowState.windowSizeCallback = callback;
     return previous;
 }
 
 GLFWFRAMEBUFFERSIZEFUN hkglfwSetFramebufferSizeCallback(void* window, GLFWFRAMEBUFFERSIZEFUN callback) {
     if (!oglfwSetFramebufferSizeCallback) { return nullptr; }
-    if (!IsMinecraft26_2FinalOrNewer(g_gameVersion)) { return oglfwSetFramebufferSizeCallback(window, callback); }
-    g_latestGlfwWindow.store(window, std::memory_order_release);
+    std::lock_guard<std::mutex> lock(g_glfwWindowStateMutex);
     const GLFWFRAMEBUFFERSIZEFUN previous = oglfwSetFramebufferSizeCallback(window, callback);
-    g_glfwFramebufferSizeCallback.store(callback, std::memory_order_release);
+    if (g_glfwWindowState.window == window) g_glfwWindowState.framebufferSizeCallback = callback;
     return previous;
 }
 
-void InvokeCapturedGlfwResizeCallbacks(int width, int height) {
-    if (!IsMinecraft26_2FinalOrNewer(g_gameVersion) || width <= 0 || height <= 0 || g_isShuttingDown.load(std::memory_order_acquire)) { return; }
-
-    void* window = g_latestGlfwWindow.load(std::memory_order_acquire);
-    if (!window) { return; }
-
-    GLFWWINDOWSIZEFUN windowCallback = g_glfwWindowSizeCallback.load(std::memory_order_acquire);
-    GLFWFRAMEBUFFERSIZEFUN framebufferCallback = g_glfwFramebufferSizeCallback.load(std::memory_order_acquire);
+void InvokeCapturedGlfwResizeCallbacks(HWND destinationHwnd, int width, int height) {
+    if (width <= 0 || height <= 0 || g_isShuttingDown.load(std::memory_order_acquire)) return;
+    void* window = nullptr;
+    GLFWWINDOWSIZEFUN windowCallback = nullptr;
+    GLFWFRAMEBUFFERSIZEFUN framebufferCallback = nullptr;
+    uint64_t generation = 0;
     {
-        std::lock_guard<std::mutex> lock(g_glfwResizeCallbackMutex);
-        if (!windowCallback && oglfwSetWindowSizeCallback) {
-            windowCallback = oglfwSetWindowSizeCallback(window, nullptr);
-            oglfwSetWindowSizeCallback(window, windowCallback);
-            g_glfwWindowSizeCallback.store(windowCallback, std::memory_order_release);
-        }
-        if (!framebufferCallback && oglfwSetFramebufferSizeCallback) {
-            framebufferCallback = oglfwSetFramebufferSizeCallback(window, nullptr);
-            oglfwSetFramebufferSizeCallback(window, framebufferCallback);
-            g_glfwFramebufferSizeCallback.store(framebufferCallback, std::memory_order_release);
-        }
+        std::lock_guard<std::mutex> lock(g_glfwWindowStateMutex);
+        if (!g_glfwWindowState.replayPending || g_glfwWindowState.replayHwnd != destinationHwnd ||
+            g_glfwWindowState.replayGeneration != g_glfwWindowState.generation ||
+            g_glfwWindowState.ownerThreadId != GetCurrentThreadId() || !IsWindow(destinationHwnd)) return;
+        g_glfwWindowState.replayPending = false;
+        window = g_glfwWindowState.window;
+        generation = g_glfwWindowState.generation;
+        windowCallback = g_glfwWindowState.windowSizeCallback;
+        framebufferCallback = g_glfwWindowState.framebufferSizeCallback;
     }
-
-    if (windowCallback) { windowCallback(window, width, height); }
-    if (framebufferCallback) { framebufferCallback(window, width, height); }
+    // The message target, generation, and owning thread were validated above.
+    // Revalidate immediately before *each* GLFW-owned callback; the first
+    // callback is allowed to recreate/destroy the window.
+    const auto stillCurrent = [&]() {
+        std::lock_guard<std::mutex> lock(g_glfwWindowStateMutex);
+        return generation == g_glfwWindowState.generation && window == g_glfwWindowState.window &&
+               destinationHwnd == g_glfwWindowState.hwnd && IsWindow(destinationHwnd);
+    };
+    if (windowCallback && stillCurrent()) windowCallback(window, width, height);
+    if (framebufferCallback && stillCurrent()) framebufferCallback(window, width, height);
 }
 
-void ClearCapturedGlfwResizeCallbacks() {
-    g_latestGlfwWindow.store(nullptr, std::memory_order_release);
-    g_glfwWindowSizeCallback.store(nullptr, std::memory_order_release);
-    g_glfwFramebufferSizeCallback.store(nullptr, std::memory_order_release);
-    g_glfwInitialResizeCallbacksReplayed.store(false, std::memory_order_release);
+void ClearCapturedGlfwResizeCallbacks(HWND destroyedHwnd) {
+    void* window = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_glfwWindowStateMutex);
+        if (destroyedHwnd && g_glfwWindowState.hwnd != destroyedHwnd) return;
+        window = g_glfwWindowState.window;
+    }
+    if (window) ClearTrackedGlfwWindow(window);
 }
 
 static void ReplayPendingGlfwResizeCallbacksOnWindowThread(HWND hwnd) {
-    if (!IsMinecraft26_2FinalOrNewer(g_gameVersion) || !hwnd || !g_latestGlfwWindow.load(std::memory_order_acquire)) { return; }
+    if (!hwnd) return;
 
     int requestedWidth = 0;
     int requestedHeight = 0;
@@ -2495,17 +2738,28 @@ static void ReplayPendingGlfwResizeCallbacksOnWindowThread(HWND hwnd) {
     int previousRequestedHeight = 0;
     if (!GetRecentRequestedWindowClientResizes(requestedWidth, requestedHeight, previousRequestedWidth, previousRequestedHeight)) { return; }
 
-    bool expected = false;
-    if (!g_glfwInitialResizeCallbacksReplayed.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) { return; }
+    {
+        std::lock_guard<std::mutex> lock(g_glfwWindowStateMutex);
+        if (g_glfwWindowState.hwnd != hwnd || !g_glfwWindowState.window ||
+            g_glfwWindowState.ownerThreadId != GetCurrentThreadId() || g_glfwWindowState.initialResizeReplayPosted) return;
+        g_glfwWindowState.initialResizeReplayPosted = true;
+        g_glfwWindowState.replayPending = true;
+        g_glfwWindowState.replayGeneration = g_glfwWindowState.generation;
+        g_glfwWindowState.replayHwnd = hwnd;
+    }
 
     if (!PostMessage(hwnd, WM_TOOLSCREEN_INVOKE_GLFW_RESIZE_CALLBACKS, static_cast<WPARAM>(requestedWidth), static_cast<LPARAM>(requestedHeight))) {
-        g_glfwInitialResizeCallbacksReplayed.store(false, std::memory_order_release);
+        std::lock_guard<std::mutex> lock(g_glfwWindowStateMutex);
+        if (g_glfwWindowState.hwnd == hwnd) {
+            g_glfwWindowState.initialResizeReplayPosted = false;
+            g_glfwWindowState.replayPending = false;
+        }
         Log("[GLFW] Failed to defer initial resize callback replay. Error=" + std::to_string(GetLastError()));
     }
 }
 
 void hkglfwSetCursor(void* window, void* cursor) {
-    if (cursor != nullptr && g_gameVersion >= GameVersion(1, 13, 0) && !g_glfwCursorGrabbed.load(std::memory_order_acquire)) {
+    if (cursor != nullptr && g_gameVersion >= GameVersion(1, 13, 0) && !g_nativeCursorGrabbed.load(std::memory_order_acquire)) {
         const std::string localGameState = g_gameStateBuffers[g_currentGameStateIndex.load(std::memory_order_acquire)];
         const CursorTextures::CursorData* cursorData = CursorTextures::GetSelectedCursor(localGameState, 64);
         if (cursorData && cursorData->hCursor) {
@@ -2514,6 +2768,186 @@ void hkglfwSetCursor(void* window, void* cursor) {
         }
     }
     if (oglfwSetCursor) { oglfwSetCursor(window, cursor); }
+}
+
+static constexpr uint64_t SDL_WINDOW_OPENGL_FLAG = 0x0000000000000002ull;
+static constexpr uint64_t SDL_WINDOW_VULKAN_FLAG = 0x0000000010000000ull;
+static constexpr const char* SDL_PROP_WINDOW_WIN32_HWND = "SDL.window.win32.hwnd";
+
+static HWND ResolveSdlWindowHwnd(void* window) {
+    if (!window || !sdlGetWindowPropertiesProc || !sdlGetPointerPropertyProc) return NULL;
+    const SDLPROPERTIESID properties = sdlGetWindowPropertiesProc(window);
+    if (!properties) return NULL;
+    return static_cast<HWND>(sdlGetPointerPropertyProc(properties, SDL_PROP_WINDOW_WIN32_HWND, nullptr));
+}
+
+static bool GetTrackedSdlWindow(void*& window, HWND& hwnd, uint64_t& generation, bool& noApi) {
+    std::lock_guard<std::mutex> lock(g_sdlWindowStateMutex);
+    window = g_sdlWindowState.window;
+    hwnd = g_sdlWindowState.hwnd;
+    generation = g_sdlWindowState.generation;
+    noApi = g_sdlWindowState.noApi;
+    return window != nullptr && hwnd != NULL && IsWindow(hwnd);
+}
+
+static bool IsTrackedSdlNoApiWindow() {
+    void* window = nullptr;
+    HWND hwnd = NULL;
+    uint64_t generation = 0;
+    bool noApi = false;
+    return GetTrackedSdlWindow(window, hwnd, generation, noApi) && noApi;
+}
+
+static bool TrackSdlWindow(void* window, HWND hwnd, bool noApi) {
+    if (!window || !hwnd) return false;
+    bool changed = false;
+    {
+        std::lock_guard<std::mutex> lock(g_sdlWindowStateMutex);
+        if (g_sdlWindowState.window != window || g_sdlWindowState.hwnd != hwnd) {
+            ++g_sdlWindowState.generation;
+            changed = true;
+        }
+        g_sdlWindowState.window = window;
+        g_sdlWindowState.hwnd = hwnd;
+        g_sdlWindowState.ownerThreadId = GetCurrentThreadId();
+        g_sdlWindowState.noApi = noApi;
+    }
+    g_lastSdlCursorWindow.store(window, std::memory_order_release);
+    if (sdlGetWindowRelativeMouseModeProc) {
+        g_nativeCursorGrabbed.store(sdlGetWindowRelativeMouseModeProc(window), std::memory_order_release);
+    }
+    return changed;
+}
+
+static void TrackSdlWindowFromHandle(void* window) {
+    const HWND hwnd = ResolveSdlWindowHwnd(window);
+    DWORD pid = 0;
+    if (!hwnd || !IsWindow(hwnd) || GetWindowThreadProcessId(hwnd, &pid) == 0 || pid != GetCurrentProcessId()) return;
+
+    const uint64_t flags = sdlGetWindowFlagsProc ? sdlGetWindowFlagsProc(window) : 0;
+    const bool noApi = (flags & SDL_WINDOW_VULKAN_FLAG) != 0 && (flags & SDL_WINDOW_OPENGL_FLAG) == 0;
+    const bool changed = TrackSdlWindow(window, hwnd, noApi);
+    g_minecraftHwnd.store(hwnd, std::memory_order_release);
+    if (changed) {
+        LogCategory("init", "[WINDOW] SDL3 created the Minecraft HWND; deferring window-bound initialization until a real render backend frame.");
+    }
+}
+
+static void ClearTrackedSdlWindow(void* window, HWND hwnd = NULL) {
+    std::lock_guard<std::mutex> lock(g_sdlWindowStateMutex);
+    if (g_sdlWindowState.window != window || (hwnd && g_sdlWindowState.hwnd != hwnd)) return;
+    ++g_sdlWindowState.generation;
+    g_sdlWindowState.window = nullptr;
+    g_sdlWindowState.hwnd = NULL;
+    g_sdlWindowState.ownerThreadId = 0;
+    g_sdlWindowState.noApi = false;
+    g_lastSdlCursorWindow.store(nullptr, std::memory_order_release);
+    g_deferredGuiSdlRelativeMouseMode.store(kDeferredGuiSdlRelativeMouseModeNone, std::memory_order_release);
+    g_nativeCursorGrabbed.store(false, std::memory_order_release);
+}
+
+void ClearCapturedSdlWindow(HWND destroyedHwnd) {
+    void* window = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_sdlWindowStateMutex);
+        if (destroyedHwnd && g_sdlWindowState.hwnd != destroyedHwnd) return;
+        window = g_sdlWindowState.window;
+    }
+    if (window) ClearTrackedSdlWindow(window, destroyedHwnd);
+}
+
+void* hkSdlCreateWindow(const char* title, int width, int height, uint64_t flags) {
+    void* window = oSdlCreateWindow ? oSdlCreateWindow(title, width, height, flags) : nullptr;
+    if (window) TrackSdlWindowFromHandle(window);
+    return window;
+}
+
+void* hkSdlCreateWindowWithProperties(SDLPROPERTIESID properties) {
+    void* window = oSdlCreateWindowWithProperties ? oSdlCreateWindowWithProperties(properties) : nullptr;
+    if (window) TrackSdlWindowFromHandle(window);
+    return window;
+}
+
+void hkSdlDestroyWindow(void* window) {
+    HWND hwnd = NULL;
+    {
+        std::lock_guard<std::mutex> lock(g_sdlWindowStateMutex);
+        if (g_sdlWindowState.window == window) hwnd = g_sdlWindowState.hwnd;
+    }
+    ClearTrackedSdlWindow(window, hwnd);
+    if (oSdlDestroyWindow) oSdlDestroyWindow(window);
+}
+
+static bool ApplySdlRelativeMouseMode_Impl(SDLSETWINDOWRELATIVEMOUSEMODE next, void* window, bool enabled) {
+    if (!next) return false;
+    const bool previous = g_nativeCursorGrabbed.load(std::memory_order_acquire);
+    g_nativeCursorGrabbed.store(enabled, std::memory_order_release);
+    g_capturingMousePos.store(enabled ? CapturingState::DISABLED : CapturingState::NORMAL, std::memory_order_release);
+    const bool result = next(window, enabled);
+    g_capturingMousePos.store(CapturingState::NONE, std::memory_order_release);
+    if (!result) g_nativeCursorGrabbed.store(previous, std::memory_order_release);
+    return result;
+}
+
+bool hkSdlSetWindowRelativeMouseMode(void* window, bool enabled) {
+    if (!oSdlSetWindowRelativeMouseMode) return false;
+    g_lastSdlCursorWindow.store(window, std::memory_order_release);
+
+    if (g_showGui.load(std::memory_order_acquire)) {
+        g_deferredGuiSdlRelativeMouseMode.store(enabled ? 1 : 0, std::memory_order_release);
+        UpdateGuiCursorRestoreState(!enabled);
+        g_nextMouseXY.store(std::make_pair(-1, -1), std::memory_order_release);
+        g_capturingMousePos.store(CapturingState::NONE, std::memory_order_release);
+        return true;
+    }
+
+    return ApplySdlRelativeMouseMode_Impl(oSdlSetWindowRelativeMouseMode, window, enabled);
+}
+
+static bool TryInstallSdlHooks(HMODULE sdl) {
+    if (!sdl || g_sdlHooksInstalled.load(std::memory_order_acquire)) return g_sdlHooksInstalled.load(std::memory_order_acquire);
+    std::lock_guard<std::mutex> lock(g_sdlHookInstallMutex);
+    if (g_sdlHooksInstalled.load(std::memory_order_relaxed)) return true;
+
+    sdlGetWindowPropertiesProc = reinterpret_cast<SDLGETWINDOWPROPERTIES>(GetProcAddress(sdl, "SDL_GetWindowProperties"));
+    sdlGetPointerPropertyProc = reinterpret_cast<SDLGETPOINTERPROPERTY>(GetProcAddress(sdl, "SDL_GetPointerProperty"));
+    sdlGetWindowFlagsProc = reinterpret_cast<SDLGETWINDOWFLAGS>(GetProcAddress(sdl, "SDL_GetWindowFlags"));
+    sdlGetWindowRelativeMouseModeProc =
+        reinterpret_cast<SDLGETWINDOWRELATIVEMOUSEMODE>(GetProcAddress(sdl, "SDL_GetWindowRelativeMouseMode"));
+    sdlGlGetCurrentWindowProc.store(reinterpret_cast<SDLGLGETCURRENTWINDOW>(GetProcAddress(sdl, "SDL_GL_GetCurrentWindow")),
+                                    std::memory_order_release);
+
+    if (!sdlGetWindowPropertiesProc || !sdlGetPointerPropertyProc) {
+        LogCategory("init", "[WINDOW] SDL3 loaded without the Win32 window-property API; waiting for a compatible SDL3 module.");
+        return false;
+    }
+
+    void* createWindow = reinterpret_cast<void*>(GetProcAddress(sdl, "SDL_CreateWindow"));
+    void* createWindowWithProperties = reinterpret_cast<void*>(GetProcAddress(sdl, "SDL_CreateWindowWithProperties"));
+    bool createHookInstalled = false;
+    if (createWindow) {
+        createHookInstalled = CreateHookOrDie(createWindow, &hkSdlCreateWindow, &oSdlCreateWindow, "SDL_CreateWindow");
+    }
+    if (createWindowWithProperties) {
+        createHookInstalled =
+            CreateHookOrDie(createWindowWithProperties, &hkSdlCreateWindowWithProperties, &oSdlCreateWindowWithProperties,
+                            "SDL_CreateWindowWithProperties") || createHookInstalled;
+    }
+    if (!createHookInstalled) {
+        LogCategory("init", "[WINDOW] SDL3 loaded without a hookable create-window API.");
+        return false;
+    }
+
+    CreateHookOrDie(GetProcAddress(sdl, "SDL_DestroyWindow"), &hkSdlDestroyWindow, &oSdlDestroyWindow, "SDL_DestroyWindow");
+    CreateHookOrDie(GetProcAddress(sdl, "SDL_SetWindowRelativeMouseMode"), &hkSdlSetWindowRelativeMouseMode,
+                    &oSdlSetWindowRelativeMouseMode, "SDL_SetWindowRelativeMouseMode");
+
+    if (g_minHookEnabled.load(std::memory_order_acquire)) {
+        MH_EnableHook(MH_ALL_HOOKS);
+    }
+    g_sdlHooksInstalled.store(true, std::memory_order_release);
+    LogCategory("init", "[WINDOW] Installed SDL3 window lifecycle and relative-mouse hooks.");
+    return true;
 }
 
 static UINT GetRawInputDataHook_Impl(GETRAWINPUTDATAPROC next, HRAWINPUT hRawInput, UINT uiCommand, LPVOID pData, PUINT pcbSize,
@@ -3039,12 +3473,27 @@ static void RestoreGLStateNoThrow(const GLState& s) {
 static BOOL SwapBuffersHook_Impl(WGLSWAPBUFFERS next, HDC hDc) {
     if (!next) return FALSE;
 
-    // Merely loading opengl32.dll is not backend detection. A real swap from a
-    // live WGL context is the first authoritative OpenGL frame.
-    if (wglGetCurrentContext() != NULL && !TryLatchRenderBackend(RenderBackend::OpenGL)) {
+    // 26.2+ creates a short-lived WGL bootstrap surface before its real Vulkan
+    // instance/device. It is not a rendered Minecraft OpenGL frame. Passing it
+    // through before even querying the WGL context prevents the legacy backend
+    // from latching, initializing GLEW, creating GL objects, or activating the
+    // OpenGL OBS redirect in native Vulkan mode. Older OpenGL versions keep the
+    // original path byte-for-byte below this gate.
+    if (IsTrackedGlfwNoApiWindow() || IsTrackedSdlNoApiWindow()) {
+        static std::atomic<bool> loggedVulkanBootstrapPassThrough{false};
+        if (!loggedVulkanBootstrapPassThrough.exchange(
+                true, std::memory_order_acq_rel)) {
+            LogCategory(
+                "init",
+                "[VULKAN][NO-GL] Passed through the 26.2+ WGL bootstrap swap "
+                "before any WGL context query, GLEW initialization, GL object "
+                "creation, or OpenGL OBS redirect.");
+        }
         return next(hDc);
     }
 
+    // Merely loading opengl32.dll is not backend detection. A real swap from a
+    // live WGL context is the first authoritative OpenGL frame.
     thread_local int s_swapBuffersHookDepth = 0;
     struct SwapBuffersHookDepthScope {
         int& depth;
@@ -3077,36 +3526,72 @@ static BOOL SwapBuffersHook_Impl(WGLSWAPBUFFERS next, HDC hDc) {
     }
 
     try {
-        if (!g_glewLoaded) {
-            PROFILE_SCOPE_CAT("GLEW Initialization", "SwapBuffers");
-            glewExperimental = GL_TRUE;
-            if (glewInit() == GLEW_OK) {
-                LogCategory("init", "[RENDER] GLEW Initialized successfully.");
-                g_glewLoaded = true;
-
-                g_welcomeToastVisible.store(true);
-
-                CursorTextures::LoadCursorTextures();
-
-                if (wglGetCurrentContext()) {
-                    AttemptHookGlBlitFramebufferViaWgl();
-                    StartObsHookThread();
+        const HGLRC currentContext = wglGetCurrentContext();
+        if (!currentContext) return next(hDc);
+        void* trackedWindow = nullptr;
+        HWND trackedHwnd = NULL;
+        uint64_t trackedGeneration = 0;
+        bool trackedNoApi = false;
+        bool hasTrackedNativeWindow =
+            GetTrackedGlfwWindow(trackedWindow, trackedHwnd, trackedGeneration, trackedNoApi) ||
+            GetTrackedSdlWindow(trackedWindow, trackedHwnd, trackedGeneration, trackedNoApi);
+        if (!hasTrackedNativeWindow) {
+            // Late injection can miss the GLFW or SDL3 create-window hook. A
+            // current library-owned OpenGL window is a safe recovery signal;
+            // a Vulkan bootstrap WGL context has no such window.
+            const auto getCurrent = glfwGetCurrentContextProc.load(std::memory_order_acquire);
+            if (getCurrent && (trackedWindow = getCurrent()) && glfwGetWin32WindowProc) {
+                trackedHwnd = glfwGetWin32WindowProc(trackedWindow);
+                DWORD pid = 0;
+                if (trackedHwnd && IsWindow(trackedHwnd) &&
+                    GetWindowThreadProcessId(trackedHwnd, &pid) != 0 && pid == GetCurrentProcessId()) {
+                    TrackGlfwWindow(trackedWindow, trackedHwnd, false);
+                    trackedNoApi = false;
                 }
+            }
+            if (!trackedHwnd) {
+                const auto getCurrentSdlWindow = sdlGlGetCurrentWindowProc.load(std::memory_order_acquire);
+                if (getCurrentSdlWindow && (trackedWindow = getCurrentSdlWindow())) {
+                    trackedHwnd = ResolveSdlWindowHwnd(trackedWindow);
+                    DWORD pid = 0;
+                    if (trackedHwnd && IsWindow(trackedHwnd) &&
+                        GetWindowThreadProcessId(trackedHwnd, &pid) != 0 && pid == GetCurrentProcessId()) {
+                        TrackSdlWindow(trackedWindow, trackedHwnd, false);
+                        trackedNoApi = false;
+                    }
+                }
+            }
+        }
+        if (!trackedWindow || !trackedHwnd || trackedNoApi || WindowFromDC(hDc) != trackedHwnd) return next(hDc);
 
-                AttemptAggressiveGlViewportHook();
-
-                AttemptHookGlBindTextureViaWgl();
-
-                AttemptHookGlBindFramebufferViaWgl();
-
-                AttemptHookGlNamedFramebufferTextureViaGlew();
-
-                AttemptHookGlBlitNamedFramebufferViaGlew();
-
-            } else {
-                Log("[RENDER] ERROR: Failed to initialize GLEW.");
+        {
+            std::lock_guard<std::mutex> openGlLock(g_openGlInitializationMutex);
+            if (g_glewLoaded.load(std::memory_order_acquire) && g_openGlRenderContext != currentContext) {
                 return next(hDc);
             }
+            if (!g_glewLoaded.load(std::memory_order_acquire)) {
+                PROFILE_SCOPE_CAT("GLEW Initialization", "SwapBuffers");
+                glewExperimental = GL_TRUE;
+                if (glewInit() != GLEW_OK) {
+                    Log("[RENDER] ERROR: Failed to initialize GLEW.");
+                    return next(hDc);
+                }
+                g_openGlRenderContext = currentContext;
+                g_glewLoaded.store(true, std::memory_order_release);
+                LogCategory("init", "[RENDER] GLEW Initialized successfully.");
+                g_welcomeToastVisible.store(true);
+                CursorTextures::LoadCursorTextures();
+                AttemptHookGlBlitFramebufferViaWgl();
+                StartObsHookThread();
+                AttemptAggressiveGlViewportHook();
+                AttemptHookGlBindTextureViaWgl();
+                AttemptHookGlBindFramebufferViaWgl();
+                AttemptHookGlNamedFramebufferTextureViaGlew();
+                AttemptHookGlBlitNamedFramebufferViaGlew();
+            }
+            // Latch only after a GLFW-owned WGL context has initialized
+            // successfully. Failed and bootstrap swaps remain uncommitted.
+            if (!TryLatchRenderBackend(RenderBackend::OpenGL)) return next(hDc);
         }
         if (g_isShuttingDown.load()) { return next(hDc); }
 
@@ -3122,11 +3607,9 @@ static BOOL SwapBuffersHook_Impl(WGLSWAPBUFFERS next, HDC hDc) {
 
         HWND hwnd = WindowFromDC(hDc);
         if (!hwnd) { return next(hDc); }
-        if (IsMinecraft26_2FinalOrNewer(g_gameVersion) && glfwGetCurrentContextProc) {
-            if (void* glfwWindow = glfwGetCurrentContextProc()) {
-                g_latestGlfwWindow.store(glfwWindow, std::memory_order_release);
-                ReplayPendingGlfwResizeCallbacksOnWindowThread(hwnd);
-            }
+        if (const auto getCurrent = glfwGetCurrentContextProc.load(std::memory_order_acquire);
+            getCurrent && getCurrent()) {
+            ReplayPendingGlfwResizeCallbacksOnWindowThread(hwnd);
         }
         HWND previousHwnd = g_minecraftHwnd.load();
         if (hwnd != previousHwnd) {
@@ -3458,15 +3941,21 @@ static BOOL SwapBuffersHook_Impl(WGLSWAPBUFFERS next, HDC hDc) {
             }
         }
 
-        const bool shouldRenderObsHookFrame =
-            g_graphicsHookDetected.load(std::memory_order_acquire) && ShouldUpdateObsTextureNow();
+        // OBS capture sampling and the game's SwapBuffers cadence are not
+        // phase-locked.  Throttling this compose pass to an independent wall
+        // clock can make OBS sample the same published texture twice, even
+        // when both OBS and the game are running normally.  Compose once per
+        // OpenGL game frame; the OBS consumer remains free to sample at its
+        // own rate.
+        const bool shouldRenderObsHookFrame = g_graphicsHookDetected.load(std::memory_order_acquire);
         const bool shouldRenderVirtualCameraFrame = IsVirtualCameraActive() && ShouldCaptureVirtualCameraFrame();
         const bool shouldRenderSharedObsFrame = shouldRenderObsHookFrame || shouldRenderVirtualCameraFrame;
+        bool sharedObsFrameRendered = false;
         if (shouldRenderSharedObsFrame) {
             PROFILE_SCOPE_CAT("Capture Shared OBS/Virtual Camera Frame", "OBS");
-            RenderSameThreadObsFrame(&modeToRenderCopy, s, current_gameW, current_gameH, false);
+            sharedObsFrameRendered = RenderSameThreadObsFrame(&modeToRenderCopy, s, current_gameW, current_gameH, false);
         }
-        if (shouldRenderVirtualCameraFrame) {
+        if (shouldRenderVirtualCameraFrame && sharedObsFrameRendered) {
             PROFILE_SCOPE_CAT("Capture Virtual Camera Frame", "VirtualCamera");
             CaptureSameThreadVirtualCameraFrame();
         }
@@ -3576,21 +4065,24 @@ BOOL WINAPI hkwglSwapBuffers(HDC hDc) { return SwapBuffersHook_Impl(owglSwapBuff
 BOOL WINAPI hkwglSwapBuffers_ThirdParty(HDC hDc) {
     void* installedHookTarget = g_wglSwapBuffersThirdPartyHookTarget.load(std::memory_order_acquire);
     if (installedHookTarget == reinterpret_cast<void*>(&hkwglSwapBuffers)) {
-        WGLSWAPBUFFERS next = (g_owglSwapBuffersThirdParty && g_owglSwapBuffersThirdParty != reinterpret_cast<WGLSWAPBUFFERS>(&hkwglSwapBuffers_ThirdParty))
-                                  ? g_owglSwapBuffersThirdParty
+        const WGLSWAPBUFFERS thirdParty = g_owglSwapBuffersThirdParty.load(std::memory_order_acquire);
+        WGLSWAPBUFFERS next = (thirdParty && thirdParty != reinterpret_cast<WGLSWAPBUFFERS>(&hkwglSwapBuffers_ThirdParty))
+                                  ? thirdParty
                                   : owglSwapBuffers;
         return next ? next(hDc) : FALSE;
     }
 
     void* caller_address = _ReturnAddress();
     if (IsDisallowedThirdPartySwapCaller(caller_address)) {
-        WGLSWAPBUFFERS next = (g_owglSwapBuffersThirdParty && g_owglSwapBuffersThirdParty != reinterpret_cast<WGLSWAPBUFFERS>(&hkwglSwapBuffers_ThirdParty))
-                                  ? g_owglSwapBuffersThirdParty
+        const WGLSWAPBUFFERS thirdParty = g_owglSwapBuffersThirdParty.load(std::memory_order_acquire);
+        WGLSWAPBUFFERS next = (thirdParty && thirdParty != reinterpret_cast<WGLSWAPBUFFERS>(&hkwglSwapBuffers_ThirdParty))
+                                  ? thirdParty
                                   : owglSwapBuffers;
         return next ? next(hDc) : FALSE;
     }
 
-    WGLSWAPBUFFERS next = g_owglSwapBuffersThirdParty ? g_owglSwapBuffersThirdParty : owglSwapBuffers;
+    WGLSWAPBUFFERS next = g_owglSwapBuffersThirdParty.load(std::memory_order_acquire);
+    if (!next) next = owglSwapBuffers;
     return SwapBuffersHook_Impl(next, hDc);
 }
 
@@ -3606,9 +4098,14 @@ LOADLIBRARYEXWPROC oLoadLibraryExW = nullptr;
 GETPROCADDRESSPROC oGetProcAddress = nullptr;
 
 static void NotifyLateGraphicsModule(HMODULE module) {
-    if (module && IsMinecraft26_2FinalOrNewer(g_gameVersion)) {
-        VulkanHooks::NotifyModuleLoaded(module);
-    }
+    if (!module) return;
+    VulkanHooks::NotifyModuleLoaded(module);
+    wchar_t path[MAX_PATH]{};
+    if (!GetModuleFileNameW(module, path, MAX_PATH)) return;
+    const wchar_t* leaf = wcsrchr(path, L'\\');
+    leaf = leaf ? leaf + 1 : path;
+    if (_wcsicmp(leaf, L"glfw.dll") == 0) TryInstallGlfwHooks(module);
+    if (_wcsicmp(leaf, L"SDL3.dll") == 0) TryInstallSdlHooks(module);
 }
 
 HMODULE WINAPI hkLoadLibraryA(LPCSTR path) {
@@ -3637,7 +4134,6 @@ HMODULE WINAPI hkLoadLibraryExW(LPCWSTR path, HANDLE file, DWORD flags) {
 
 FARPROC WINAPI hkGetProcAddress(HMODULE module, LPCSTR name) {
     FARPROC realFunction = oGetProcAddress ? oGetProcAddress(module, name) : nullptr;
-    if (!IsMinecraft26_2FinalOrNewer(g_gameVersion)) return realFunction;
     return VulkanHooks::InterceptLoaderGetProcAddress(module, name, realFunction);
 }
 
@@ -3745,6 +4241,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         StartSupportersFetch();
 
         g_gameVersion = GetGameVersionFromCommandLine();
+        // Layer activation is capability-based: it is inert for OpenGL-only
+        // clients and works when a launcher omits a Minecraft version flag.
+        VulkanHooks::EnableProcessLocalObsRedirectLayer(hModule);
         GameVersion minVersion(1, 16, 1);
         GameVersion maxVersion(1, 18, 2);
 
@@ -3819,6 +4318,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         HMODULE hOpenGL32 = GetModuleHandle(L"opengl32.dll");
         HMODULE hUser32 = GetModuleHandle(L"user32.dll");
         HMODULE hGlfw = GetModuleHandle(L"glfw.dll");
+        HMODULE hSdl = GetModuleHandle(L"SDL3.dll");
         HMODULE hKernel32 = GetModuleHandle(L"kernel32.dll");
 
         if (!hUser32) {
@@ -3844,24 +4344,17 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         HOOK(hUser32, ClipCursor);
         HOOK(hUser32, SetCursor);
         HOOK(hUser32, GetRawInputData);
-        if (IsMinecraft26_2FinalOrNewer(g_gameVersion) && hKernel32) {
+        if (hKernel32) {
             HOOK(hKernel32, GetProcAddress);
             HOOK(hKernel32, LoadLibraryA);
             HOOK(hKernel32, LoadLibraryW);
             HOOK(hKernel32, LoadLibraryExA);
             HOOK(hKernel32, LoadLibraryExW);
         }
-        if (hGlfw) {
-            HOOK(hGlfw, glfwSetInputMode);
-            HOOK(hGlfw, glfwSetCursor);
-            if (IsMinecraft26_2FinalOrNewer(g_gameVersion)) {
-                HOOK(hGlfw, glfwSetWindowSizeCallback);
-                HOOK(hGlfw, glfwSetFramebufferSizeCallback);
-                glfwGetCurrentContextProc = reinterpret_cast<GLFWGETCURRENTCONTEXTPROC>(GetProcAddress(hGlfw, "glfwGetCurrentContext"));
-            }
-        } else {
-            LogCategory("init", "WARNING: glfw.dll not loaded; skipping glfwSetInputMode hook");
-        }
+        if (hGlfw) TryInstallGlfwHooks(hGlfw);
+        else LogCategory("init", "[WINDOW] glfw.dll is not loaded yet; its readiness hook will install when it loads.");
+        if (hSdl) TryInstallSdlHooks(hSdl);
+        else LogCategory("init", "[WINDOW] SDL3.dll is not loaded yet; its readiness hook will install when it loads.");
 #undef HOOK
 
         LPVOID pGlBindFramebuffer = hOpenGL32 ? GetProcAddress(hOpenGL32, "glBindFramebuffer") : nullptr;
@@ -3894,11 +4387,18 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             Log("ERROR: MH_EnableHook(MH_ALL_HOOKS) failed!");
             return TRUE;
         }
+        g_minHookEnabled.store(true, std::memory_order_release);
+        // Close the GetModuleHandle/LoadLibrary-hook handoff: GLFW may have
+        // loaded after the first probe but before these loader hooks went live.
+        if (HMODULE lateGlfw = GetModuleHandleW(L"glfw.dll")) {
+            TryInstallGlfwHooks(lateGlfw);
+        }
+        if (HMODULE lateSdl = GetModuleHandleW(L"SDL3.dll")) {
+            TryInstallSdlHooks(lateSdl);
+        }
 
         LogCategory("init", "Hooks enabled.");
-        if (IsMinecraft26_2FinalOrNewer(g_gameVersion)) {
-            VulkanHooks::InstallIfAvailable();
-        }
+        VulkanHooks::InstallIfAvailable();
 
         // This thread periodically detects those detours (prolog or IAT) and chains behind them.
         g_stopHookCompat.store(false, std::memory_order_release);
@@ -3906,9 +4406,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             while (!g_stopHookCompat.load(std::memory_order_acquire) && !g_isShuttingDown.load(std::memory_order_acquire)) {
                 HookChain::RefreshAllThirdPartyHookChains();
-                if (IsMinecraft26_2FinalOrNewer(g_gameVersion)) {
-                    VulkanHooks::InstallIfAvailable();
-                }
+                VulkanHooks::InstallIfAvailable();
 
                 for (int i = 0; i < 20; i++) {
                     if (g_stopHookCompat.load(std::memory_order_acquire) || g_isShuttingDown.load(std::memory_order_acquire)) break;

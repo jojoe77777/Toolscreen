@@ -324,6 +324,7 @@ set(TOOLSCREEN_MODULE_DIRS
     platform
     render
     render/vulkan
+    render/vulkan/layer
     runtime
     third_party
 )
@@ -352,6 +353,7 @@ add_library(${PROJECT_NAME} SHARED
     ${TOOLSCREEN_HEADERS}
     ${TOOLSCREEN_GENERATED_VERSION_HEADER}
     ${CMAKE_CURRENT_SOURCE_DIR}/src/platform/resource.rc
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/render/vulkan/layer/toolscreen_vulkan_layer.def
 )
 
 add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
@@ -366,7 +368,10 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_CURRENT_SOURCE_DIR}/src/assets/fonts/OpenSans-Regular.ttf"
         "$<TARGET_FILE_DIR:${PROJECT_NAME}>/fonts/OpenSans-Regular.ttf"
-    COMMENT "Copying bundled fonts to output directory"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/render/vulkan/layer/VK_LAYER_TOOLSCREEN_obs_redirect.json"
+        "$<TARGET_FILE_DIR:${PROJECT_NAME}>/VK_LAYER_TOOLSCREEN_obs_redirect.json"
+    COMMENT "Copying bundled fonts and Vulkan layer manifest to output directory"
 )
 
 source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}/src" PREFIX "Source Files" FILES
@@ -387,6 +392,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE
     TOOLSCREEN_EXPORTS
+    TOOLSCREEN_VULKAN_LAYER_EMBEDDED
     CMAKE_BUILD
     GLEW_STATIC
     NOMINMAX
@@ -645,53 +651,41 @@ if(TOOLSCREEN_ENABLE_JAR_PACKAGING OR TOOLSCREEN_ENABLE_EXE_PACKAGING)
         FetchContent_Populate(easyinjectbundled)
     endif()
 
-    # EasyInjectBundled normally waits for Minecraft's first visible window and
-    # then waits another 500 ms before loading bundled DLLs. Minecraft 26.2 can
-    # create its Vulkan instance and device before that window exists, which is
-    # too late for Toolscreen to observe proc-address resolution. Patch only the
-    # branded Toolscreen watcher so it injects as soon as the matching JVM is
-    # identified; retain the upstream timing for every other brand.
+    file(REMOVE "${easyinjectbundled_SOURCE_DIR}/custom-dlls/WebView2Loader.dll")
+
+    # Package the private Vulkan layer manifest alongside Toolscreen.dll. The
+    # Vulkan layer entry points live in Toolscreen.dll itself.
     set(TOOLSCREEN_EASYINJECT_MAIN_JAVA
         "${easyinjectbundled_SOURCE_DIR}/src/main/java/com/easyinject/Main.java")
-    file(READ "${TOOLSCREEN_EASYINJECT_MAIN_JAVA}" TOOLSCREEN_EASYINJECT_MAIN_CONTENT)
-    if(NOT TOOLSCREEN_EASYINJECT_MAIN_CONTENT MATCHES
-       "Toolscreen early injection: matching JVM identified")
-        set(TOOLSCREEN_EASYINJECT_WINDOW_WAIT_ANCHOR
-            "                if (!loggedWindowWaitForCurrentTarget) {")
-        string(CONCAT TOOLSCREEN_EASYINJECT_WINDOW_WAIT_REPLACEMENT
-            "                if (\"Toolscreen\".equalsIgnoreCase(PROJECT_NAME)) {\n"
-            "                    log(\"[\" + PROJECT_NAME + \"] Toolscreen early injection: matching JVM identified; skipping visible-window wait\");\n"
-            "                    break;\n"
-            "                }\n\n"
-            "                if (!loggedWindowWaitForCurrentTarget) {")
+    set(TOOLSCREEN_EASYINJECT_POM "${easyinjectbundled_SOURCE_DIR}/pom.xml")
+    file(READ "${TOOLSCREEN_EASYINJECT_POM}" TOOLSCREEN_EASYINJECT_POM_CONTENT)
+    if(NOT TOOLSCREEN_EASYINJECT_POM_CONTENT MATCHES "<include>\\*\\.json</include>")
         string(REPLACE
-            "${TOOLSCREEN_EASYINJECT_WINDOW_WAIT_ANCHOR}"
-            "${TOOLSCREEN_EASYINJECT_WINDOW_WAIT_REPLACEMENT}"
-            TOOLSCREEN_EASYINJECT_MAIN_CONTENT
-            "${TOOLSCREEN_EASYINJECT_MAIN_CONTENT}")
-
-        set(TOOLSCREEN_EASYINJECT_POST_WINDOW_DELAY_ANCHOR
-            "            sleep(500);\n\n            // Inject logger DLL first")
-        string(CONCAT TOOLSCREEN_EASYINJECT_POST_WINDOW_DELAY_REPLACEMENT
-            "            if (!\"Toolscreen\".equalsIgnoreCase(PROJECT_NAME)) {\n"
-            "                sleep(500);\n"
-            "            }\n\n"
-            "            // Inject logger DLL first")
-        string(REPLACE
-            "${TOOLSCREEN_EASYINJECT_POST_WINDOW_DELAY_ANCHOR}"
-            "${TOOLSCREEN_EASYINJECT_POST_WINDOW_DELAY_REPLACEMENT}"
-            TOOLSCREEN_EASYINJECT_MAIN_CONTENT
-            "${TOOLSCREEN_EASYINJECT_MAIN_CONTENT}")
-
-        if(NOT TOOLSCREEN_EASYINJECT_MAIN_CONTENT MATCHES
-           "Toolscreen early injection: matching JVM identified")
-            message(FATAL_ERROR
-                "EasyInjectBundled watcher layout changed; could not apply Toolscreen's early-injection patch.")
-        endif()
-        file(WRITE "${TOOLSCREEN_EASYINJECT_MAIN_JAVA}" "${TOOLSCREEN_EASYINJECT_MAIN_CONTENT}")
+            "                    <include>*.dll</include>"
+            "                    <include>*.dll</include>\n                    <include>*.json</include>"
+            TOOLSCREEN_EASYINJECT_POM_CONTENT
+            "${TOOLSCREEN_EASYINJECT_POM_CONTENT}")
+        file(WRITE "${TOOLSCREEN_EASYINJECT_POM}" "${TOOLSCREEN_EASYINJECT_POM_CONTENT}")
     endif()
 
-    file(REMOVE "${easyinjectbundled_SOURCE_DIR}/custom-dlls/WebView2Loader.dll")
+    file(READ "${TOOLSCREEN_EASYINJECT_MAIN_JAVA}" TOOLSCREEN_EASYINJECT_SUPPORT_CONTENT)
+    if(NOT TOOLSCREEN_EASYINJECT_SUPPORT_CONTENT MATCHES "endsWith\\(\\\"[.]json\\\"\\)")
+        string(REPLACE
+            "if (name.startsWith(DLL_RESOURCE_PATH) && name.toLowerCase().endsWith(\".dll\")) {"
+            "if (name.startsWith(DLL_RESOURCE_PATH) && (name.toLowerCase().endsWith(\".dll\") || name.toLowerCase().endsWith(\".json\"))) {"
+            TOOLSCREEN_EASYINJECT_SUPPORT_CONTENT
+            "${TOOLSCREEN_EASYINJECT_SUPPORT_CONTENT}")
+        string(REPLACE
+            "                        extractedDlls.add(outFile.toPath());"
+            "                        if (dllName.toLowerCase().endsWith(\".dll\")) extractedDlls.add(outFile.toPath());"
+            TOOLSCREEN_EASYINJECT_SUPPORT_CONTENT
+            "${TOOLSCREEN_EASYINJECT_SUPPORT_CONTENT}")
+        if(NOT TOOLSCREEN_EASYINJECT_SUPPORT_CONTENT MATCHES "endsWith\\(\\\"[.]json\\\"\\)")
+            message(FATAL_ERROR
+                "EasyInjectBundled extraction layout changed; could not add Vulkan layer support files.")
+        endif()
+        file(WRITE "${TOOLSCREEN_EASYINJECT_MAIN_JAVA}" "${TOOLSCREEN_EASYINJECT_SUPPORT_CONTENT}")
+    endif()
 
     set(TOOLSCREEN_EASYINJECT_BRANDING_PROPERTIES "${easyinjectbundled_SOURCE_DIR}/branding.properties")
     toolscreen_set_brand_version("${TOOLSCREEN_EASYINJECT_BRANDING_PROPERTIES}" "${PROJECT_VERSION}")
@@ -729,9 +723,11 @@ if(TOOLSCREEN_ENABLE_JAR_PACKAGING OR TOOLSCREEN_ENABLE_EXE_PACKAGING)
             COMMAND ${CMAKE_COMMAND} -E make_directory "${easyinjectbundled_SOURCE_DIR}/src/main/resources/dlls"
             COMMAND ${CMAKE_COMMAND} -E make_directory "${TOOLSCREEN_ARTIFACT_ROOT}/$<CONFIG>"
             COMMAND ${CMAKE_COMMAND} -E copy_if_different "${TOOLSCREEN_PACKAGING_DLL_SOURCE}" "${easyinjectbundled_SOURCE_DIR}/custom-dlls/Toolscreen.dll"
+            COMMAND ${CMAKE_COMMAND} -E rm -f "${easyinjectbundled_SOURCE_DIR}/custom-dlls/ToolscreenVulkanLayer.dll"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/src/render/vulkan/layer/VK_LAYER_TOOLSCREEN_obs_redirect.json" "${easyinjectbundled_SOURCE_DIR}/custom-dlls/VK_LAYER_TOOLSCREEN_obs_redirect.json"
             COMMAND ${CMAKE_COMMAND} -E copy_if_different "${TOOLSCREEN_PACKAGING_LOGGER_SOURCE}" "${easyinjectbundled_SOURCE_DIR}/src/main/resources/dlls/liblogger_x64.dll"
             COMMAND ${CMAKE_COMMAND} -E rm -f "${easyinjectbundled_SOURCE_DIR}/custom-dlls/WebView2Loader.dll"
-            COMMAND ${TOOLSCREEN_MAVEN_EXECUTABLE} -f "${easyinjectbundled_SOURCE_DIR}/pom.xml" -q --batch-mode --no-transfer-progress package
+            COMMAND ${TOOLSCREEN_MAVEN_EXECUTABLE} -f "${easyinjectbundled_SOURCE_DIR}/pom.xml" -q --batch-mode --no-transfer-progress clean package
                     -Dbrand.name=Toolscreen
             COMMAND ${CMAKE_COMMAND} -E copy_if_different "${easyinjectbundled_SOURCE_DIR}/target/${JAR_NAME}" "${JAR_OUTPUT}"
         )
@@ -943,9 +939,36 @@ END
     endif()
 
     if(TOOLSCREEN_ENABLE_JAR_PACKAGING)
+        string(CONCAT TOOLSCREEN_JAR_CHECK_SCRIPT
+                "set(TOOLSCREEN_JAR \"${JAR_OUTPUT}\")\n"
+                "set(TOOLSCREEN_JAR_CHECK_DIR \"${CMAKE_CURRENT_BINARY_DIR}/jar-single-dll-check-$<CONFIG>\")\n"
+                "if(NOT EXISTS \"\${TOOLSCREEN_JAR}\")\n"
+                "  message(FATAL_ERROR \"Expected Toolscreen jar at '\${TOOLSCREEN_JAR}'\")\n"
+                "endif()\n"
+                "file(REMOVE_RECURSE \"\${TOOLSCREEN_JAR_CHECK_DIR}\")\n"
+                "file(MAKE_DIRECTORY \"\${TOOLSCREEN_JAR_CHECK_DIR}\")\n"
+                "file(ARCHIVE_EXTRACT INPUT \"\${TOOLSCREEN_JAR}\" DESTINATION \"\${TOOLSCREEN_JAR_CHECK_DIR}\")\n"
+                "if(NOT EXISTS \"\${TOOLSCREEN_JAR_CHECK_DIR}/dlls/Toolscreen.dll\")\n"
+                "  message(FATAL_ERROR \"Toolscreen jar does not contain dlls/Toolscreen.dll\")\n"
+                "endif()\n"
+                "if(EXISTS \"\${TOOLSCREEN_JAR_CHECK_DIR}/dlls/ToolscreenVulkanLayer.dll\")\n"
+                "  message(FATAL_ERROR \"Vulkan layer must be integrated into Toolscreen.dll, not packaged as ToolscreenVulkanLayer.dll\")\n"
+                "endif()\n"
+                "set(TOOLSCREEN_LAYER_MANIFEST \"\${TOOLSCREEN_JAR_CHECK_DIR}/dlls/VK_LAYER_TOOLSCREEN_obs_redirect.json\")\n"
+                "if(NOT EXISTS \"\${TOOLSCREEN_LAYER_MANIFEST}\")\n"
+                "  message(FATAL_ERROR \"Toolscreen jar does not contain the Vulkan layer manifest\")\n"
+                "endif()\n"
+                "file(READ \"\${TOOLSCREEN_LAYER_MANIFEST}\" TOOLSCREEN_LAYER_MANIFEST_CONTENT)\n"
+                "if(NOT TOOLSCREEN_LAYER_MANIFEST_CONTENT MATCHES \"Toolscreen[.]dll\")\n"
+                "  message(FATAL_ERROR \"Vulkan layer manifest does not target Toolscreen.dll\")\n"
+                "endif()\n"
+                "if(TOOLSCREEN_LAYER_MANIFEST_CONTENT MATCHES \"ToolscreenVulkanLayer[.]dll\")\n"
+                "  message(FATAL_ERROR \"Vulkan layer manifest still targets the retired separate Vulkan DLL\")\n"
+                "endif()\n"
+        )
         file(GENERATE
             OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/cmake/check_toolscreen_jar_$<CONFIG>.cmake"
-            CONTENT "if(NOT EXISTS \"${JAR_OUTPUT}\")\n  message(FATAL_ERROR \"Expected Toolscreen jar at '${JAR_OUTPUT}'\")\nendif()\n"
+            CONTENT "${TOOLSCREEN_JAR_CHECK_SCRIPT}"
         )
 
         add_test(
@@ -1000,6 +1023,7 @@ target_compile_definitions(toolscreen_gui_integration_tests PRIVATE
     GLEW_STATIC
     NOMINMAX
     TOOLSCREEN_GUI_INTEGRATION_TESTS
+    TOOLSCREEN_VULKAN_LAYER_EMBEDDED
     UNICODE
     _UNICODE
 )
@@ -1320,6 +1344,30 @@ endforeach()
 add_executable(toolscreen_path_sanitize_tests
     tests/path_sanitize_tests.cpp
 )
+
+add_executable(toolscreen_startup_lifecycle_tests
+    tests/startup_lifecycle_tests.cpp
+)
+
+if(MSVC)
+    target_compile_options(toolscreen_startup_lifecycle_tests PRIVATE /W3 /MP /EHsc)
+endif()
+
+toolscreen_configure_target_outputs(toolscreen_startup_lifecycle_tests)
+toolscreen_enable_release_symbols(toolscreen_startup_lifecycle_tests)
+
+foreach(test_case IN ITEMS
+    glfw_destroy_recreate_rejects_stale_replay
+    late_glfw_discovery_does_not_classify_bootstrap_wgl
+    sdl_destroy_recreate_rejects_stale_window
+    late_sdl_discovery_accepts_owned_opengl_window
+    sdl_relative_mouse_mode_defers_while_gui_open
+    opengl_latches_only_after_initialization
+    vulkan_rejects_missing_exact_window
+    vulkan_teardown_waits_for_recording)
+    add_test(NAME toolscreen_startup_lifecycle_${test_case}
+        COMMAND $<TARGET_FILE:toolscreen_startup_lifecycle_tests> --run ${test_case})
+endforeach()
 
 target_include_directories(toolscreen_path_sanitize_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src

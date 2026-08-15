@@ -1,4 +1,5 @@
 #include "logic_thread.h"
+#include "hooks/input_hook.h"
 #include "common/mode_dimensions.h"
 #include "gui/gui.h"
 #include "render/mirror_thread.h"
@@ -32,7 +33,6 @@ extern std::atomic<bool> g_windowsMouseSpeedApplied;
 extern int g_originalWindowsMouseSpeed;
 
 extern std::atomic<bool> g_isShuttingDown;
-extern WNDPROC g_originalWndProc;
 extern std::atomic<bool> g_gameWindowActive;
 
 extern PendingModeSwitch g_pendingModeSwitch;
@@ -507,9 +507,11 @@ void PollObsGraphicsHook() {
             g_graphicsHookDetected.store(nowDetected);
             g_graphicsHookModule.store(hookModule);
             if (nowDetected) {
-                Log("[OBS] graphics-hook64.dll DETECTED - OBS overlay active");
+                Log("[OBS] graphics-hook64.dll DETECTED - OpenGL keeps the legacy redirect; Vulkan keeps OBS's "
+                    "native present hook and redirects only its validated export copy through the lower "
+                    "Toolscreen layer.");
             } else {
-                Log("[OBS] graphics-hook64.dll UNLOADED - OBS overlay inactive");
+                Log("[OBS] graphics-hook64.dll UNLOADED - OBS capture integration inactive.");
             }
         }
     }

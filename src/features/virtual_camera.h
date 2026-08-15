@@ -2,12 +2,17 @@
 
 #include <cstdint>
 #include <atomic>
+#include <cstddef>
 
 // This works independently of OBS Studio - the driver just needs to be installed
 
 bool StartVirtualCamera(uint32_t width, uint32_t height);
 
 void StopVirtualCamera();
+
+// Keeps the producer enabled/disabled and resized to the preferred monitor
+// resolution. Both render backends call this once per real game frame.
+void SyncVirtualCameraRuntimeState(bool enabled);
 
 bool WriteVirtualCameraFrame(const uint8_t* rgba_data, uint32_t width, uint32_t height, uint64_t timestamp);
 
@@ -16,6 +21,26 @@ bool WriteVirtualCameraFrameNV12(const uint8_t* nv12_data, uint32_t width, uint3
 
 bool WriteVirtualCameraFrameNV12Planes(const uint8_t* y_plane, const uint8_t* uv_plane, uint32_t width, uint32_t height,
 									   uint64_t timestamp);
+
+// Vulkan can import these page-aligned shared-memory slots and write NV12
+// directly from the GPU. Publication is deferred until the command buffer's
+// existing completion query retires, so the virtual-camera consumer never sees
+// a partially written frame and no full-frame CPU readback is required.
+struct VirtualCameraGpuFrame {
+    uint8_t* data = nullptr;
+    size_t capacityBytes = 0;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t slot = 0;
+    uint32_t writeIndex = 0;
+    uint64_t timestamp = 0;
+    uint64_t generation = 0;
+};
+
+bool AcquireVirtualCameraGpuFrame(uint64_t timestamp,
+                                  VirtualCameraGpuFrame& outFrame);
+bool PublishVirtualCameraGpuFrame(const VirtualCameraGpuFrame& frame);
+void AbandonVirtualCameraGpuFrame(const VirtualCameraGpuFrame& frame);
 
 bool IsVirtualCameraActive();
 

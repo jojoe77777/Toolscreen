@@ -27,6 +27,10 @@ struct CursorData {
     bool hasInvertedPixels = false;
     bool ownsHandle = true;
     UINT loadType = IMAGE_CURSOR;
+    // Backend-neutral decoded pixels. OpenGL keeps using texture/invertMaskTexture;
+    // Vulkan uploads these snapshots through its existing per-frame texture ring.
+    std::vector<unsigned char> rgbaPixels;
+    std::vector<unsigned char> invertRgbaPixels;
 };
 
 extern std::vector<CursorData> g_cursorList;
@@ -41,6 +45,7 @@ const CursorData* FindCursor(const std::wstring& path, int size);
 const CursorData* FindCursorByHandle(HCURSOR hCursor);
 
 const CursorData* LoadOrFindCursorFromHandle(HCURSOR hCursor);
+bool CopyCursorDataFromHandle(HCURSOR hCursor, CursorData& outData);
 
 const CursorData* LoadOrFindSystemCursor(LPCWSTR systemCursorId);
 

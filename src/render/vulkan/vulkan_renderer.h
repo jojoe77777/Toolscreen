@@ -6,6 +6,7 @@
 #include <atomic>
 #include <array>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace VulkanHooks {
@@ -23,6 +24,7 @@ struct FinalBlitContext {
     VkImageLayout sourceLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     VkImage destinationImage = VK_NULL_HANDLE;
     VkImageLayout destinationLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    uint32_t commandBufferQueueFamily = VK_QUEUE_FAMILY_IGNORED;
     uint32_t regionCount = 0;
     const VkImageBlit* regions = nullptr;
     VkFilter filter = VK_FILTER_NEAREST;
@@ -41,8 +43,14 @@ bool IsReady();
 bool GetColorPickerFrame(uintptr_t& textureId, int& width, int& height);
 void RequestColorPickerSample(int x, int y);
 bool TryGetColorPickerSample(int x, int y, std::array<float, 4>& color);
+bool GetBundledGuiTexture(int resourceId, uintptr_t& textureId);
+bool GetGuiRgbaTexture(const std::string& key, const unsigned char* pixels,
+                       int width, int height, uint64_t generation,
+                       uintptr_t& textureId);
 void OnQueueSubmit(VkDevice device, VkQueue queue, uint32_t commandBufferCount,
                    const VkCommandBuffer* commandBuffers, VkFence fence);
+void OnQueuePresent(VkDevice device, VkQueue queue, const VkPresentInfoKHR* presentInfo,
+                    const std::vector<VkImage>& presentImages);
 void OnImageDestroyed(VkDevice device, VkImage image);
 void OnSwapchainDestroyed(VkDevice device, VkSwapchainKHR swapchain, const std::vector<VkImage>& images);
 void OnDeviceDestroyed(VkDevice device);

@@ -2,6 +2,7 @@
 #include "gui/gui.h"
 #include "common/utils.h"
 #include "common/gl_overlay.h"
+#include "render/render_backend.h"
 #include <filesystem>
 #include <shared_mutex>
 #include <string>
@@ -169,6 +170,15 @@ static void ComputeCursorContentBounds(CursorData& outData, const std::vector<un
     outData.contentTop = minY;
     outData.contentRight = maxX + 1;
     outData.contentBottom = maxY + 1;
+}
+
+static std::vector<unsigned char> ConvertBgraToRgba(
+    const std::vector<unsigned char>& bgra) {
+    std::vector<unsigned char> rgba = bgra;
+    for (size_t i = 0; i + 3 < rgba.size(); i += 4) {
+        std::swap(rgba[i], rgba[i + 2]);
+    }
+    return rgba;
 }
 
 static std::wstring BuildSystemCursorCacheKey(LPCWSTR systemCursorId) {
@@ -363,6 +373,7 @@ static bool LoadSingleCursor(const std::wstring& path, UINT loadType, int size, 
     }
 
     std::vector<unsigned char> pixels(width * height * 4);
+    std::vector<unsigned char> invertPixels;
 
     BITMAPINFO bmi = { 0 };
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -372,11 +383,15 @@ static bool LoadSingleCursor(const std::wstring& path, UINT loadType, int size, 
     bmi.bmiHeader.biBitCount = 32;
     bmi.bmiHeader.biCompression = BI_RGB;
 
-    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-    glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
-    glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    const bool createOpenGLTexture =
+        GetRenderBackend() != RenderBackend::Vulkan;
+    if (createOpenGLTexture) {
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+        glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    }
 
     if (isMonochrome) {
         HBITMAP hbmOld = (HBITMAP)SelectObject(hdcMem, iconInfoEx.hbmMask);
@@ -386,7 +401,7 @@ static bool LoadSingleCursor(const std::wstring& path, UINT loadType, int size, 
         maskBmi.bmiHeader.biHeight = -bmp.bmHeight;
         GetDIBits(hdcMem, iconInfoEx.hbmMask, 0, bmp.bmHeight, maskData.data(), &maskBmi, DIB_RGB_COLORS);
 
-        std::vector<unsigned char> invertPixels(width * height * 4, 0);
+        invertPixels.assign(width * height * 4, 0);
         bool hasInverted = false;
 
         // Windows cursor mask logic:
@@ -436,7 +451,7 @@ static bool LoadSingleCursor(const std::wstring& path, UINT loadType, int size, 
 
         outData.hasInvertedPixels = hasInverted;
 
-        if (hasInverted) {
+        if (hasInverted && createOpenGLTexture) {
             while (glGetError() != GL_NO_ERROR) {}
 
             glGenTextures(1, &outData.invertMaskTexture);
@@ -509,6 +524,20 @@ static bool LoadSingleCursor(const std::wstring& path, UINT loadType, int size, 
     ReleaseDC(NULL, hdcScreen);
     if (iconInfoEx.hbmColor) DeleteObject(iconInfoEx.hbmColor);
     if (iconInfoEx.hbmMask) DeleteObject(iconInfoEx.hbmMask);
+
+    ComputeCursorContentBounds(
+        outData, pixels,
+        outData.hasInvertedPixels ? &invertPixels : nullptr, width, height);
+    outData.rgbaPixels = ConvertBgraToRgba(pixels);
+    if (outData.hasInvertedPixels) {
+        outData.invertRgbaPixels = ConvertBgraToRgba(invertPixels);
+    }
+    if (!createOpenGLTexture) {
+        LogCategory(
+            "cursor_textures",
+            "[CursorTextures] Decoded backend-neutral cursor pixels without OpenGL for Vulkan.");
+        return true;
+    }
 
     while (glGetError() != GL_NO_ERROR) {}
 
@@ -739,11 +768,15 @@ static bool CreateTextureFromHandle(HCURSOR hCursor, CursorData& outData) {
     bmi.bmiHeader.biBitCount = 32;
     bmi.bmiHeader.biCompression = BI_RGB;
 
-    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-    glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
-    glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    const bool createOpenGLTexture =
+        GetRenderBackend() != RenderBackend::Vulkan;
+    if (createOpenGLTexture) {
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+        glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    }
 
     if (isMonochrome) {
         HBITMAP hbmOld = (HBITMAP)SelectObject(hdcMem, iconInfoEx.hbmMask);
@@ -781,7 +814,7 @@ static bool CreateTextureFromHandle(HCURSOR hCursor, CursorData& outData) {
         }
 
         outData.hasInvertedPixels = hasInverted;
-        if (hasInverted) {
+        if (hasInverted && createOpenGLTexture) {
             while (glGetError() != GL_NO_ERROR) {}
             glGenTextures(1, &outData.invertMaskTexture);
             if (outData.invertMaskTexture != 0) {
@@ -833,6 +866,13 @@ static bool CreateTextureFromHandle(HCURSOR hCursor, CursorData& outData) {
     if (iconInfoEx.hbmMask) DeleteObject(iconInfoEx.hbmMask);
 
     ComputeCursorContentBounds(outData, pixels, outData.hasInvertedPixels ? &invertPixels : nullptr, width, height);
+    outData.rgbaPixels = ConvertBgraToRgba(pixels);
+    if (outData.hasInvertedPixels) {
+        outData.invertRgbaPixels = ConvertBgraToRgba(invertPixels);
+    }
+    if (!createOpenGLTexture) {
+        return true;
+    }
 
     while (glGetError() != GL_NO_ERROR) {}
     glGenTextures(1, &outData.texture);
@@ -877,8 +917,24 @@ const CursorData* LoadOrFindCursorFromHandle(HCURSOR hCursor) {
     return &g_cursorList.back();
 }
 
+bool CopyCursorDataFromHandle(HCURSOR hCursor, CursorData& outData) {
+    if (!LoadOrFindCursorFromHandle(hCursor)) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(g_cursorListMutex);
+    for (const auto& cursor : g_cursorList) {
+        if (cursor.hCursor == hCursor) {
+            outData = cursor;
+            return true;
+        }
+    }
+    return false;
+}
+
 const CursorData* LoadOrFindSystemCursor(LPCWSTR systemCursorId) {
-    if (!systemCursorId || wglGetCurrentContext() == nullptr) {
+    if (!systemCursorId ||
+        (GetRenderBackend() != RenderBackend::Vulkan &&
+         wglGetCurrentContext() == nullptr)) {
         return nullptr;
     }
 
@@ -947,6 +1003,10 @@ const CursorData* GetSelectedCursor(const std::string& gameState, int size) {
     GetCursorPathByName(selectedCursorName, cursorPath, loadType);
 
     const CursorData* cursorData = FindCursor(cursorPath, selectedSize);
+    if (!cursorData && !cursorPath.empty()) {
+        cursorData =
+            LoadOrFindCursor(cursorPath, loadType, selectedSize);
+    }
     if (cursorData) { return cursorData; }
 
     Log("[GetSelectedCursor] Cursor '" + selectedCursorName + "' not found at size " + std::to_string(selectedSize) + ", trying fallback");
@@ -954,13 +1014,14 @@ const CursorData* GetSelectedCursor(const std::string& gameState, int size) {
     {
         std::lock_guard<std::mutex> lock(g_cursorListMutex);
         for (const auto& cursor : g_cursorList) {
-            if (cursor.size == selectedSize && cursor.texture != 0) {
+            if (cursor.size == selectedSize &&
+                (cursor.texture != 0 || !cursor.rgbaPixels.empty())) {
                 Log("[GetSelectedCursor] Fallback: using cursor from " + WideToUtf8(cursor.filePath));
                 return &cursor;
             }
         }
         for (const auto& cursor : g_cursorList) {
-            if (cursor.texture != 0) {
+            if (cursor.texture != 0 || !cursor.rgbaPixels.empty()) {
                 Log("[GetSelectedCursor] Fallback: using cursor from " + WideToUtf8(cursor.filePath) + " at size " +
                     std::to_string(cursor.size));
                 return &cursor;

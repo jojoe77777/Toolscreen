@@ -695,6 +695,44 @@ bool StageWindowOverlayTestFrame(const WindowOverlayConfig& config, const std::v
     return true;
 }
 
+bool AcquireWindowOverlayPixelFrame(
+    const WindowOverlayConfig& config, WindowOverlayPixelFrame& outFrame) {
+    outFrame = {};
+    std::lock_guard<std::mutex> cacheLock(g_windowOverlayCacheMutex);
+    auto it = g_windowOverlayCache.find(config.name);
+    if (it == g_windowOverlayCache.end() || !it->second) return false;
+    WindowOverlayCacheEntry& entry = *it->second;
+    if (entry.hasNewFrame.load(std::memory_order_acquire)) {
+        std::lock_guard<std::mutex> swapLock(entry.swapMutex);
+        if (entry.hasNewFrame.load(std::memory_order_relaxed)) {
+            entry.readyBuffer.swap(entry.backBuffer);
+            entry.hasNewFrame.store(false, std::memory_order_release);
+        }
+    }
+    WindowOverlayRenderData* renderData = entry.backBuffer.get();
+    if (!renderData || !renderData->pixelData || renderData->width <= 0 ||
+        renderData->height <= 0) {
+        return false;
+    }
+    if (renderData != entry.lastPublishedRenderData || !entry.publishedPixels) {
+        const size_t byteCount =
+            static_cast<size_t>(renderData->width) *
+            static_cast<size_t>(renderData->height) * 4;
+        auto pixels = std::make_shared<std::vector<unsigned char>>(
+            renderData->pixelData, renderData->pixelData + byteCount);
+        entry.publishedPixels = std::move(pixels);
+        entry.lastPublishedRenderData = renderData;
+        ++entry.publishedGeneration;
+    }
+    outFrame.pixels = entry.publishedPixels;
+    outFrame.width = renderData->width;
+    outFrame.height = renderData->height;
+    entry.glTextureWidth = renderData->width;
+    entry.glTextureHeight = renderData->height;
+    outFrame.generation = entry.publishedGeneration;
+    return static_cast<bool>(outFrame.pixels);
+}
+
 void CleanupWindowOverlayCacheEntry(const std::string& overlayId) {
     // Don't actually erase the entry - this would cause crashes when capture thread is using it
 

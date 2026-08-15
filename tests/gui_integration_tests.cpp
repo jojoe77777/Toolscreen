@@ -485,6 +485,12 @@ void ResetGlobalTestState(const std::filesystem::path& root) {
     g_modeFilePath = (root / "mode.txt").wstring();
     g_stateFilePath = (root / "state.txt").wstring();
 
+    // DllMain initializes this from Minecraft's command line in production.
+    // The standalone GUI test executable has no DLL attach path, but several
+    // mode and resize tests exercise the same guarded production APIs.
+    g_gameVersion = GameVersion(1, 21, 0);
+    SetCursorVisibilityOverrideForTests(false, false);
+
     ExtractBundledFontAssets(root, &ResetGlobalTestState);
 
     g_config = Config();

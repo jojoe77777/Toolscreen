@@ -6,6 +6,7 @@
 #include "gui/gui.h"
 #include "common/utils.h"
 #include <atomic>
+#include <cstdint>
 #include <chrono>
 #include <map>
 #include <memory>
@@ -56,6 +57,13 @@ struct WindowOverlayRenderData {
     }
 };
 
+struct WindowOverlayPixelFrame {
+    std::shared_ptr<const std::vector<unsigned char>> pixels;
+    int width = 0;
+    int height = 0;
+    uint64_t generation = 0;
+};
+
 struct WindowOverlayCacheEntry {
     std::string windowTitle;
     std::string windowClass;
@@ -84,6 +92,9 @@ struct WindowOverlayCacheEntry {
     int glTextureWidth = 0;
     int glTextureHeight = 0;
     WindowOverlayRenderData* lastUploadedRenderData = nullptr;
+    WindowOverlayRenderData* lastPublishedRenderData = nullptr;
+    std::shared_ptr<const std::vector<unsigned char>> publishedPixels;
+    uint64_t publishedGeneration = 0;
 
     // Render-thread-only sampler state cache (avoids redundant glTexParameteri per frame)
     bool filterInitialized = false;
@@ -148,6 +159,7 @@ void CleanupWindowOverlayCache();
 void CleanupWindowOverlayCacheEntry(const std::string& overlayId);
 void RemoveWindowOverlayFromCache(const std::string& overlayId);
 bool StageWindowOverlayTestFrame(const WindowOverlayConfig& config, const std::vector<unsigned char>& rgbaPixels, int width, int height);
+bool AcquireWindowOverlayPixelFrame(const WindowOverlayConfig& config, WindowOverlayPixelFrame& outFrame);
 void UpdateWindowOverlay(const std::string& overlayId);
 void UpdateWindowOverlayFPS(const std::string& overlayId, int newFPS);
 void UpdateWindowOverlaySearchInterval(const std::string& overlayId, int newSearchInterval);

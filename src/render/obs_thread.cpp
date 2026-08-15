@@ -6,6 +6,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <array>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -29,6 +30,20 @@ static std::mutex g_obsHookMutex;
 static GLuint g_obsRedirectAttachedTexture = 0;
 static int g_obsRedirectAttachedWidth = 0;
 static int g_obsRedirectAttachedHeight = 0;
+
+static std::mutex g_obsOverrideSyncMutex;
+static GLsync g_obsOverrideProducerFence = nullptr;
+static constexpr size_t OBS_OVERRIDE_FENCE_DELETION_DELAY = 64;
+static std::array<GLsync, OBS_OVERRIDE_FENCE_DELETION_DELAY> g_obsOverrideProducerFencesToDelete{};
+static size_t g_obsOverrideProducerFenceDeleteIndex = 0;
+
+struct ObsOverrideConsumerFence {
+    GLuint texture = 0;
+    GLsync fence = nullptr;
+};
+
+static constexpr size_t OBS_OVERRIDE_CONSUMER_FENCE_COUNT = 8;
+static std::array<ObsOverrideConsumerFence, OBS_OVERRIDE_CONSUMER_FENCE_COUNT> g_obsOverrideConsumerFences{};
 
 struct ObsRedirectValidationEntry {
     GLuint texture = 0;
@@ -137,6 +152,71 @@ static void ClearObsRedirectAttachmentValidationCache() {
     g_obsRedirectValidationCacheNext = 0;
 }
 
+static void RetireObsOverrideProducerFenceLocked(GLsync fence) {
+    if (!fence) { return; }
+
+    GLsync& delayedFence = g_obsOverrideProducerFencesToDelete[g_obsOverrideProducerFenceDeleteIndex];
+    if (delayedFence && glIsSync(delayedFence)) { glDeleteSync(delayedFence); }
+    delayedFence = fence;
+    g_obsOverrideProducerFenceDeleteIndex =
+        (g_obsOverrideProducerFenceDeleteIndex + 1) % OBS_OVERRIDE_FENCE_DELETION_DELAY;
+}
+
+static GLsync TakeObsOverrideConsumerFence(GLuint texture) {
+    if (texture == 0) { return nullptr; }
+
+    std::lock_guard<std::mutex> lock(g_obsOverrideSyncMutex);
+    for (auto& entry : g_obsOverrideConsumerFences) {
+        if (entry.texture == texture) {
+            GLsync fence = entry.fence;
+            entry.texture = 0;
+            entry.fence = nullptr;
+            return fence;
+        }
+    }
+    return nullptr;
+}
+
+static void PublishObsOverrideConsumerFence(GLuint texture) {
+    if (texture == 0) { return; }
+
+    GLsync fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    if (!fence) { return; }
+    // The producer may be on another context and must be able to see the
+    // fence before it considers this texture available for reuse.
+    glFlush();
+
+    std::lock_guard<std::mutex> lock(g_obsOverrideSyncMutex);
+    ObsOverrideConsumerFence* freeEntry = nullptr;
+    for (auto& entry : g_obsOverrideConsumerFences) {
+        if (entry.texture == texture) {
+            // A later fence in this context also covers the earlier sample.
+            if (entry.fence && glIsSync(entry.fence)) { glDeleteSync(entry.fence); }
+            entry.fence = fence;
+            return;
+        }
+        if (!freeEntry && entry.texture == 0) { freeEntry = &entry; }
+    }
+
+    if (freeEntry) {
+        freeEntry->texture = texture;
+        freeEntry->fence = fence;
+        return;
+    }
+
+    // This should only be reachable after a resize/reinitialization churn.
+    // Keep the newest fence rather than leaking it.
+    if (glIsSync(fence)) { glDeleteSync(fence); }
+}
+
+void WaitForObsOverrideTextureConsumer(GLuint texture) {
+    GLsync fence = TakeObsOverrideConsumerFence(texture);
+    if (!fence) { return; }
+
+    if (glIsSync(fence)) { glWaitSync(fence, 0, GL_TIMEOUT_IGNORED); }
+    if (glIsSync(fence)) { glDeleteSync(fence); }
+}
+
 bool ShouldUpdateObsTextureNow() {
     const uint64_t nowUs = GetObsSteadyNowUs();
     const int targetFramerate = GetObsTargetFramerate();
@@ -172,12 +252,21 @@ void ResetObsTextureUpdateSchedule() {
     g_obsNextTextureUpdateTickUs.store(0, std::memory_order_release);
 }
 
-static GLuint SelectObsRedirectTexture(GLsync& outFence, bool& outNeedsFenceWait) {
+static GLuint SelectObsRedirectTexture(GLsync& outFence, bool& outNeedsFenceWait, int& outWidth, int& outHeight) {
     outFence = nullptr;
     outNeedsFenceWait = false;
+    outWidth = 0;
+    outHeight = 0;
 
-    GLuint overrideTexture = g_obsOverrideTexture.load(std::memory_order_acquire);
-    if (overrideTexture != 0) { return overrideTexture; }
+    std::lock_guard<std::mutex> lock(g_obsOverrideSyncMutex);
+    const GLuint overrideTexture = g_obsOverrideTexture.load(std::memory_order_acquire);
+    if (overrideTexture != 0) {
+        outWidth = g_obsOverrideWidth.load(std::memory_order_acquire);
+        outHeight = g_obsOverrideHeight.load(std::memory_order_acquire);
+        outFence = g_obsOverrideProducerFence;
+        outNeedsFenceWait = outFence != nullptr;
+        return overrideTexture;
+    }
 
     return 0;
 }
@@ -205,11 +294,10 @@ bool TryObsBlitFramebufferRedirect(GLint readFBO,
 
     GLsync obsFence = nullptr;
     bool needsFenceWait = false;
-    GLuint obsTexture = SelectObsRedirectTexture(obsFence, needsFenceWait);
-    const GLuint overrideTexture = g_obsOverrideTexture.load(std::memory_order_acquire);
-    const bool usingOverrideTexture = (overrideTexture != 0 && obsTexture == overrideTexture);
-    const int overrideWidth = usingOverrideTexture ? g_obsOverrideWidth.load(std::memory_order_acquire) : 0;
-    const int overrideHeight = usingOverrideTexture ? g_obsOverrideHeight.load(std::memory_order_acquire) : 0;
+    int overrideWidth = 0;
+    int overrideHeight = 0;
+    GLuint obsTexture = SelectObsRedirectTexture(obsFence, needsFenceWait, overrideWidth, overrideHeight);
+    const bool usingOverrideTexture = (obsTexture != 0 && overrideWidth > 0 && overrideHeight > 0);
     const bool mustReattachOverride =
         usingOverrideTexture &&
         (g_obsRedirectAttachedTexture != obsTexture || g_obsRedirectAttachedWidth != overrideWidth ||
@@ -278,11 +366,27 @@ bool TryObsBlitFramebufferRedirect(GLint readFBO,
 
     BlitFramebufferDirect(blitSrcX0, blitSrcY0, blitSrcX1, blitSrcY1, dstX0, dstY0, dstX1, dstY1, mask, filter);
 
+    // Keep the published texture from being rendered into again until this
+    // context has finished sampling it.  This matters when OBS capture runs
+    // on a different shared context and the two-texture ring wraps quickly.
+    PublishObsOverrideConsumerFence(obsTexture);
+
     glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
     return true;
 }
 
 void SetObsOverrideTexture(GLuint texture, int width, int height) {
+    GLsync producerFence = nullptr;
+    if (texture != 0 && width > 0 && height > 0) {
+        producerFence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+        // Make both the texture writes and the fence visible to a capture
+        // context before publishing the new texture pointer.
+        glFlush();
+    }
+
+    std::lock_guard<std::mutex> lock(g_obsOverrideSyncMutex);
+    RetireObsOverrideProducerFenceLocked(g_obsOverrideProducerFence);
+    g_obsOverrideProducerFence = producerFence;
     g_obsOverrideTexture.store(texture, std::memory_order_release);
     g_obsOverrideWidth.store(width, std::memory_order_release);
     g_obsOverrideHeight.store(height, std::memory_order_release);
@@ -291,6 +395,9 @@ void SetObsOverrideTexture(GLuint texture, int width, int height) {
 
 void ClearObsOverride() {
     g_obsOverrideEnabled.store(false, std::memory_order_release);
+    std::lock_guard<std::mutex> lock(g_obsOverrideSyncMutex);
+    RetireObsOverrideProducerFenceLocked(g_obsOverrideProducerFence);
+    g_obsOverrideProducerFence = nullptr;
     g_obsOverrideTexture.store(0, std::memory_order_release);
     g_obsOverrideWidth.store(0, std::memory_order_release);
     g_obsOverrideHeight.store(0, std::memory_order_release);

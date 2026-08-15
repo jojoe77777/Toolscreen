@@ -21,7 +21,7 @@ extern Config g_config;
 
 typedef BOOL(WINAPI* WGLSWAPBUFFERS)(HDC);
 extern WGLSWAPBUFFERS owglSwapBuffers;
-extern WGLSWAPBUFFERS g_owglSwapBuffersThirdParty;
+extern std::atomic<WGLSWAPBUFFERS> g_owglSwapBuffersThirdParty;
 extern std::atomic<void*> g_wglSwapBuffersThirdPartyHookTarget;
 extern BOOL WINAPI hkwglSwapBuffers(HDC hDc);
 extern BOOL WINAPI hkwglSwapBuffers_ThirdParty(HDC hDc);
@@ -302,7 +302,7 @@ static void ClearStaleThirdPartyWglSwapBuffersHookState(void* staleTarget, const
         return;
     }
 
-    g_owglSwapBuffersThirdParty = NULL;
+    g_owglSwapBuffersThirdParty.store(nullptr, std::memory_order_release);
     g_lastSkippedWglSwapBuffersStart.store(nullptr, std::memory_order_release);
     g_lastSkippedWglSwapBuffersTarget.store(nullptr, std::memory_order_release);
     LogSkippedStaleHookTarget("wglSwapBuffers", staleTarget, reason);
@@ -433,10 +433,12 @@ static bool TryInstallThirdPartyWglSwapBuffersHook(void* jumpTarget, const char*
         return false;
     }
 
+    WGLSWAPBUFFERS trampoline = nullptr;
     if (!HookChain::TryCreateAndEnableHook(jumpTarget, reinterpret_cast<void*>(&hkwglSwapBuffers_ThirdParty),
-                                           reinterpret_cast<void**>(&g_owglSwapBuffersThirdParty), what)) {
+                                           reinterpret_cast<void**>(&trampoline), what)) {
         return false;
     }
+    g_owglSwapBuffersThirdParty.store(trampoline, std::memory_order_release);
 
     g_wglSwapBuffersThirdPartyHookTarget.store(jumpTarget, std::memory_order_release);
     g_lastSkippedWglSwapBuffersStart.store(nullptr, std::memory_order_release);
@@ -447,36 +449,88 @@ static bool TryInstallThirdPartyWglSwapBuffersHook(void* jumpTarget, const char*
 static void* FindIatImportedFunctionTarget(HMODULE importingModule, const char* importedDllNameLower, const char* funcName) {
     if (!importingModule || !importedDllNameLower || !funcName) return nullptr;
 
+    MODULEINFO moduleInfo{};
+    if (!GetModuleInformation(GetCurrentProcess(), importingModule, &moduleInfo,
+                              sizeof(moduleInfo)) ||
+        moduleInfo.lpBaseOfDll != importingModule ||
+        moduleInfo.SizeOfImage < sizeof(IMAGE_DOS_HEADER)) {
+        return nullptr;
+    }
     uint8_t* base = reinterpret_cast<uint8_t*>(importingModule);
+    const size_t imageSize = moduleInfo.SizeOfImage;
+    const auto contains = [imageSize](size_t offset, size_t size) {
+        return offset <= imageSize && size <= imageSize - offset;
+    };
     auto* dos = reinterpret_cast<PIMAGE_DOS_HEADER>(base);
-    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return nullptr;
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew < 0 ||
+        !contains(static_cast<size_t>(dos->e_lfanew),
+                  sizeof(IMAGE_NT_HEADERS))) {
+        return nullptr;
+    }
     auto* nt = reinterpret_cast<PIMAGE_NT_HEADERS>(base + dos->e_lfanew);
     if (nt->Signature != IMAGE_NT_SIGNATURE) return nullptr;
 
     const IMAGE_DATA_DIRECTORY& impDir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
-    if (!impDir.VirtualAddress || !impDir.Size) return nullptr;
+    if (!impDir.VirtualAddress || !impDir.Size ||
+        !contains(impDir.VirtualAddress, impDir.Size)) {
+        return nullptr;
+    }
 
     auto* desc = reinterpret_cast<PIMAGE_IMPORT_DESCRIPTOR>(base + impDir.VirtualAddress);
-    for (; desc->Name != 0; desc++) {
-        const char* dllName = reinterpret_cast<const char*>(base + desc->Name);
-        if (!dllName) continue;
+    const size_t descriptorCount =
+        impDir.Size / sizeof(IMAGE_IMPORT_DESCRIPTOR);
+    for (size_t descriptorIndex = 0;
+         descriptorIndex < descriptorCount && desc[descriptorIndex].Name != 0;
+         ++descriptorIndex) {
+        const IMAGE_IMPORT_DESCRIPTOR& current = desc[descriptorIndex];
+        if (!contains(current.Name, 1)) continue;
+        const char* dllName =
+            reinterpret_cast<const char*>(base + current.Name);
+        const size_t dllNameCapacity = imageSize - current.Name;
+        const size_t dllNameLength = strnlen_s(dllName, dllNameCapacity);
+        if (dllNameLength == dllNameCapacity) continue;
 
-        std::string dllLower(dllName);
+        std::string dllLower(dllName, dllNameLength);
         for (char& c : dllLower) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
         if (dllLower != importedDllNameLower) continue;
 
-        auto* oft = reinterpret_cast<PIMAGE_THUNK_DATA>(base + (desc->OriginalFirstThunk ? desc->OriginalFirstThunk : desc->FirstThunk));
-        auto* ft = reinterpret_cast<PIMAGE_THUNK_DATA>(base + desc->FirstThunk);
-        for (; oft->u1.AddressOfData != 0; oft++, ft++) {
-            if (IMAGE_SNAP_BY_ORDINAL(oft->u1.Ordinal)) continue;
-            auto* ibn = reinterpret_cast<PIMAGE_IMPORT_BY_NAME>(base + oft->u1.AddressOfData);
-            if (!ibn || !ibn->Name) continue;
-            if (strcmp(reinterpret_cast<const char*>(ibn->Name), funcName) == 0) {
-#if defined(_WIN64)
-                return reinterpret_cast<void*>(ft->u1.Function);
-#else
-                return reinterpret_cast<void*>(ft->u1.Function);
-#endif
+        const DWORD originalThunkRva =
+            current.OriginalFirstThunk ? current.OriginalFirstThunk
+                                       : current.FirstThunk;
+        if (!originalThunkRva || !current.FirstThunk ||
+            !contains(originalThunkRva, sizeof(IMAGE_THUNK_DATA)) ||
+            !contains(current.FirstThunk, sizeof(IMAGE_THUNK_DATA))) {
+            continue;
+        }
+        auto* oft =
+            reinterpret_cast<PIMAGE_THUNK_DATA>(base + originalThunkRva);
+        auto* ft = reinterpret_cast<PIMAGE_THUNK_DATA>(
+            base + current.FirstThunk);
+        const size_t thunkCount =
+            (std::min)(imageSize - originalThunkRva,
+                       imageSize - current.FirstThunk) /
+            sizeof(IMAGE_THUNK_DATA);
+        for (size_t thunkIndex = 0;
+             thunkIndex < thunkCount &&
+             oft[thunkIndex].u1.AddressOfData != 0;
+             ++thunkIndex) {
+            if (IMAGE_SNAP_BY_ORDINAL(oft[thunkIndex].u1.Ordinal)) continue;
+            const size_t nameRva =
+                static_cast<size_t>(oft[thunkIndex].u1.AddressOfData);
+            if (!contains(nameRva, sizeof(IMAGE_IMPORT_BY_NAME))) continue;
+            auto* ibn =
+                reinterpret_cast<PIMAGE_IMPORT_BY_NAME>(base + nameRva);
+            const size_t nameOffset =
+                nameRva + offsetof(IMAGE_IMPORT_BY_NAME, Name);
+            const size_t nameCapacity = imageSize - nameOffset;
+            const char* importedName =
+                reinterpret_cast<const char*>(ibn->Name);
+            const size_t nameLength =
+                strnlen_s(importedName, nameCapacity);
+            if (nameLength == nameCapacity) continue;
+            if (strcmp(importedName, funcName) == 0) {
+                return reinterpret_cast<void*>(
+                    ft[thunkIndex].u1.Function);
             }
         }
     }
@@ -561,14 +615,19 @@ static void RefreshThirdPartyWglSwapBuffersIatHookChain() {
     DWORD cbNeeded = 0;
     if (!EnumProcessModules(GetCurrentProcess(), mods, sizeof(mods), &cbNeeded)) return;
 
-    const DWORD count = cbNeeded / sizeof(HMODULE);
+    const DWORD count = (std::min<DWORD>)(
+        cbNeeded / sizeof(HMODULE),
+        static_cast<DWORD>(sizeof(mods) / sizeof(mods[0])));
     for (DWORD i = 0; i < count; i++) {
         HMODULE m = mods[i];
         if (!m) continue;
 
         if (m == opengl32) continue;
 
-        void* thunkTarget = FindIatImportedFunctionTarget(m, "opengl32.dll", "wglSwapBuffers");
+        ScopedModulePin pinnedImporter;
+        if (!pinnedImporter.PinForAddress(m)) continue;
+        void* thunkTarget = FindIatImportedFunctionTarget(
+            pinnedImporter.module, "opengl32.dll", "wglSwapBuffers");
         if (!thunkTarget) continue;
 
         if (!HookChain::IsAllowedSwapBuffersThirdPartyHookAddress(thunkTarget)) {

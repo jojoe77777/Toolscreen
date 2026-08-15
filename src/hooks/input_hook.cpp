@@ -31,12 +31,12 @@
 #include <windowsx.h>
 
 extern std::atomic<bool> g_showGui;
-extern std::atomic<bool> g_glfwCursorGrabbed;
+extern std::atomic<bool> g_nativeCursorGrabbed;
 extern std::atomic<bool> g_guiNeedsRecenter;
 extern std::atomic<bool> g_wasCursorVisible;
 extern std::atomic<bool> g_isShuttingDown;
 extern std::atomic<HWND> g_subclassedHwnd;
-extern WNDPROC g_originalWndProc;
+extern AtomicWndProc g_originalWndProc;
 extern std::atomic<bool> g_configLoadFailed;
 extern std::atomic<int> g_wmMouseMoveCount;
 extern GameVersion g_gameVersion;
@@ -69,6 +69,8 @@ static size_t s_bestMatchKeyCount = 0;
 static std::unordered_map<DWORD, size_t> s_bestMatchKeyCountByMainVk;
 static HHOOK s_lowLevelKeyboardHook = NULL;
 static std::mutex s_lowLevelKeyboardHookMutex;
+static std::atomic<bool> s_vulkanGuiHotkeyPending{ false };
+static std::atomic<bool> s_vulkanGuiHotkeyMainDown{ false };
 static std::atomic<bool> s_deferredFocusRegainWmSizePending{ false };
 static constexpr UINT_PTR kToolscreenLocalKeyRepeatTimerId = 0x2A51;
 static constexpr UINT_PTR kToolscreenShiftHotkeyPollTimerId = 0x2A52;
@@ -103,6 +105,13 @@ struct LowLevelSuppressedKeyState {
     UINT scanCodeWithFlags = 0;
     bool isSystemKey = false;
 };
+
+// Minecraft's Vulkan window path can leave ordinary WM_KEY* messages queued behind
+// presentation work. Keep a separate record of the keyboard events that we
+// immediately repost to the subclassed game window so that the delayed original
+// messages can be suppressed without losing key-up/repeat semantics.
+static std::unordered_map<DWORD, LowLevelSuppressedKeyState> s_vulkanFastPathKeys;
+static std::mutex s_vulkanFastPathKeysMutex;
 
 struct LowLevelExactModifierEvent {
     DWORD vk = 0;
@@ -456,6 +465,50 @@ static void RecordLowLevelExactModifierEvent(DWORD vk, bool isKeyDown) {
         s_pendingLowLevelExactModifierEvents.pop_front();
     }
     s_pendingLowLevelExactModifierEvents.push_back({ vk, false });
+}
+
+static bool IsLowLevelHotkeyKeyDown(DWORD key) {
+    if (key == VK_CONTROL || key == VK_LCONTROL || key == VK_RCONTROL ||
+        key == VK_SHIFT || key == VK_LSHIFT || key == VK_RSHIFT ||
+        key == VK_MENU || key == VK_LMENU || key == VK_RMENU) {
+        std::lock_guard<std::mutex> lock(s_lowLevelExactModifierStateMutex);
+        switch (key) {
+        case VK_CONTROL:
+            return s_lowLevelExactModifierKeysDown.contains(VK_LCONTROL) ||
+                   s_lowLevelExactModifierKeysDown.contains(VK_RCONTROL);
+        case VK_SHIFT:
+            return s_lowLevelExactModifierKeysDown.contains(VK_LSHIFT) ||
+                   s_lowLevelExactModifierKeysDown.contains(VK_RSHIFT);
+        case VK_MENU:
+            return s_lowLevelExactModifierKeysDown.contains(VK_LMENU) ||
+                   s_lowLevelExactModifierKeysDown.contains(VK_RMENU);
+        default:
+            return s_lowLevelExactModifierKeysDown.contains(key);
+        }
+    }
+
+    return (GetAsyncKeyState(static_cast<int>(key)) & 0x8000) != 0;
+}
+
+static bool DoesLowLevelHotkeyChordMatch(const std::vector<DWORD>& keys, DWORD incomingVk) {
+    if (keys.empty()) {
+        return false;
+    }
+
+    const DWORD mainKey = keys.back();
+    if (mainKey != incomingVk &&
+        !(mainKey == VK_CONTROL && (incomingVk == VK_LCONTROL || incomingVk == VK_RCONTROL)) &&
+        !(mainKey == VK_SHIFT && (incomingVk == VK_LSHIFT || incomingVk == VK_RSHIFT)) &&
+        !(mainKey == VK_MENU && (incomingVk == VK_LMENU || incomingVk == VK_RMENU))) {
+        return false;
+    }
+
+    for (size_t i = 0; i + 1 < keys.size(); ++i) {
+        if (keys[i] != 0 && !IsLowLevelHotkeyKeyDown(keys[i])) {
+            return false;
+        }
+    }
+    return true;
 }
 
 static DWORD ConsumePendingLowLevelExactModifierKeyup(DWORD trackedVk) {
@@ -1231,7 +1284,7 @@ InputHandlerResult HandleSetCursor(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
     }
 
     const bool isModern = g_gameVersion >= GameVersion(1, 13, 0);
-    const bool cursorShouldHide = isModern ? g_glfwCursorGrabbed.load(std::memory_order_acquire) : !IsCursorVisible();
+    const bool cursorShouldHide = isModern ? g_nativeCursorGrabbed.load(std::memory_order_acquire) : !IsCursorVisible();
     if (cursorShouldHide && !g_showGui.load()) {
         SetCursor(NULL);
         return { true, true };
@@ -1251,15 +1304,23 @@ InputHandlerResult HandleDestroy(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
     if (uMsg != WM_DESTROY) { return { false, 0 }; }
     PROFILE_SCOPE("HandleDestroy");
 
-    ClearCapturedGlfwResizeCallbacks();
+    // A GLFW/Vulkan surface can be recreated during normal operation.  This
+    // invalidates only this window binding; it is not process shutdown.
+    const WNDPROC original = g_originalWndProc;
+    ClearCapturedGlfwResizeCallbacks(hWnd);
+    ClearCapturedSdlWindow(hWnd);
     ResetLocalKeyRepeatState(hWnd);
     ResetShiftHotkeyPollingState(hWnd);
     ReleaseActiveLowLevelRebindKeys(hWnd);
 
-    extern GameVersion g_gameVersion;
-    if (g_gameVersion >= GameVersion(1, 13, 0)) { g_isShuttingDown = true; }
+    HWND expected = hWnd;
+    g_minecraftHwnd.compare_exchange_strong(expected, NULL, std::memory_order_acq_rel);
+    expected = hWnd;
+    g_subclassedHwnd.compare_exchange_strong(expected, NULL, std::memory_order_acq_rel);
+    g_originalWndProc = NULL;
     UpdateLowLevelKeyboardHookInstalledState();
-    return { true, CallWindowProc(g_originalWndProc, hWnd, uMsg, wParam, lParam) };
+    return { true, original ? CallWindowProc(original, hWnd, uMsg, wParam, lParam)
+                             : DefWindowProc(hWnd, uMsg, wParam, lParam) };
 }
 
 InputHandlerResult HandleImGuiInput(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
@@ -1271,6 +1332,81 @@ InputHandlerResult HandleImGuiInput(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM 
     // Instead, enqueue the message for the render thread (which owns the ImGui context).
     ImGuiInputQueue_EnqueueWin32Message(hWnd, uMsg, wParam, lParam);
     return { false, 0 };
+}
+
+static InputHandlerResult ApplySettingsGuiToggle(HWND hWnd, bool isEscape) {
+    if (isEscape && !g_showGui.load()) { return { false, 0 }; }
+
+    const auto now = std::chrono::steady_clock::now();
+    const int64_t nowMs =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            now.time_since_epoch())
+            .count();
+    const int64_t lastMs =
+        g_lastGuiToggleTimeMs.load(std::memory_order_relaxed);
+    if (nowMs - lastMs < 200) {
+        return { true, 1 };
+    }
+    g_lastGuiToggleTimeMs.store(nowMs, std::memory_order_relaxed);
+
+    if (!IsRenderBackendReady()) {
+        Log("GUI toggle ignored - renderer has not observed a game frame yet");
+        return { true, 1 };
+    }
+
+    bool isClosing = g_showGui.load();
+    if (isEscape && g_imguiAnyItemActive.load(std::memory_order_acquire)) {
+        isClosing = false;
+    }
+    if (isEscape && IsHotkeyBindingActive()) { isClosing = false; }
+    if (isEscape && IsRebindBindingActive()) { isClosing = false; }
+    if (isEscape && IsMirrorColorPickerPopupActive()) { isClosing = false; }
+
+    if (isClosing) {
+        CloseSettingsGuiWindow();
+    } else if (!isEscape) {
+        g_showGui = true;
+        ReleaseActiveLowLevelRebindKeys(hWnd);
+        InvalidateImGuiCache();
+        const bool wasCursorVisible = IsCursorVisible();
+        g_wasCursorVisible = wasCursorVisible;
+        g_forceVisibleCursorWhileGuiOpen.store(
+            false, std::memory_order_release);
+        g_guiNeedsRecenter = true;
+        if (!ApplyConfineCursorToGameWindow()) {
+            ClipCursor(NULL);
+        }
+        if (!wasCursorVisible &&
+            g_gameVersion >= GameVersion(1, 13, 0)) {
+            g_forceVisibleCursorWhileGuiOpen.store(
+                true, std::memory_order_release);
+            EnsureSystemCursorVisible();
+            SetCursor(
+                ResolveForcedVisibleGuiCursor(
+                    CurrentGameStateForCursor()));
+        }
+
+        g_configurePromptDismissedThisSession.store(
+            true, std::memory_order_release);
+        if (!g_toolscreenPath.empty()) {
+            const std::wstring flagPath =
+                g_toolscreenPath + L"\\has_opened";
+            const HANDLE file = CreateFileW(
+                flagPath.c_str(), GENERIC_WRITE, 0, NULL, OPEN_ALWAYS,
+                FILE_ATTRIBUTE_NORMAL, NULL);
+            if (file != INVALID_HANDLE_VALUE) { CloseHandle(file); }
+        }
+    }
+    return { true, 1 };
+}
+
+void ToggleSettingsGuiFromRenderer(HWND hWnd) {
+    (void)ApplySettingsGuiToggle(hWnd, false);
+}
+
+bool ConsumeVulkanGuiHotkeyPress() {
+    return s_vulkanGuiHotkeyPending.exchange(
+        false, std::memory_order_acq_rel);
 }
 
 InputHandlerResult HandleGuiToggle(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
@@ -1318,7 +1454,8 @@ InputHandlerResult HandleGuiToggle(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
         return { false, 0 };
     }
 
-    if (!isEscape && !CheckHotkeyMatch(g_config.guiHotkey, vkCode, {}, false, s_bestMatchKeyCount)) { return { false, 0 }; }
+    const bool hotkeyMatched = isEscape || CheckHotkeyMatch(g_config.guiHotkey, vkCode, {}, false, s_bestMatchKeyCount);
+    if (!hotkeyMatched) { return { false, 0 }; }
 
     if (!isEscape && ShouldMaskWindowsKeyForHotkey(g_config.guiHotkey, true, isAutoRepeatKeyDown)) {
         (void)SendMenuMaskKeyTap();
@@ -1336,60 +1473,7 @@ InputHandlerResult HandleGuiToggle(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
         }
     }
 
-    bool allow_toggle = true;
-    if (isEscape && !g_showGui.load()) { allow_toggle = false; }
-
-    if (!allow_toggle) { return { false, 0 }; }
-
-    // Lock-free debouncing using atomic timestamp
-    auto now = std::chrono::steady_clock::now();
-    int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-    int64_t lastMs = g_lastGuiToggleTimeMs.load(std::memory_order_relaxed);
-    if (nowMs - lastMs < 200) {
-        return { true, 1 };
-    }
-    g_lastGuiToggleTimeMs.store(nowMs, std::memory_order_relaxed);
-
-    if (!IsRenderBackendReady()) {
-        Log("GUI toggle ignored - renderer has not observed a game frame yet");
-        return { true, 1 };
-    }
-
-    bool is_closing = g_showGui.load();
-
-    if (isEscape && g_imguiAnyItemActive.load(std::memory_order_acquire)) { is_closing = false; }
-    if (isEscape && IsHotkeyBindingActive()) { is_closing = false; }
-    if (isEscape && IsRebindBindingActive()) { is_closing = false; }
-    if (isEscape && IsMirrorColorPickerPopupActive()) { is_closing = false; }
-
-    if (is_closing) {
-        CloseSettingsGuiWindow();
-    } else if (!isEscape) {
-        g_showGui = true;
-        ReleaseActiveLowLevelRebindKeys(hWnd);
-        InvalidateImGuiCache();
-        const bool wasCursorVisible = IsCursorVisible();
-        g_wasCursorVisible = wasCursorVisible;
-        g_forceVisibleCursorWhileGuiOpen.store(false, std::memory_order_release);
-        g_guiNeedsRecenter = true;
-        if (!ApplyConfineCursorToGameWindow()) {
-            ClipCursor(NULL);
-        }
-        if (!wasCursorVisible && g_gameVersion >= GameVersion(1, 13, 0)) {
-            g_forceVisibleCursorWhileGuiOpen.store(true, std::memory_order_release);
-            EnsureSystemCursorVisible();
-            SetCursor(ResolveForcedVisibleGuiCursor(CurrentGameStateForCursor()));
-        }
-
-        g_configurePromptDismissedThisSession.store(true, std::memory_order_release);
-
-        if (!g_toolscreenPath.empty()) {
-            std::wstring flagPath = g_toolscreenPath + L"\\has_opened";
-            HANDLE hFile = CreateFileW(flagPath.c_str(), GENERIC_WRITE, 0, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-            if (hFile != INVALID_HANDLE_VALUE) { CloseHandle(hFile); }
-        }
-    }
-    return { true, 1 };
+    return ApplySettingsGuiToggle(hWnd, isEscape);
 }
 
 InputHandlerResult HandleBorderlessToggle(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
@@ -3668,6 +3752,82 @@ static bool PostSuppressedLowLevelKeyMessage(HWND hWnd, const LowLevelSuppressed
     return ::PostMessage(hWnd, msg, static_cast<WPARAM>(state.rawVk), msgLParam) != FALSE;
 }
 
+static bool HasVulkanModeHotkeyFastPathNeed() {
+    if (GetRenderBackend() != RenderBackend::Vulkan ||
+        !DoesSubclassedWindowOwnForegroundInput() ||
+        !g_gameWindowActive.load(std::memory_order_acquire) ||
+        IsHotkeyBindingActive() || IsRebindBindingActive()) {
+        return false;
+    }
+
+    const auto cfg = GetConfigSnapshot();
+    if (!cfg) return false;
+
+    for (const auto& hotkey : cfg->hotkeys) {
+        if (!hotkey.keys.empty()) return true;
+        for (const auto& alt : hotkey.altSecondaryModes) {
+            if (!alt.keys.empty()) return true;
+        }
+    }
+    return false;
+}
+
+static bool PostVulkanFastPathKeyMessage(HWND hWnd, const KBDLLHOOKSTRUCT& info, WPARAM hookMessage, bool isKeyDown) {
+    const DWORD rawVk = static_cast<DWORD>(info.vkCode);
+    if (!hWnd || rawVk == 0) return false;
+
+    LowLevelSuppressedKeyState state{};
+    bool wasDown = false;
+    bool inserted = false;
+    {
+        std::lock_guard<std::mutex> lock(s_vulkanFastPathKeysMutex);
+        auto it = s_vulkanFastPathKeys.find(rawVk);
+        if (it != s_vulkanFastPathKeys.end()) {
+            state = it->second;
+            wasDown = true;
+        } else if (isKeyDown) {
+            state.rawVk = rawVk;
+            state.scanCodeWithFlags = BuildScanCodeWithFlagsFromLowLevelEvent(info);
+            state.isSystemKey = (hookMessage == WM_SYSKEYDOWN || hookMessage == WM_SYSKEYUP);
+            s_vulkanFastPathKeys.emplace(rawVk, state);
+            inserted = true;
+        } else {
+            return false;
+        }
+    }
+
+    if (!PostSuppressedLowLevelKeyMessage(hWnd, state, isKeyDown, wasDown)) {
+        if (inserted || !isKeyDown) {
+            std::lock_guard<std::mutex> lock(s_vulkanFastPathKeysMutex);
+            s_vulkanFastPathKeys.erase(rawVk);
+        }
+        return false;
+    }
+
+    if (!isKeyDown) {
+        std::lock_guard<std::mutex> lock(s_vulkanFastPathKeysMutex);
+        s_vulkanFastPathKeys.erase(rawVk);
+    }
+    return true;
+}
+
+static void ReleaseVulkanFastPathKeys(HWND hWnd) {
+    std::vector<LowLevelSuppressedKeyState> activeKeys;
+    {
+        std::lock_guard<std::mutex> lock(s_vulkanFastPathKeysMutex);
+        activeKeys.reserve(s_vulkanFastPathKeys.size());
+        for (const auto& [vk, state] : s_vulkanFastPathKeys) {
+            (void)vk;
+            activeKeys.push_back(state);
+        }
+        s_vulkanFastPathKeys.clear();
+    }
+
+    for (const auto& state : activeKeys) {
+        (void)PostSuppressedLowLevelKeyMessage(hWnd, state, false, true);
+    }
+}
+
 static LRESULT CALLBACK LowLevelKeyboardProc(int code, WPARAM wParam, LPARAM lParam) {
     if (code < 0 || lParam == 0) {
         return CallNextHookEx(s_lowLevelKeyboardHook, code, wParam, lParam);
@@ -3689,6 +3849,18 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int code, WPARAM wParam, LPARAM lPa
     }
 
     const DWORD rawVk = static_cast<DWORD>(info->vkCode);
+    const RenderBackend backend = GetRenderBackend();
+    const auto cfg = backend == RenderBackend::Vulkan ? GetConfigSnapshot() : nullptr;
+    const DWORD configuredGuiMainKey =
+        (cfg && !cfg->guiHotkey.empty()) ? cfg->guiHotkey.back() : 0;
+    const bool isConfiguredGuiMainKey =
+        rawVk == configuredGuiMainKey ||
+        (configuredGuiMainKey == VK_CONTROL &&
+         (rawVk == VK_LCONTROL || rawVk == VK_RCONTROL)) ||
+        (configuredGuiMainKey == VK_SHIFT &&
+         (rawVk == VK_LSHIFT || rawVk == VK_RSHIFT)) ||
+        (configuredGuiMainKey == VK_MENU &&
+         (rawVk == VK_LMENU || rawVk == VK_RMENU));
 
     // Exact-sided modifier resolution for later window messages depends on seeing the
     // low-level transition even if the suppression path declines to act on this event.
@@ -3698,8 +3870,37 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int code, WPARAM wParam, LPARAM lPa
     if (!targetHwnd) {
         return CallNextHookEx(s_lowLevelKeyboardHook, code, wParam, lParam);
     }
-    if (!IsWindowInForegroundTree(targetHwnd) || !g_gameWindowActive.load(std::memory_order_acquire)) {
+    const bool ownsForeground = IsWindowInForegroundTree(targetHwnd);
+    const bool gameWindowActive = g_gameWindowActive.load(std::memory_order_acquire);
+    if (!ownsForeground || !gameWindowActive) {
         return CallNextHookEx(s_lowLevelKeyboardHook, code, wParam, lParam);
+    }
+
+    if (backend == RenderBackend::Vulkan) {
+        if (cfg && !cfg->guiHotkey.empty()) {
+            if (isConfiguredGuiMainKey && isKeyUp) {
+                s_vulkanGuiHotkeyMainDown.store(
+                    false, std::memory_order_release);
+            } else if (isConfiguredGuiMainKey && isKeyDown) {
+                const bool wasAlreadyDown = s_vulkanGuiHotkeyMainDown.exchange(
+                    true, std::memory_order_acq_rel);
+                const bool matched = !wasAlreadyDown &&
+                    DoesLowLevelHotkeyChordMatch(cfg->guiHotkey, rawVk);
+                if (matched) {
+                    s_vulkanGuiHotkeyPending.store(
+                        true, std::memory_order_release);
+                }
+            }
+        }
+
+        // Repost the complete keyboard stream while mode hotkeys are configured.
+        // This preserves the ordering required by release/hold hotkeys and lets the
+        // existing WndProc hotkey pipeline run immediately instead of waiting for
+        // Vulkan-delayed delivery of the original WM_KEY* message.
+        if (HasVulkanModeHotkeyFastPathNeed() &&
+            PostVulkanFastPathKeyMessage(targetHwnd, *info, wParam, isKeyDown)) {
+            return 1;
+        }
     }
 
     LowLevelSuppressedKeyState existingState{};
@@ -3855,10 +4056,17 @@ static void UpdateLowLevelKeyboardHookInstalledState() {
     const bool needsDeepSuppression = HasDeepSuppressionEligibleEnabledRebind();
     const bool needsExactModifierTracking = HasExactModifierTrackingNeed();
     const bool needsCapsLockSuppression = IsCapsLockSuppressionEnabled();
-
-    if (g_isShuttingDown.load(std::memory_order_acquire) || (!needsDeepSuppression && !needsExactModifierTracking && !needsCapsLockSuppression)) {
+    const bool needsVulkanModeHotkeyFastPath = HasVulkanModeHotkeyFastPathNeed();
+    const bool shuttingDown = g_isShuttingDown.load(std::memory_order_acquire);
+    const bool hookRequested = !shuttingDown &&
+        (needsDeepSuppression || needsExactModifierTracking || needsCapsLockSuppression || needsVulkanModeHotkeyFastPath);
+    const bool ownsForeground = DoesSubclassedWindowOwnForegroundInput();
+    const bool gameWindowActive = g_gameWindowActive.load(std::memory_order_acquire);
+    if (shuttingDown ||
+        (!needsDeepSuppression && !needsExactModifierTracking && !needsCapsLockSuppression && !needsVulkanModeHotkeyFastPath)) {
         const HWND targetHwnd = g_subclassedHwnd.load(std::memory_order_acquire);
         ReleaseSuppressedLowLevelRebindKeys(targetHwnd);
+        ReleaseVulkanFastPathKeys(targetHwnd);
         ResetLowLevelExactModifierState();
         UninstallLowLevelKeyboardHook();
         return;
@@ -4103,6 +4311,10 @@ void SetLowLevelExactModifierDownForTest(DWORD vk, bool isDown) {
     } else {
         s_lowLevelExactModifierKeysDown.erase(vk);
     }
+}
+
+bool DoesLowLevelHotkeyChordMatchForTest(const std::vector<DWORD>& keys, DWORD incomingVk) {
+    return DoesLowLevelHotkeyChordMatch(keys, incomingVk);
 }
 
 void SetPhysicalModifierDownForTest(DWORD vk, bool isDown) { s_physicalModifierDownOverridesForTests[vk] = isDown; }
@@ -5162,7 +5374,7 @@ LRESULT CALLBACK SubclassedWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
     }
 
     if (uMsg == WM_TOOLSCREEN_INVOKE_GLFW_RESIZE_CALLBACKS) {
-        InvokeCapturedGlfwResizeCallbacks(static_cast<int>(wParam), static_cast<int>(lParam));
+        InvokeCapturedGlfwResizeCallbacks(hWnd, static_cast<int>(wParam), static_cast<int>(lParam));
         return 0;
     }
 

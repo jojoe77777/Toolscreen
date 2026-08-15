@@ -77,23 +77,19 @@ class ScopedKeyboardStateOverride {
 
 class ScopedCursorVisibilityOverride {
     public:
-        explicit ScopedCursorVisibilityOverride(bool visible) : m_originalVisible(IsCursorVisible()) {
+        explicit ScopedCursorVisibilityOverride(bool visible) {
                 SetVisible(visible);
         }
 
-        ~ScopedCursorVisibilityOverride() { SetVisible(m_originalVisible); }
+        ~ScopedCursorVisibilityOverride() { SetCursorVisibilityOverrideForTests(false, false); }
 
     private:
         static void SetVisible(bool visible) {
-                for (int attempt = 0; attempt < 32 && IsCursorVisible() != visible; ++attempt) {
-                        ShowCursor(visible ? TRUE : FALSE);
-                }
+                SetCursorVisibilityOverrideForTests(true, visible);
 
                 Expect(IsCursorVisible() == visible,
                              std::string("Failed to set cursor visibility to ") + (visible ? "visible" : "hidden") + " for rebind integration test.");
         }
-
-        bool m_originalVisible = false;
 };
 
 class ScopedRebindMessageCapture {
@@ -316,7 +312,23 @@ static void PrepareRebindGuiCase(std::string_view caseName, const std::vector<Ke
     g_config.keyRebinds.rebinds = rebinds;
     g_config.hotkeys.clear();
     g_config.sensitivityHotkeys.clear();
+    RequestGuiTestKeyboardLayoutSetCursorStateView(GuiTestKeyboardLayoutCursorStateView::Any);
     PublishConfigSnapshot();
+}
+
+void RunVulkanGuiHotkeyUsesLowLevelExactModifierStateTest(TestRunMode runMode = TestRunMode::Automated) {
+    (void)runMode;
+    ResetLowLevelExactModifierStateForTest();
+    SetLowLevelExactModifierDownForTest(VK_LCONTROL, true);
+
+    Expect(DoesLowLevelHotkeyChordMatchForTest({ VK_LCONTROL, 'I' }, 'I'),
+        "Expected Vulkan GUI hotkey matching to use the low-level left-Ctrl state.");
+    Expect(!DoesLowLevelHotkeyChordMatchForTest({ VK_RCONTROL, 'I' }, 'I'),
+        "Expected left Ctrl not to satisfy a right-Ctrl Vulkan GUI hotkey.");
+
+    SetLowLevelExactModifierDownForTest(VK_LCONTROL, false);
+    Expect(!DoesLowLevelHotkeyChordMatchForTest({ VK_LCONTROL, 'I' }, 'I'),
+        "Expected the Vulkan GUI hotkey not to match after left Ctrl is released.");
 }
 
 static void RenderKeyboardInputsFrame(DummyWindow& window) {

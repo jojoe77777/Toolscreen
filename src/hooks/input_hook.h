@@ -3,8 +3,20 @@
 #include <atomic>
 #include <Windows.h>
 #include <string>
+#include <vector>
 
-extern WNDPROC g_originalWndProc;
+// The render thread can replace the subclass while the window thread forwards
+// a message.  A raw function pointer here is a C++ data race.
+struct AtomicWndProc {
+    std::atomic<WNDPROC> value{ nullptr };
+    AtomicWndProc& operator=(WNDPROC proc) {
+        value.store(proc, std::memory_order_release);
+        return *this;
+    }
+    operator WNDPROC() const { return value.load(std::memory_order_acquire); }
+};
+
+extern AtomicWndProc g_originalWndProc;
 extern std::atomic<HWND> g_subclassedHwnd;
 
 struct InputHandlerResult {
@@ -44,6 +56,8 @@ InputHandlerResult HandleDestroy(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
 InputHandlerResult HandleImGuiInput(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
 InputHandlerResult HandleGuiToggle(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+void ToggleSettingsGuiFromRenderer(HWND hWnd);
+bool ConsumeVulkanGuiHotkeyPress();
 
 InputHandlerResult HandleBorderlessToggle(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
@@ -93,6 +107,7 @@ size_t GetUnreboundKeyDownCountForTest();
 void ResetHotkeyRuntimeStateForTest();
 void ResetLowLevelExactModifierStateForTest();
 void SetLowLevelExactModifierDownForTest(DWORD vk, bool isDown);
+bool DoesLowLevelHotkeyChordMatchForTest(const std::vector<DWORD>& keys, DWORD incomingVk);
 void SetPhysicalModifierDownForTest(DWORD vk, bool isDown);
 void ResetPhysicalModifierStateForTest();
 void QueueSuppressedLowLevelKeyForTest(DWORD vk, UINT scanCodeWithFlags, bool isSystemKey);

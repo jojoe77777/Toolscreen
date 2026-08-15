@@ -92,6 +92,7 @@ const auto& GetTestCaseDefinitions() {
         {"config-load-key-rebind-cursor-state-defaulted", &RunConfigLoadKeyRebindCursorStateDefaultedTest},
         {"config-publish-key-rebind-cannot-type-clears-typed-output", &RunConfigPublishKeyRebindCannotTypeClearsTypedOutputTest},
         {"hotkey-runtime-specific-shift-release-matches-exact-keyup", &RunHotkeyRuntimeSpecificShiftReleaseMatchesExactKeyupTest},
+        {"hotkey-runtime-vulkan-gui-uses-low-level-exact-modifier-state", &RunVulkanGuiHotkeyUsesLowLevelExactModifierStateTest},
         {"hotkey-runtime-exclusion-detects-low-level-suppressed-key", &RunHotkeyRuntimeExclusionDetectsLowLevelSuppressedKeyTest},
         {"hotkey-runtime-exclusion-detects-suppressed-ctrl-shift", &RunHotkeyRuntimeExclusionDetectsSuppressedCtrlShiftTest},
         {"key-rebind-deep-suppression-eligibility", &RunKeyRebindDeepSuppressionEligibilityTest},

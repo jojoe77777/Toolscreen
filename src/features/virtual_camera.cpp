@@ -1,6 +1,7 @@
 #include "virtual_camera.h"
 #include "common/utils.h"
 #include "render/render.h"
+#include "render/render_backend.h"
 
 // Prevent Windows min/max macros from conflicting with std::min/std::max
 #ifndef NOMINMAX
@@ -71,11 +72,16 @@ struct VirtualCameraState {
     LARGE_INTEGER lastFrameTime = {};
     LARGE_INTEGER perfFreq = {};
     bool active = false;
+    bool stopPending = false;
+    uint64_t generation = 0;
+    uint32_t gpuLeaseCount = 0;
+    bool gpuSlotReserved[3] = { false, false, false };
 };
 
 static VirtualCameraState g_vcState;
 
 static void ForceVirtualCameraCaptureFrames(int frameCount);
+static void FinalizeVirtualCameraStopLocked();
 
 
 // Helper to clamp int to byte range (avoids Windows min/max macro conflict)
@@ -149,7 +155,9 @@ static bool ReinitializeVirtualCamera(uint32_t width, uint32_t height) {
         return false;
     }
 
-    ResetSameThreadVirtualCameraCaptureState();
+    if (GetRenderBackend() != RenderBackend::Vulkan) {
+        ResetSameThreadVirtualCameraCaptureState();
+    }
     return true;
 }
 
@@ -269,6 +277,7 @@ static void PublishBlankVirtualCameraFrameLocked(uint32_t width, uint32_t height
 
 static bool ResetVirtualCameraStateLocked(uint32_t width, uint32_t height, const char* reason) {
     if (!g_vcState.active || !g_vcState.header || width < 2 || height < 2) { return false; }
+    if (g_vcState.gpuLeaseCount != 0) { return false; }
 
     const uint32_t requiredFrameBytes = width * height * 3 / 2;
     if (requiredFrameBytes > g_vcState.frameCapacityBytes) { return false; }
@@ -431,6 +440,11 @@ bool StartVirtualCamera(uint32_t width, uint32_t height) {
 
     std::lock_guard<std::mutex> lock(g_vcMutex);
 
+    if (g_vcState.stopPending) {
+        g_vcLastError =
+            "Previous Vulkan virtual-camera frame is still retiring";
+        return false;
+    }
     if (g_vcState.active) {
         g_vcLastError = "Virtual camera already active";
         return true;
@@ -458,24 +472,41 @@ bool StartVirtualCamera(uint32_t width, uint32_t height) {
     uint32_t allocHeight = 0;
     ResolveVirtualCameraAllocationSize(width, height, allocWidth, allocHeight);
 
-    uint32_t frameSize = allocWidth * allocHeight * 3 / 2;
+    const uint64_t rawFrameSize =
+        static_cast<uint64_t>(allocWidth) *
+        static_cast<uint64_t>(allocHeight) * 3ull / 2ull;
+    constexpr uint32_t kGpuImportAlignment = 64u * 1024u;
+    if (rawFrameSize > UINT32_MAX - kGpuImportAlignment) {
+        g_vcLastError = "Virtual camera dimensions exceed shared-memory limits";
+        Log("Virtual Camera: " + g_vcLastError);
+        return false;
+    }
+    uint32_t frameSize = static_cast<uint32_t>(rawFrameSize);
+    ALIGN_SIZE(frameSize, kGpuImportAlignment);
     uint32_t offset_frame[3];
-    uint32_t totalSize;
+    uint64_t totalSize64;
 
-    totalSize = sizeof(queue_header);
-    ALIGN_SIZE(totalSize, 32);
+    totalSize64 = sizeof(queue_header);
 
-    offset_frame[0] = totalSize;
-    totalSize += frameSize + FRAME_HEADER_SIZE;
-    ALIGN_SIZE(totalSize, 32);
-
-    offset_frame[1] = totalSize;
-    totalSize += frameSize + FRAME_HEADER_SIZE;
-    ALIGN_SIZE(totalSize, 32);
-
-    offset_frame[2] = totalSize;
-    totalSize += frameSize + FRAME_HEADER_SIZE;
-    ALIGN_SIZE(totalSize, 32);
+    for (int index = 0; index < 3; ++index) {
+        // OBS expects a 32-byte frame header immediately before the pixels.
+        // Place that header so the following pixel pointer is allocation-
+        // granularity aligned and can be imported with
+        // VK_EXT_external_memory_host on either supported Windows GPU.
+        totalSize64 += FRAME_HEADER_SIZE;
+        totalSize64 =
+            (totalSize64 + kGpuImportAlignment - 1u) &
+            ~(static_cast<uint64_t>(kGpuImportAlignment) - 1u);
+        offset_frame[index] =
+            static_cast<uint32_t>(totalSize64 - FRAME_HEADER_SIZE);
+        totalSize64 += frameSize;
+    }
+    if (totalSize64 > UINT32_MAX) {
+        g_vcLastError = "Virtual camera shared-memory allocation is too large";
+        Log("Virtual Camera: " + g_vcLastError);
+        return false;
+    }
+    const uint32_t totalSize = static_cast<uint32_t>(totalSize64);
 
     g_vcState.handle = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, totalSize, VIDEO_NAME);
 
@@ -515,6 +546,13 @@ bool StartVirtualCamera(uint32_t width, uint32_t height) {
     g_vcState.capacityHeight = allocHeight;
     g_vcState.frameCapacityBytes = frameSize;
     g_vcState.active = true;
+    g_vcState.stopPending = false;
+    ++g_vcState.generation;
+    if (g_vcState.generation == 0) ++g_vcState.generation;
+    g_vcState.gpuLeaseCount = 0;
+    std::fill(
+        std::begin(g_vcState.gpuSlotReserved),
+        std::end(g_vcState.gpuSlotReserved), false);
     g_virtualCameraActive.store(true, std::memory_order_release);
     g_vcLastError.clear();
     for (int i = 0; i < 3; ++i) {
@@ -529,14 +567,8 @@ bool StartVirtualCamera(uint32_t width, uint32_t height) {
     return true;
 }
 
-void StopVirtualCamera() {
-    g_virtualCameraActive.store(false, std::memory_order_release);
-    std::lock_guard<std::mutex> lock(g_vcMutex);
-
-    if (!g_vcState.active) { return; }
-
-    if (g_vcState.header) { g_vcState.header->state = SHARED_QUEUE_STATE_STOPPING; }
-
+static void FinalizeVirtualCameraStopLocked() {
+    if (g_vcState.gpuLeaseCount != 0) return;
     if (g_vcState.header) {
         UnmapViewOfFile(g_vcState.header);
         g_vcState.header = nullptr;
@@ -559,8 +591,34 @@ void StopVirtualCamera() {
     g_vcState.capacityHeight = 0;
     g_vcState.frameCapacityBytes = 0;
     g_vcState.lastFrameTime.QuadPart = 0;
+    g_vcState.stopPending = false;
+    std::fill(
+        std::begin(g_vcState.gpuSlotReserved),
+        std::end(g_vcState.gpuSlotReserved), false);
     g_vcLastCaptureTick.store(0, std::memory_order_release);
     g_vcForcedCaptureFrames.store(0, std::memory_order_release);
+}
+
+void StopVirtualCamera() {
+    g_virtualCameraActive.store(false, std::memory_order_release);
+    std::lock_guard<std::mutex> lock(g_vcMutex);
+
+    if (!g_vcState.active && !g_vcState.stopPending) { return; }
+
+    g_vcState.active = false;
+    g_vcState.stopPending = true;
+    if (g_vcState.header) {
+        g_vcState.header->state = SHARED_QUEUE_STATE_STOPPING;
+        MemoryBarrier();
+    }
+
+    if (g_vcState.gpuLeaseCount != 0) {
+        Log("Virtual Camera: Stop deferred until " +
+            std::to_string(g_vcState.gpuLeaseCount) +
+            " Vulkan frame lease(s) retire");
+        return;
+    }
+    FinalizeVirtualCameraStopLocked();
 
     Log("Virtual Camera: Stopped");
 }
@@ -600,8 +658,17 @@ bool EnsureVirtualCameraSize(uint32_t width, uint32_t height) {
         std::lock_guard<std::mutex> lock(g_vcMutex);
         if (!g_vcState.active) { return false; }
         if (g_vcState.width == width && g_vcState.height == height) { return true; }
+        if (g_vcState.gpuLeaseCount != 0) {
+            g_vcPendingResizeWidth.store(width, std::memory_order_relaxed);
+            g_vcPendingResizeHeight.store(height, std::memory_order_relaxed);
+            g_vcPendingResizeRequestedMs.store(
+                GetTickCount64(), std::memory_order_release);
+            return true;
+        }
         if (ResetVirtualCameraStateLocked(width, height, "for size change")) {
-            ResetSameThreadVirtualCameraCaptureState();
+            if (GetRenderBackend() != RenderBackend::Vulkan) {
+                ResetSameThreadVirtualCameraCaptureState();
+            }
             return true;
         }
     }
@@ -614,7 +681,9 @@ bool EnsureVirtualCameraSize(uint32_t width, uint32_t height) {
         return false;
     }
 
-    ResetSameThreadVirtualCameraCaptureState();
+    if (GetRenderBackend() != RenderBackend::Vulkan) {
+        ResetSameThreadVirtualCameraCaptureState();
+    }
     return true;
 }
 
@@ -733,6 +802,81 @@ bool WriteVirtualCameraFrameNV12Planes(const uint8_t* y_plane, const uint8_t* uv
 
     g_vcState.lastFrameTime = now;
     return true;
+}
+
+bool AcquireVirtualCameraGpuFrame(
+    uint64_t timestamp, VirtualCameraGpuFrame& outFrame) {
+    outFrame = {};
+    if (!g_virtualCameraActive.load(std::memory_order_acquire)) return false;
+    std::lock_guard<std::mutex> lock(g_vcMutex);
+    if (!g_vcState.active || !g_vcState.header ||
+        g_vcState.stopPending || g_vcState.width < 2 ||
+        g_vcState.height < 2) {
+        return false;
+    }
+
+    const uint32_t firstWrite = g_vcState.header->write_idx + 1u;
+    for (uint32_t offset = 0; offset < 3; ++offset) {
+        const uint32_t writeIndex = firstWrite + offset;
+        const uint32_t slot = writeIndex % 3u;
+        if (g_vcState.gpuSlotReserved[slot]) continue;
+        g_vcState.gpuSlotReserved[slot] = true;
+        ++g_vcState.gpuLeaseCount;
+        outFrame.data = g_vcState.frame[slot];
+        outFrame.capacityBytes = g_vcState.frameCapacityBytes;
+        outFrame.width = g_vcState.width;
+        outFrame.height = g_vcState.height;
+        outFrame.slot = slot;
+        outFrame.writeIndex = writeIndex;
+        outFrame.timestamp = timestamp;
+        outFrame.generation = g_vcState.generation;
+        return true;
+    }
+    return false;
+}
+
+bool PublishVirtualCameraGpuFrame(const VirtualCameraGpuFrame& frame) {
+    std::lock_guard<std::mutex> lock(g_vcMutex);
+    if (frame.slot >= 3 || frame.generation != g_vcState.generation ||
+        !g_vcState.gpuSlotReserved[frame.slot]) {
+        return false;
+    }
+    g_vcState.gpuSlotReserved[frame.slot] = false;
+    if (g_vcState.gpuLeaseCount > 0) --g_vcState.gpuLeaseCount;
+
+    bool published = false;
+    if (g_vcState.active && !g_vcState.stopPending && g_vcState.header &&
+        frame.width == g_vcState.width && frame.height == g_vcState.height) {
+        *g_vcState.ts[frame.slot] = frame.timestamp;
+        MemoryBarrier();
+        g_vcState.header->write_idx = frame.writeIndex;
+        g_vcState.header->read_idx = frame.writeIndex;
+        g_vcState.header->state = SHARED_QUEUE_STATE_READY;
+        MemoryBarrier();
+        LARGE_INTEGER now{};
+        QueryPerformanceCounter(&now);
+        g_vcState.lastFrameTime = now;
+        published = true;
+    }
+    if (g_vcState.stopPending && g_vcState.gpuLeaseCount == 0) {
+        FinalizeVirtualCameraStopLocked();
+        Log("Virtual Camera: Stopped after Vulkan frame retirement");
+    }
+    return published;
+}
+
+void AbandonVirtualCameraGpuFrame(const VirtualCameraGpuFrame& frame) {
+    std::lock_guard<std::mutex> lock(g_vcMutex);
+    if (frame.slot >= 3 || frame.generation != g_vcState.generation ||
+        !g_vcState.gpuSlotReserved[frame.slot]) {
+        return;
+    }
+    g_vcState.gpuSlotReserved[frame.slot] = false;
+    if (g_vcState.gpuLeaseCount > 0) --g_vcState.gpuLeaseCount;
+    if (g_vcState.stopPending && g_vcState.gpuLeaseCount == 0) {
+        FinalizeVirtualCameraStopLocked();
+        Log("Virtual Camera: Stopped after abandoned Vulkan frame retirement");
+    }
 }
 
 bool IsVirtualCameraActive() { return g_virtualCameraActive.load(std::memory_order_acquire); }

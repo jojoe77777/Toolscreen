@@ -15,6 +15,7 @@ struct SupporterRoleEntry {
     std::string imageUrl;
     int tierIconWidth = 0;
     int tierIconHeight = 0;
+    uint64_t tierIconGeneration = 0;
     std::vector<unsigned char> tierIconPixels;
     std::vector<std::string> members;
 };
@@ -48,7 +49,7 @@ extern AltBindState s_altHotkeyToBind;
 
 float ComputeGuiScaleFactorFromCachedWindowSize();
 void LoadEmbeddedResourceTexture(GLuint& tex, int resourceId, int filterMode = 0x2601);
-bool EnsureSupporterTierTexture(const SupporterRoleEntry& role, GLuint& outTextureId, int& outWidth, int& outHeight);
+bool EnsureSupporterTierTexture(const SupporterRoleEntry& role, uintptr_t& outTextureId, int& outWidth, int& outHeight);
 void ClearSupporterTierTextureCache();
 
 std::string ValidateImageFile(const std::string& path, const std::wstring& toolscreenPath, int maxDimension = 16384);

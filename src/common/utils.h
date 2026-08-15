@@ -386,8 +386,9 @@ BOOL ClipCursorDirect(const RECT* lpRect);
 bool ApplyConfineCursorToGameWindow();
 void ApplyDeferredGuiCursorModeAfterClose();
 void FinalizeGuiCursorStateAfterClose();
-void InvokeCapturedGlfwResizeCallbacks(int width, int height);
-void ClearCapturedGlfwResizeCallbacks();
+void InvokeCapturedGlfwResizeCallbacks(HWND destinationHwnd, int width, int height);
+void ClearCapturedGlfwResizeCallbacks(HWND destroyedHwnd = NULL);
+void ClearCapturedSdlWindow(HWND destroyedHwnd = NULL);
 
 UINT GetToolscreenBorderlessToggleMessageId();
 void RememberRequestedWindowClientResize(int width, int height);
@@ -396,6 +397,9 @@ bool GetRecentRequestedWindowClientResizes(int& outCurrentW, int& outCurrentH, i
 bool CenterWindowedRestoreOnCurrentMonitor(HWND hwnd, const char* source = nullptr);
 void ToggleBorderlessWindowedFullscreen(HWND hwnd);
 bool IsCursorVisible();
+#if defined(TOOLSCREEN_GUI_INTEGRATION_TESTS)
+void SetCursorVisibilityOverrideForTests(bool enabled, bool visible);
+#endif
 void WriteCurrentModeToFile(const std::string& modeId);
 bool SwitchToMode(const std::string& newModeId, const std::string& source = "", bool forceCut = false);
 bool IsHardcodedMode(const std::string& modeId);
@@ -472,6 +476,9 @@ void ScreenDeltaToMirrorConfigDelta(const std::string& relativeTo,
                                     int& outConfigDx, int& outConfigDy);
 
 void ScreenshotToClipboard(int width, int height);
+bool ScreenshotPixelsToClipboard(const unsigned char* pixels, int width, int height,
+                                 size_t rowPitch, bool sourceIsBgra,
+                                 bool sourceIsTopDown);
 
 DWORD WINAPI FileMonitorThread(LPVOID lpParam);
 DWORD WINAPI ImageMonitorThread(LPVOID lpParam);

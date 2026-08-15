@@ -1,4 +1,5 @@
 #include "render.h"
+#include "render_backend.h"
 #include "render/background_fit_layout.h"
 #include "platform/resource.h"
 #include "features/cursor_trail.h"
@@ -582,6 +583,9 @@ int GetEyeZoomSnapshotHeight() { return s_eyeZoomSnapshotHeight; }
 std::unordered_map<std::string, MirrorInstance> g_mirrorInstances;
 std::unordered_map<std::string, BackgroundTextureInstance> g_backgroundTextures;
 std::unordered_map<std::string, UserImageInstance> g_userImages;
+static std::mutex s_nativeImageDimensionsMutex;
+static std::unordered_map<std::string, std::pair<int, int>>
+    s_nativeImageDimensions;
 GLuint g_vao = 0;
 GLuint g_vbo = 0;
 GLuint g_debugVAO = 0;
@@ -735,8 +739,6 @@ static POINT s_captureZoneLastMousePos = { 0, 0 };
 
 static std::atomic<bool> s_ninjabrainOverlayRectValid{ false };
 static int s_ninjabrainOverlayRectX = 0, s_ninjabrainOverlayRectY = 0, s_ninjabrainOverlayRectW = 0, s_ninjabrainOverlayRectH = 0;
-static int s_nbAccMinX = 0, s_nbAccMinY = 0, s_nbAccMaxX = 0, s_nbAccMaxY = 0;
-static bool s_nbAccAny = false;
 static bool s_ninjabrainSelected = false;
 static bool s_isNinjabrainDragging = false;
 static bool s_ninjabrainDragDidMove = false;
@@ -1274,6 +1276,9 @@ static std::mutex s_textureGridMutex;
 static ImFont* g_overlayTextFont = nullptr;
 static float g_overlayTextFontSize = 24.0f;
 
+ImFont* GetOverlayTextFont() { return g_overlayTextFont; }
+float GetOverlayTextFontSize() { return g_overlayTextFontSize; }
+
 static void CacheEyeZoomTextLabel(int number, float centerX, float centerY, float boxWidth, float boxHeight,
                                                                     EyeZoomFontSizeMode fontSizeMode,
                                   const Color& color, float clipMinX, float clipMinY, float clipMaxX, float clipMaxY) {
@@ -1468,6 +1473,16 @@ static void ScaleViewportRelativeImageSize(int baseW, int baseH, bool relativeSt
 }
 
 bool GetImageSourceDimensions(const std::string& name, int& outW, int& outH) {
+    if (GetRenderBackend() == RenderBackend::Vulkan) {
+        std::lock_guard<std::mutex> nativeLock(
+            s_nativeImageDimensionsMutex);
+        const auto native = s_nativeImageDimensions.find(name);
+        if (native != s_nativeImageDimensions.end()) {
+            outW = native->second.first;
+            outH = native->second.second;
+            return outW > 0 && outH > 0;
+        }
+    }
     std::unique_lock<std::mutex> lock(g_userImagesMutex, std::try_to_lock);
     if (!lock.owns_lock()) return false;
     auto it = g_userImages.find(name);
@@ -1475,6 +1490,31 @@ bool GetImageSourceDimensions(const std::string& name, int& outW, int& outH) {
     outW = it->second.width;
     outH = it->second.height;
     return true;
+}
+
+void PublishNativeImageSourceDimensions(
+    const std::string& name, int width, int height) {
+    std::lock_guard<std::mutex> lock(
+        s_nativeImageDimensionsMutex);
+    s_nativeImageDimensions[name] = { width, height };
+}
+
+void PublishNativeMirrorGeometry(
+    const std::string& name, int sourceWidth, int sourceHeight,
+    int screenX, int screenY, int screenWidth, int screenHeight,
+    bool hasFrameContent) {
+    std::unique_lock<std::shared_mutex> lock(g_mirrorInstancesMutex);
+    MirrorInstance& instance = g_mirrorInstances[name];
+    instance.fbo_w = (std::max)(1, sourceWidth);
+    instance.fbo_h = (std::max)(1, sourceHeight);
+    instance.hasValidContent = true;
+    instance.hasFrameContent = hasFrameContent;
+    auto& cache = instance.cachedRenderState;
+    cache.isValid = screenWidth > 0 && screenHeight > 0;
+    cache.mirrorScreenX = screenX;
+    cache.mirrorScreenY = screenY;
+    cache.mirrorScreenW = screenWidth;
+    cache.mirrorScreenH = screenHeight;
 }
 
 bool GetCroppedImageDimensions(const ImageConfig& img, int& outCroppedW, int& outCroppedH) {
@@ -2661,6 +2701,10 @@ void CleanupGPUResources() {
             g_sceneFBO = 0;
         }
         for (int i = 0; i < SAME_THREAD_OBS_BUFFER_COUNT; ++i) {
+            WaitForObsOverrideTextureConsumer(g_sameThreadObsComposeTextures[i]);
+        }
+        ClearObsOverride();
+        for (int i = 0; i < SAME_THREAD_OBS_BUFFER_COUNT; ++i) {
             if (g_sameThreadObsComposeFBOs[i]) {
                 trackCleanupResource("<global>", "g_sameThreadObsComposeFBOs[" + std::to_string(i) + "]",
                                      static_cast<uintptr_t>(g_sameThreadObsComposeFBOs[i]));
@@ -3318,6 +3362,28 @@ void CreateMirrorGPUResources(const MirrorConfig& conf) {
 
     glBindFramebuffer(GL_FRAMEBUFFER, last_framebuffer);
     BindTextureDirect(GL_TEXTURE_2D, last_texture);
+}
+
+static void EnsureMirrorGPUResourcesForConfig(const Config& config) {
+    if (GetRenderBackend() != RenderBackend::OpenGL || !g_glInitialized.load(std::memory_order_acquire)) {
+        return;
+    }
+
+    std::vector<MirrorConfig> missingMirrors;
+    {
+        std::shared_lock<std::shared_mutex> lock(g_mirrorInstancesMutex);
+        missingMirrors.reserve(config.mirrors.size());
+        for (const auto& mirror : config.mirrors) {
+            if (mirror.input.empty() || g_mirrorInstances.find(mirror.name) != g_mirrorInstances.end()) {
+                continue;
+            }
+            missingMirrors.push_back(mirror);
+        }
+    }
+
+    for (const auto& mirror : missingMirrors) {
+        CreateMirrorGPUResources(mirror);
+    }
 }
 
 void AddMirrorToCurrentMode(MirrorConfig&& mirror) {
@@ -5403,6 +5469,9 @@ static void EnsureSameThreadObsComposeTarget(int fullW, int fullH) {
                                g_sameThreadObsComposeTextures[0] != 0 && g_sameThreadObsComposeTextures[1] != 0;
     if (!needsResize && hasAllTargets) { return; }
 
+    for (int i = 0; i < SAME_THREAD_OBS_BUFFER_COUNT; ++i) {
+        WaitForObsOverrideTextureConsumer(g_sameThreadObsComposeTextures[i]);
+    }
     ClearObsOverride();
 
     for (int i = 0; i < SAME_THREAD_OBS_BUFFER_COUNT; ++i) {
@@ -5900,6 +5969,8 @@ bool RenderSameThreadObsFrame(const ModeConfig* modeToRender, const GLState& s, 
         g_sameThreadObsComposeTextures[composeIndex] == 0) {
         return false;
     }
+
+    WaitForObsOverrideTextureConsumer(g_sameThreadObsComposeTextures[composeIndex]);
 
     ModeTransitionState transitionState;
     bool isAnimating = false;
@@ -6798,6 +6869,14 @@ void RenderMode(const ModeConfig* modeToRender, const GLState& s, int current_ga
     RenderModeInternal(modeToRender, s, current_gameW, current_gameH, skipAnimation, excludeOnlyOnMyScreen);
 }
 
+void PublishNativeFrameGeometry(
+    int gameWidth, int gameHeight, int finalX, int finalY,
+    int finalWidth, int finalHeight) {
+    std::lock_guard<std::mutex> lock(g_geometryMutex);
+    g_lastFrameGeometry = {
+        gameWidth, gameHeight, finalX, finalY, finalWidth, finalHeight };
+}
+
 void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int current_gameW, int current_gameH, bool skipAnimation,
                         bool excludeOnlyOnMyScreen) {
     PROFILE_SCOPE_CAT("RenderModeInternal", "Rendering");
@@ -6836,14 +6915,36 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
         modeY = transitionState.y;
     }
 
+    const bool nativeInteractionOnly =
+        GetRenderBackend() == RenderBackend::Vulkan;
+
+    // GPU mirror instances are created during renderer initialization from the
+    // profile that was active at startup. A later profile switch can introduce
+    // mirrors with new names, so create those instances once the new snapshot
+    // reaches the GL render path.
+    static std::shared_ptr<const Config> s_lastMirrorResourceSnapshot;
+    if (!nativeInteractionOnly && configSnap && GetRenderBackend() == RenderBackend::OpenGL &&
+        g_glInitialized.load(std::memory_order_acquire) && s_lastMirrorResourceSnapshot != configSnap) {
+        EnsureMirrorGPUResourcesForConfig(*configSnap);
+        s_lastMirrorResourceSnapshot = configSnap;
+    }
+
+    // Active elements are collected earlier; here we only check whether mirror
+    // resources are needed.
+    bool hasMirrors = ModeHasAnyMirrorSources(*modeToRender);
+    GameViewportGeometry currentGeo{};
+    GLuint gameTextureToUse = 0;
+    if (nativeInteractionOnly) {
+        std::lock_guard<std::mutex> lock(g_geometryMutex);
+        currentGeo = g_lastFrameGeometry;
+    }
+
+    if (!nativeInteractionOnly) {
     {
         PROFILE_SCOPE_CAT("GL State Setup", "Rendering");
         glDisable(GL_FRAMEBUFFER_SRGB);
         glDisable(GL_BLEND);
     }
-
-    // Active elements are collected earlier; here we only check whether mirror resources are needed.
-    bool hasMirrors = ModeHasAnyMirrorSources(*modeToRender);
 
     {
         PROFILE_SCOPE_CAT("Framebuffer/Viewport Setup", "Rendering");
@@ -6854,10 +6955,9 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
             glViewport(0, 0, fullW, fullH);
     }
 
-    GLuint gameTextureToUse = g_cachedGameTextureId.load();
+    gameTextureToUse = g_cachedGameTextureId.load();
     bool useFramebufferFallback = (gameTextureToUse == UINT_MAX);
 
-    GameViewportGeometry currentGeo;
     const bool useOptimizedPath =
         !isAnimating && (modeWidth == fullW && modeHeight == fullH &&
                          (!modeToRender->stretch.enabled || modeToRender->stretch.width == fullW && modeToRender->stretch.height == fullH &&
@@ -7407,11 +7507,14 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
         oglViewport(0, 0, fullW, fullH);
     else
         glViewport(0, 0, fullW, fullH);
+    }
 
     if (g_showGui.load(std::memory_order_relaxed) || g_imageDragMode.load(std::memory_order_relaxed) ||
         g_windowOverlayDragMode.load(std::memory_order_relaxed) || g_browserOverlayDragMode.load(std::memory_order_relaxed)) {
         HWND hwnd = g_minecraftHwnd.load();
-        if (hwnd) { InitializeImGuiContext(hwnd); }
+        if (hwnd && !nativeInteractionOnly) {
+            InitializeImGuiContext(hwnd);
+        }
     }
 
     if (s_editorClickConsumed && !(GetAsyncKeyState(VK_LBUTTON) & 0x8000)) { s_editorClickConsumed = false; }
@@ -7563,13 +7666,9 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
                         // Try-lock to avoid stalling the game thread if textures are being updated.
                         int texWidth = 0;
                         int texHeight = 0;
-                        {
-                            std::unique_lock<std::mutex> imageLock(g_userImagesMutex, std::try_to_lock);
-                            if (!imageLock.owns_lock()) { continue; }
-                            auto it_inst = g_userImages.find(conf.name);
-                            if (it_inst == g_userImages.end() || it_inst->second.textureId == 0) continue;
-                            texWidth = it_inst->second.width;
-                            texHeight = it_inst->second.height;
+                        if (!GetImageSourceDimensions(
+                                conf.name, texWidth, texHeight)) {
+                            continue;
                         }
 
                         // Calculate actual dimensions from scale (avoid calling CalculateImageDimensions to prevent nested locking)
@@ -7629,9 +7728,9 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
                                 for (const auto& img : g_config.images) { if (img.name == s_selectedImageName) {
                                     s_imageCropInitialTop = img.crop_top; s_imageCropInitialBottom = img.crop_bottom;
                                     s_imageCropInitialLeft = img.crop_left; s_imageCropInitialRight = img.crop_right; s_imageCropScale = img.scale;
-                                    { std::unique_lock<std::mutex> texLock(g_userImagesMutex, std::try_to_lock);
-                                      if (texLock.owns_lock()) { auto texIt = g_userImages.find(img.name);
-                                          if (texIt != g_userImages.end() && texIt->second.textureId != 0) { s_imageCropTexWidth = texIt->second.width; s_imageCropTexHeight = texIt->second.height; } } }
+                                    GetImageSourceDimensions(
+                                        img.name, s_imageCropTexWidth,
+                                        s_imageCropTexHeight);
                                     break; } }
                             }
                         }
@@ -7693,9 +7792,8 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
                     const ImageConfig* selConf = nullptr;
                     if (configSnap) { for (const auto& img : configSnap->images) { if (img.name == s_selectedImageName) { selConf = &img; break; } } }
                     if (selConf) { int texW = 0, texH = 0;
-                        { std::unique_lock<std::mutex> imageLock(g_userImagesMutex, std::try_to_lock);
-                          if (imageLock.owns_lock()) { auto it_inst = g_userImages.find(selConf->name);
-                              if (it_inst != g_userImages.end() && it_inst->second.textureId != 0) { texW = it_inst->second.width; texH = it_inst->second.height; } } }
+                        GetImageSourceDimensions(
+                            selConf->name, texW, texH);
                         if (texW > 0 && texH > 0) {
                             int dw = 0, dh = 0;
                             ResolveConfiguredImageDimensions(*selConf, texW, texH, dw, dh);
@@ -8531,6 +8629,7 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
         }
     }
 
+    if (!nativeInteractionOnly) {
     float overlayOpacity = 1.0f;
 
     const bool wantOverlayElements = hasMirrors ||
@@ -8714,6 +8813,7 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
             RenderDebugBordersForMirror(conf, { 1.0f, 0.0f, 0.0f }, { 0.0f, 1.0f, 0.0f }, s.va);
         }
     }
+    }
 
     if (g_showGui && g_ninjabrainOverlayDragMode.load(std::memory_order_relaxed) &&
         s_ninjabrainOverlayRectValid.load(std::memory_order_relaxed) && !InteractiveCreateActive()) {
@@ -8766,6 +8866,44 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
     } else {
         s_ninjabrainSelected = false; s_isNinjabrainDragging = false; s_isNinjabrainResizing = false;
     }
+}
+
+void ProcessNativeEditorInteractions(
+    const ModeConfig* mode, int gameWidth, int gameHeight) {
+    if (!mode || GetRenderBackend() != RenderBackend::Vulkan) return;
+    static auto lastDiagnostic = std::chrono::steady_clock::time_point{};
+    const auto now = std::chrono::steady_clock::now();
+    if (lastDiagnostic.time_since_epoch().count() == 0 ||
+        now - lastDiagnostic >= std::chrono::seconds(2)) {
+        lastDiagnostic = now;
+        Log(
+            "[VULKAN][EDITOR] interaction-only update; mode=" + mode->id +
+            ", imguiFrame=" +
+            std::to_string(
+                ImGui::GetCurrentContext() ? ImGui::GetFrameCount() : -1) +
+            ", game=" + std::to_string(gameWidth) + "x" +
+            std::to_string(gameHeight) +
+            ", mirror=" +
+            std::to_string(
+                g_mirrorDragMode.load(std::memory_order_relaxed)) +
+            ", image=" +
+            std::to_string(
+                g_imageDragMode.load(std::memory_order_relaxed)) +
+            ", window=" +
+            std::to_string(
+                g_windowOverlayDragMode.load(std::memory_order_relaxed)) +
+            ", browser=" +
+            std::to_string(
+                g_browserOverlayDragMode.load(std::memory_order_relaxed)) +
+            ", ninjabrain=" +
+            std::to_string(
+                g_ninjabrainOverlayDragMode.load(
+                    std::memory_order_relaxed)) +
+            ", glRenderingBypassed=true.");
+    }
+    const GLState unused{};
+    RenderModeInternal(
+        mode, unused, gameWidth, gameHeight, true, false);
 }
 
 static void RenderEditorSelectionHandles(const GLState& s, int fullW, int fullH, const ModeConfig* mode) {
@@ -8969,6 +9107,120 @@ static void RenderEditorSelectionHandles(const GLState& s, int fullW, int fullH,
     if (glStateSet) {
         glDisable(GL_BLEND);
         glBindVertexArray(s.va);
+    }
+}
+
+void RenderNativeEditorOverlays() {
+    if (!ImGui::GetCurrentContext() || !g_showGui.load(std::memory_order_relaxed)) return;
+
+    ImDrawList* draw = ImGui::GetForegroundDrawList();
+    if (!draw) return;
+    const auto color = [](float r, float g, float b, float a = 0.9f) {
+        return ImGui::ColorConvertFloat4ToU32(ImVec4(r, g, b, a));
+    };
+    const auto border = [&](int x, int y, int w, int h, float r, float g, float b) {
+        if (w > 0 && h > 0) {
+            draw->AddRect(ImVec2(static_cast<float>(x), static_cast<float>(y)),
+                          ImVec2(static_cast<float>(x + w), static_cast<float>(y + h)),
+                          color(r, g, b), 0.0f, 0, 2.0f);
+        }
+    };
+    const auto filled = [&](int x, int y, int w, int h, float r, float g, float b, float a) {
+        if (w > 0 && h > 0) {
+            draw->AddRectFilled(ImVec2(static_cast<float>(x), static_cast<float>(y)),
+                                ImVec2(static_cast<float>(x + w), static_cast<float>(y + h)),
+                                color(r, g, b, a));
+        }
+    };
+    const auto hoveredCorner = [](int x, int y, int w, int h) {
+        HWND hwnd = g_minecraftHwnd.load(std::memory_order_acquire);
+        if (!hwnd) return -1;
+        POINT point{};
+        GetCursorPos(&point);
+        ScreenToClient(hwnd, &point);
+        const POINT corners[4] = {{x, y}, {x + w, y}, {x, y + h}, {x + w, y + h}};
+        for (int index = 0; index < 4; ++index) {
+            const int dx = point.x - corners[index].x;
+            const int dy = point.y - corners[index].y;
+            if (dx * dx + dy * dy <= 16 * 16) return index;
+        }
+        return -1;
+    };
+    const auto handles = [&](int x, int y, int w, int h, int activeCorner, bool resizing,
+                             float r, float g, float b, bool cropMode = false) {
+        if (w <= 0 || h <= 0) return;
+        const int hover = hoveredCorner(x, y, w, h);
+        const ImU32 normal = cropMode ? color(0.0f, 0.8f, 0.8f, 0.8f) : color(r, g, b, 0.8f);
+        const ImU32 hot = cropMode ? color(0.0f, 1.0f, 1.0f) : color((std::min)(1.0f, r + 0.2f), (std::min)(1.0f, g + 0.2f), (std::min)(1.0f, b + 0.2f));
+        const POINT corners[4] = {{x, y}, {x + w, y}, {x, y + h}, {x + w, y + h}};
+        for (int index = 0; index < 4; ++index) {
+            const ImU32 handleColor = resizing && activeCorner == index ? color(1, 1, 1) : (hover == index ? hot : normal);
+            draw->AddRectFilled(ImVec2(static_cast<float>(corners[index].x - 8), static_cast<float>(corners[index].y - 8)),
+                                ImVec2(static_cast<float>(corners[index].x + 8), static_cast<float>(corners[index].y + 8)), handleColor);
+        }
+    };
+
+    if (InteractiveCreateActive()) {
+        if (g_icreate.sourceValid) {
+            const RECT& rect = g_icreate.source;
+            filled(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, 0.9f, 0.15f, 0.15f, 0.12f);
+            border(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, 0.9f, 0.15f, 0.15f);
+        }
+        if (g_icreate.hasCurrent) {
+            const RECT& rect = g_icreate.current;
+            const bool orange = g_interactiveCreateStage.load(std::memory_order_relaxed) == 2;
+            const float r = orange ? 1.0f : 0.9f, g = orange ? 0.55f : 0.15f, b = orange ? 0.0f : 0.15f;
+            filled(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, r, g, b, 0.12f);
+            border(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, r, g, b);
+        }
+    }
+    if (g_mirrorDragMode.load(std::memory_order_relaxed) && !s_selectedMirrorName.empty()) {
+        handles(g_selectedMirrorScreenX, g_selectedMirrorScreenY, g_selectedMirrorScreenW, g_selectedMirrorScreenH,
+                s_resizeCorner, s_isCornerResizing, 0.9f, 0.5f, 0.0f);
+        border(g_selectedMirrorScreenX, g_selectedMirrorScreenY, g_selectedMirrorScreenW, g_selectedMirrorScreenH, 1.0f, 0.55f, 0.0f);
+    }
+    if (g_ninjabrainOverlayDragMode.load(std::memory_order_relaxed) && s_ninjabrainOverlayRectValid.load(std::memory_order_relaxed) && s_ninjabrainSelected) {
+        handles(s_ninjabrainOverlayRectX, s_ninjabrainOverlayRectY, s_ninjabrainOverlayRectW, s_ninjabrainOverlayRectH,
+                s_ninjabrainResizeCorner, s_isNinjabrainResizing, 0.2f, 0.6f, 1.0f);
+        border(s_ninjabrainOverlayRectX, s_ninjabrainOverlayRectY, s_ninjabrainOverlayRectW, s_ninjabrainOverlayRectH, 0.2f, 0.6f, 1.0f);
+    }
+    if (g_windowOverlayDragMode.load(std::memory_order_relaxed) && !s_selectedWindowOverlayName.empty()) {
+        handles(g_selectedWindowOverlayScreenX, g_selectedWindowOverlayScreenY, g_selectedWindowOverlayScreenW, g_selectedWindowOverlayScreenH,
+                s_windowOverlayResizeCorner, s_isWindowOverlayCornerResizing, 0.2f, 0.4f, 0.9f, g_windowOverlayCropMode);
+        border(g_selectedWindowOverlayScreenX, g_selectedWindowOverlayScreenY, g_selectedWindowOverlayScreenW, g_selectedWindowOverlayScreenH, 0.2f, 0.4f, 0.9f);
+    }
+    if (g_imageDragMode.load(std::memory_order_relaxed) && !s_selectedImageName.empty()) {
+        handles(g_selectedImageScreenX, g_selectedImageScreenY, g_selectedImageScreenW, g_selectedImageScreenH,
+                s_imageResizeCorner, s_isImageCornerResizing, 0.2f, 0.8f, 0.2f, g_imageCropMode);
+        border(g_selectedImageScreenX, g_selectedImageScreenY, g_selectedImageScreenW, g_selectedImageScreenH, 0.2f, 0.8f, 0.2f);
+    }
+    if (g_mirrorDragMode.load(std::memory_order_relaxed)) {
+        if (!s_hoveredMirrorGroupName.empty()) border(s_hoveredMirrorGroupX, s_hoveredMirrorGroupY, s_hoveredMirrorGroupW, s_hoveredMirrorGroupH, 0.85f, 0.85f, 0.85f);
+        if (!s_hoveredMirrorName.empty() && s_hoveredMirrorName != s_selectedMirrorName && s_hoveredMirrorGroupName.empty()) border(s_hoveredMirrorRectX, s_hoveredMirrorRectY, s_hoveredMirrorRectW, s_hoveredMirrorRectH, 0.85f, 0.85f, 0.85f);
+        if (!s_drilledHoveredMemberName.empty()) border(s_drilledHoveredMemberX, s_drilledHoveredMemberY, s_drilledHoveredMemberW, s_drilledHoveredMemberH, 0.85f, 0.85f, 0.85f);
+        if (!s_selectedMirrorGroupName.empty()) {
+            if (s_drilledInGroupName.empty()) border(s_selectedMirrorGroupX, s_selectedMirrorGroupY, s_selectedMirrorGroupW, s_selectedMirrorGroupH, 1.0f, 0.85f, 0.2f);
+            filled(s_selectedMirrorGroupAnchorX - 3, s_selectedMirrorGroupAnchorY - 3, 6, 6, 0.95f, 0.95f, 0.95f, 0.9f);
+        }
+    }
+    if (g_imageDragMode.load(std::memory_order_relaxed) && !s_hoveredImageName.empty() && s_hoveredImageName != s_selectedImageName) border(s_hoveredImageRectX, s_hoveredImageRectY, s_hoveredImageRectW, s_hoveredImageRectH, 0.85f, 0.85f, 0.85f);
+    if (g_windowOverlayDragMode.load(std::memory_order_relaxed) && !s_hoveredWindowOverlayName.empty() && s_hoveredWindowOverlayName != s_selectedWindowOverlayName) border(s_hoveredWindowOverlayRectX, s_hoveredWindowOverlayRectY, s_hoveredWindowOverlayRectW, s_hoveredWindowOverlayRectH, 0.85f, 0.85f, 0.85f);
+    if (g_browserOverlayDragMode.load(std::memory_order_relaxed) && !s_hoveredBrowserOverlayName.empty()) border(s_hoveredBrowserOverlayRectX, s_hoveredBrowserOverlayRectY, s_hoveredBrowserOverlayRectW, s_hoveredBrowserOverlayRectH, 0.85f, 0.85f, 0.85f);
+
+    if (!g_currentlyEditingMirror.empty()) {
+        if (const MirrorConfig* mirror = GetMutableMirror(g_currentlyEditingMirror)) {
+            GameViewportGeometry geometry;
+            { std::lock_guard<std::mutex> lock(g_geometryMutex); geometry = g_lastFrameGeometry; }
+            const float xScale = geometry.gameW > 0 ? static_cast<float>(geometry.finalW) / geometry.gameW : 1.0f;
+            const float yScale = geometry.gameH > 0 ? static_cast<float>(geometry.finalH) / geometry.gameH : 1.0f;
+            for (const MirrorCaptureConfig& input : mirror->input) {
+                int x = 0, y = 0;
+                GetRelativeCoords(input.relativeTo, input.x, input.y, mirror->captureWidth, mirror->captureHeight, geometry.gameW, geometry.gameH, x, y);
+                border(geometry.finalX + static_cast<int>(x * xScale), geometry.finalY + static_cast<int>(y * yScale),
+                       static_cast<int>(mirror->captureWidth * xScale), static_cast<int>(mirror->captureHeight * yScale), 0.9f, 0.15f, 0.15f);
+            }
+            border(g_selectedMirrorScreenX, g_selectedMirrorScreenY, g_selectedMirrorScreenW, g_selectedMirrorScreenH, 0.0f, 1.0f, 0.0f);
+        }
     }
 }
 
@@ -10382,18 +10634,32 @@ static void EnsureNinjabrainOverlayIconsLoaded()
 #include <algorithm>
 
 void RenderNinjabrainOverlay(const NinjabrainOverlayConfig& nb, ImFont* font, const std::string& modeId,
-                             bool renderBehindImGuiWindows)
+                             bool renderBehindImGuiWindows,
+                             const NinjabrainOverlayTextures* nativeTextures,
+                             bool publishEditorGeometry,
+                             std::shared_ptr<const NinjabrainData>
+                                 dataSnapshotOverride)
 {
-    s_ninjabrainOverlayRectValid.store(false, std::memory_order_relaxed);
-    s_nbAccAny = false;
+    if (publishEditorGeometry) {
+        s_ninjabrainOverlayRectValid.store(false, std::memory_order_relaxed);
+    }
+    int accumulatedMinX = 0;
+    int accumulatedMinY = 0;
+    int accumulatedMaxX = 0;
+    int accumulatedMaxY = 0;
+    bool accumulatedAny = false;
 
     if (!ImGui::GetCurrentContext()) return;
 
     if (!IsNinjabrainOverlayModeAllowed(nb, modeId)) return;
 
-    EnsureNinjabrainOverlayIconsLoaded();
+    if (!nativeTextures) {
+        EnsureNinjabrainOverlayIconsLoaded();
+    }
 
-    const auto dataSnapshot = GetNinjabrainDataSnapshot();
+    const auto dataSnapshot = dataSnapshotOverride
+        ? std::move(dataSnapshotOverride)
+        : GetNinjabrainDataSnapshot();
     if (!dataSnapshot) return;
 
     const NinjabrainData& data = *dataSnapshot;
@@ -10644,7 +10910,9 @@ void RenderNinjabrainOverlay(const NinjabrainOverlayConfig& nb, ImFont* font, co
     if      (data.boatState == "MEASURING") boatIconIdx = 1;
     else if (data.boatState == "VALID")     boatIconIdx = 2;
     else if (data.boatState == "ERROR")     boatIconIdx = 3;
-    GLuint boatTex = s_boatIconTex[boatIconIdx];
+    const uintptr_t boatTex = nativeTextures
+        ? nativeTextures->boatIcons[boatIconIdx]
+        : static_cast<uintptr_t>(s_boatIconTex[boatIconIdx]);
     const bool hasBoatState = showForBoat || data.boatState != "NONE";
     const bool showBoatHeaderIcon = nb.showBoatStateInTopBar && hasBoatState;
 
@@ -11254,13 +11522,19 @@ void RenderNinjabrainOverlay(const NinjabrainOverlayConfig& nb, ImFont* font, co
         const float halfSize = infoIconSize * 0.5f;
         const float iconTextSize = infoFs * 0.72f;
 
-        GLuint iconTexture = 0;
+        uintptr_t iconTexture = 0;
         if (containsAsciiCaseInsensitive(message.type, "lock")) {
-            iconTexture = s_ninjabrainMessageIconTex[2];
+            iconTexture = nativeTextures
+                ? nativeTextures->messageIcons[2]
+                : static_cast<uintptr_t>(s_ninjabrainMessageIconTex[2]);
         } else if (message.severity == "WARNING" || message.severity == "ERROR") {
-            iconTexture = s_ninjabrainMessageIconTex[1];
+            iconTexture = nativeTextures
+                ? nativeTextures->messageIcons[1]
+                : static_cast<uintptr_t>(s_ninjabrainMessageIconTex[1]);
         } else {
-            iconTexture = s_ninjabrainMessageIconTex[0];
+            iconTexture = nativeTextures
+                ? nativeTextures->messageIcons[0]
+                : static_cast<uintptr_t>(s_ninjabrainMessageIconTex[0]);
         }
 
         if (iconTexture != 0) {
@@ -11329,12 +11603,25 @@ void RenderNinjabrainOverlay(const NinjabrainOverlayConfig& nb, ImFont* font, co
         ox = (float)oxI;
         oy = (float)oyI;
         const int minX = oxI, minY = oyI, maxX = oxI + (int)totalW, maxY = oyI + (int)totalH;
-        if (!s_nbAccAny) { s_nbAccMinX = minX; s_nbAccMinY = minY; s_nbAccMaxX = maxX; s_nbAccMaxY = maxY; s_nbAccAny = true; }
-        else { s_nbAccMinX = (std::min)(s_nbAccMinX, minX); s_nbAccMinY = (std::min)(s_nbAccMinY, minY);
-               s_nbAccMaxX = (std::max)(s_nbAccMaxX, maxX); s_nbAccMaxY = (std::max)(s_nbAccMaxY, maxY); }
-        s_ninjabrainOverlayRectX = s_nbAccMinX; s_ninjabrainOverlayRectY = s_nbAccMinY;
-        s_ninjabrainOverlayRectW = s_nbAccMaxX - s_nbAccMinX; s_ninjabrainOverlayRectH = s_nbAccMaxY - s_nbAccMinY;
-        s_ninjabrainOverlayRectValid.store(true, std::memory_order_relaxed);
+        if (!accumulatedAny) {
+            accumulatedMinX = minX;
+            accumulatedMinY = minY;
+            accumulatedMaxX = maxX;
+            accumulatedMaxY = maxY;
+            accumulatedAny = true;
+        } else {
+            accumulatedMinX = (std::min)(accumulatedMinX, minX);
+            accumulatedMinY = (std::min)(accumulatedMinY, minY);
+            accumulatedMaxX = (std::max)(accumulatedMaxX, maxX);
+            accumulatedMaxY = (std::max)(accumulatedMaxY, maxY);
+        }
+        if (publishEditorGeometry) {
+            s_ninjabrainOverlayRectX = accumulatedMinX;
+            s_ninjabrainOverlayRectY = accumulatedMinY;
+            s_ninjabrainOverlayRectW = accumulatedMaxX - accumulatedMinX;
+            s_ninjabrainOverlayRectH = accumulatedMaxY - accumulatedMinY;
+            s_ninjabrainOverlayRectValid.store(true, std::memory_order_relaxed);
+        }
     };
     const bool useManualSectionLayout = nb.sectionLayoutMode == "manual";
 

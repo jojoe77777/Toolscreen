@@ -2,6 +2,8 @@
 
 #include "common/utils.h"
 #include "render/render.h"
+#include "render/render_backend.h"
+#include "render/vulkan/vulkan_renderer.h"
 #include "third_party/stb_image.h"
 
 #include <GL/glew.h>
@@ -207,6 +209,7 @@ static void PopulateSupporterTierImages(std::vector<SupporterRoleEntry>& roles) 
     for (auto& role : roles) {
         role.tierIconWidth = 0;
         role.tierIconHeight = 0;
+        role.tierIconGeneration = 0;
         role.tierIconPixels.clear();
 
         if (role.imageUrl.empty()) { continue; }
@@ -217,6 +220,12 @@ static void PopulateSupporterTierImages(std::vector<SupporterRoleEntry>& roles) 
                 role.tierIconWidth = cached->second.width;
                 role.tierIconHeight = cached->second.height;
                 role.tierIconPixels = cached->second.rgbaPixels;
+                uint64_t hash = 1469598103934665603ull;
+                for (const unsigned char value : role.tierIconPixels) {
+                    hash ^= value;
+                    hash *= 1099511628211ull;
+                }
+                role.tierIconGeneration = hash != 0 ? hash : 1;
             }
             continue;
         }
@@ -243,21 +252,39 @@ static void PopulateSupporterTierImages(std::vector<SupporterRoleEntry>& roles) 
         role.tierIconWidth = cachedDecoded.width;
         role.tierIconHeight = cachedDecoded.height;
         role.tierIconPixels = cachedDecoded.rgbaPixels;
+        uint64_t hash = 1469598103934665603ull;
+        for (const unsigned char value : role.tierIconPixels) {
+            hash ^= value;
+            hash *= 1099511628211ull;
+        }
+        role.tierIconGeneration = hash != 0 ? hash : 1;
     }
 }
 
-bool EnsureSupporterTierTexture(const SupporterRoleEntry& role, GLuint& outTextureId, int& outWidth, int& outHeight) {
+bool EnsureSupporterTierTexture(const SupporterRoleEntry& role, uintptr_t& outTextureId, int& outWidth, int& outHeight) {
     outTextureId = 0;
     outWidth = 0;
     outHeight = 0;
 
     if (role.imageUrl.empty() || role.tierIconWidth <= 0 || role.tierIconHeight <= 0 || role.tierIconPixels.empty()) { return false; }
 
+    if (GetRenderBackend() == RenderBackend::Vulkan) {
+        if (!VulkanRenderer::GetGuiRgbaTexture(
+                "supporter:" + role.imageUrl, role.tierIconPixels.data(),
+                role.tierIconWidth, role.tierIconHeight,
+                role.tierIconGeneration, outTextureId)) {
+            return false;
+        }
+        outWidth = role.tierIconWidth;
+        outHeight = role.tierIconHeight;
+        return true;
+    }
+
     std::lock_guard<std::mutex> lock(g_supporterTierTexturesMutex);
 
     auto it = g_supporterTierTextures.find(role.imageUrl);
     if (it != g_supporterTierTextures.end() && it->second.textureId != 0) {
-        outTextureId = it->second.textureId;
+        outTextureId = static_cast<uintptr_t>(it->second.textureId);
         outWidth = it->second.width;
         outHeight = it->second.height;
         return true;
@@ -287,7 +314,7 @@ bool EnsureSupporterTierTexture(const SupporterRoleEntry& role, GLuint& outTextu
 
     g_supporterTierTextures[role.imageUrl] = entry;
 
-    outTextureId = entry.textureId;
+    outTextureId = static_cast<uintptr_t>(entry.textureId);
     outWidth = entry.width;
     outHeight = entry.height;
     return true;

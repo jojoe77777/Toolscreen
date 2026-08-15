@@ -3048,23 +3048,33 @@ void RenderSettingsGUI() {
             {
                 static GLuint s_languageTexture = 0;
                 static HGLRC s_languageLastCtx = NULL;
-                HGLRC currentCtx =
-                    GetRenderBackend() == RenderBackend::Vulkan ? NULL : wglGetCurrentContext();
-                if (currentCtx != s_languageLastCtx) {
-                    s_languageTexture = 0;
-                    s_languageLastCtx = currentCtx;
+                ImTextureID languageTexture = 0;
+                if (GetRenderBackend() == RenderBackend::Vulkan) {
+                    uintptr_t texture = 0;
+                    if (VulkanRenderer::GetBundledGuiTexture(
+                            IDR_LANGUAGE_PNG, texture)) {
+                        languageTexture = static_cast<ImTextureID>(texture);
+                    }
+                } else {
+                    HGLRC currentCtx = wglGetCurrentContext();
+                    if (currentCtx != s_languageLastCtx) {
+                        s_languageTexture = 0;
+                        s_languageLastCtx = currentCtx;
+                    }
+                    LoadEmbeddedResourceTexture(
+                        s_languageTexture, IDR_LANGUAGE_PNG);
+                    languageTexture =
+                        static_cast<ImTextureID>(s_languageTexture);
                 }
-
-                LoadEmbeddedResourceTexture(s_languageTexture, IDR_LANGUAGE_PNG);
 
                 float iconSize = ImGui::GetFrameHeight();
                 ImGui::SetCursorPos(ImVec2(languageButtonX, topBarY));
-                if (s_languageTexture != 0) {
+                if (languageTexture != 0) {
                     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
                     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.1f));
                     ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1, 1, 1, 0.2f));
                     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
-                    if (ImGui::ImageButton("##language", (ImTextureID)(intptr_t)s_languageTexture, ImVec2(iconSize, iconSize))) {
+                    if (ImGui::ImageButton("##language", languageTexture, ImVec2(iconSize, iconSize))) {
                         ImGui::OpenPopup("##LanguagePopup");
                     }
                     ImGui::PopStyleVar();
@@ -3098,23 +3108,33 @@ void RenderSettingsGUI() {
             {
                 static GLuint s_discordTexture = 0;
                 static HGLRC s_discordLastCtx = NULL;
-                HGLRC currentCtx =
-                    GetRenderBackend() == RenderBackend::Vulkan ? NULL : wglGetCurrentContext();
-                if (currentCtx != s_discordLastCtx) {
-                    s_discordTexture = 0;
-                    s_discordLastCtx = currentCtx;
+                ImTextureID discordTexture = 0;
+                if (GetRenderBackend() == RenderBackend::Vulkan) {
+                    uintptr_t texture = 0;
+                    if (VulkanRenderer::GetBundledGuiTexture(
+                            IDR_DISCORD_PNG, texture)) {
+                        discordTexture = static_cast<ImTextureID>(texture);
+                    }
+                } else {
+                    HGLRC currentCtx = wglGetCurrentContext();
+                    if (currentCtx != s_discordLastCtx) {
+                        s_discordTexture = 0;
+                        s_discordLastCtx = currentCtx;
+                    }
+                    LoadEmbeddedResourceTexture(
+                        s_discordTexture, IDR_DISCORD_PNG);
+                    discordTexture =
+                        static_cast<ImTextureID>(s_discordTexture);
                 }
-
-                LoadEmbeddedResourceTexture(s_discordTexture, IDR_DISCORD_PNG);
 
                 float iconSize = ImGui::GetFrameHeight();
                 ImGui::SetCursorPos(ImVec2(discordButtonX, topBarY));
-                if (s_discordTexture != 0) {
+                if (discordTexture != 0) {
                     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
                     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.1f));
                     ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1, 1, 1, 0.2f));
                     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
-                    if (ImGui::ImageButton("##discord", (ImTextureID)(intptr_t)s_discordTexture, ImVec2(iconSize, iconSize))) {
+                    if (ImGui::ImageButton("##discord", discordTexture, ImVec2(iconSize, iconSize))) {
                         ShellExecuteW(NULL, L"open", DISCORD_URL, NULL, NULL, SW_SHOWNORMAL);
                     }
                     ImGui::PopStyleVar();
@@ -3136,11 +3156,24 @@ void RenderSettingsGUI() {
 
             static GLuint s_editorTexture = 0;
             static HGLRC s_editorLastCtx = NULL;
-            HGLRC editorCtx =
-                GetRenderBackend() == RenderBackend::Vulkan ? NULL : wglGetCurrentContext();
-            if (editorCtx != s_editorLastCtx) { s_editorTexture = 0; s_editorLastCtx = editorCtx; }
-            LoadEmbeddedResourceTexture(s_editorTexture, IDR_EDITOR_PNG);
-            if (s_editorTexture != 0) {
+            ImTextureID editorTexture = 0;
+            if (GetRenderBackend() == RenderBackend::Vulkan) {
+                uintptr_t texture = 0;
+                if (VulkanRenderer::GetBundledGuiTexture(
+                        IDR_EDITOR_PNG, texture)) {
+                    editorTexture = static_cast<ImTextureID>(texture);
+                }
+            } else {
+                HGLRC editorCtx = wglGetCurrentContext();
+                if (editorCtx != s_editorLastCtx) {
+                    s_editorTexture = 0;
+                    s_editorLastCtx = editorCtx;
+                }
+                LoadEmbeddedResourceTexture(
+                    s_editorTexture, IDR_EDITOR_PNG);
+                editorTexture = static_cast<ImTextureID>(s_editorTexture);
+            }
+            if (editorTexture != 0) {
                 const bool editorOn = g_overlayEditorMode.load(std::memory_order_relaxed);
                 ImGui::SetCursorPos(ImVec2(editorButtonX, topBarY));
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
@@ -3148,7 +3181,7 @@ void RenderSettingsGUI() {
                 ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1, 1, 1, 0.2f));
                 ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
                 const ImVec4 tint = editorOn ? ImVec4(1.0f, 0.59f, 0.16f, 1.0f) : ImVec4(0.62f, 0.62f, 0.62f, 0.9f);
-                if (ImGui::ImageButton("##EditorToggle", (ImTextureID)(intptr_t)s_editorTexture, ImVec2(iconSize, iconSize),
+                if (ImGui::ImageButton("##EditorToggle", editorTexture, ImVec2(iconSize, iconSize),
                                        ImVec2(0, 0), ImVec2(1, 1), ImVec4(0, 0, 0, 0), tint)) {
                     g_overlayEditorMode.store(!editorOn, std::memory_order_relaxed);
                 }

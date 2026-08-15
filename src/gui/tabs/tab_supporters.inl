@@ -26,7 +26,7 @@ if (BeginSelectableSettingsTopTabItem(trc("tabs.supporters"))) {
 
         for (size_t tierIndex = 0; tierIndex < g_supporterRoles.size(); ++tierIndex) {
             const auto& role = g_supporterRoles[tierIndex];
-            GLuint tierTexture = 0;
+            uintptr_t tierTexture = 0;
             int tierTextureWidth = 0;
             int tierTextureHeight = 0;
             const bool hasTierTexture = EnsureSupporterTierTexture(role, tierTexture, tierTextureWidth, tierTextureHeight);
@@ -49,7 +49,7 @@ if (BeginSelectableSettingsTopTabItem(trc("tabs.supporters"))) {
 
             if (hasTierTexture) {
                 ImGui::SetCursorPosY(tierHeaderStartY + (tierHeaderHeight - iconSize.y) * 0.5f);
-                ImGui::Image((ImTextureID)(intptr_t)tierTexture, iconSize);
+                ImGui::Image(static_cast<ImTextureID>(tierTexture), iconSize);
                 ImGui::SameLine(0.0f, 8.0f);
             } else {
                 ImGui::Dummy(ImVec2(kMaxIconSize, textLineHeight));

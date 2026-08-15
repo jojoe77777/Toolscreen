@@ -1,0 +1,107 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) uniform sampler2D sourceImage;
+layout(std430, set = 0, binding = 1) buffer Nv12Output {
+    uint words[];
+} outputFrame;
+
+layout(push_constant) uniform Parameters {
+    uint outputWidth;
+    uint outputHeight;
+    uint inputWidth;
+    uint inputHeight;
+    uint useBt709;
+    uint reserved;
+} parameters;
+
+vec3 sampleOutputPixel(uint x, uint y) {
+    const vec2 outputSize =
+        vec2(parameters.outputWidth, parameters.outputHeight);
+    const vec2 inputSize =
+        vec2(parameters.inputWidth, parameters.inputHeight);
+    const float fitScale = min(
+        outputSize.x / inputSize.x, outputSize.y / inputSize.y);
+    const vec2 fitSize = inputSize * fitScale;
+    const vec2 fitOrigin = (outputSize - fitSize) * 0.5;
+    const vec2 outputPixel = vec2(x, y) + vec2(0.5);
+    if (any(lessThan(outputPixel, fitOrigin)) ||
+        any(greaterThanEqual(outputPixel, fitOrigin + fitSize))) {
+        return vec3(0.0);
+    }
+    const vec2 uv = (outputPixel - fitOrigin) / fitSize;
+    return textureLod(sourceImage, uv, 0.0).rgb;
+}
+
+uint toByte(float value) {
+    return uint(clamp(round(value), 0.0, 255.0));
+}
+
+uint lumaByte(vec3 rgb) {
+    vec3 coefficients = parameters.useBt709 != 0
+        ? vec3(47.0 / 256.0, 157.0 / 256.0, 16.0 / 256.0)
+        : vec3(66.0 / 256.0, 129.0 / 256.0, 25.0 / 256.0);
+    return toByte(
+        (dot(rgb, coefficients) + (16.0 / 255.0)) * 255.0);
+}
+
+uvec2 chromaBytes(vec3 rgb) {
+    vec3 uCoefficients = parameters.useBt709 != 0
+        ? vec3(-26.0 / 256.0, -87.0 / 256.0, 112.0 / 256.0)
+        : vec3(-38.0 / 256.0, -74.0 / 256.0, 112.0 / 256.0);
+    vec3 vCoefficients = parameters.useBt709 != 0
+        ? vec3(112.0 / 256.0, -102.0 / 256.0, -10.0 / 256.0)
+        : vec3(112.0 / 256.0, -94.0 / 256.0, -18.0 / 256.0);
+    return uvec2(
+        toByte((dot(rgb, uCoefficients) + (128.0 / 255.0)) * 255.0),
+        toByte((dot(rgb, vCoefficients) + (128.0 / 255.0)) * 255.0));
+}
+
+uvec2 outputChromaPair(uint pairIndex) {
+    const uint chromaWidth = parameters.outputWidth >> 1;
+    const uint blockY = pairIndex / chromaWidth;
+    const uint blockX = pairIndex - blockY * chromaWidth;
+    const uint x = blockX << 1;
+    const uint y = blockY << 1;
+    const vec3 averageRgb =
+        (sampleOutputPixel(x, y) +
+         sampleOutputPixel(x + 1, y) +
+         sampleOutputPixel(x, y + 1) +
+         sampleOutputPixel(x + 1, y + 1)) * 0.25;
+    return chromaBytes(averageRgb);
+}
+
+void main() {
+    const uint wordIndex = gl_GlobalInvocationID.x;
+    const uint byteCount =
+        parameters.outputWidth * parameters.outputHeight * 3u / 2u;
+    const uint firstByte = wordIndex * 4u;
+    if (firstByte >= byteCount) {
+        return;
+    }
+
+    const uint yPlaneSize =
+        parameters.outputWidth * parameters.outputHeight;
+    uint packed = 0u;
+    if (firstByte < yPlaneSize) {
+        // Even NV12 dimensions make the plane size divisible by four, so a
+        // word never straddles the Y and UV planes.
+        for (uint offset = 0u; offset < 4u; ++offset) {
+            const uint byteIndex = firstByte + offset;
+            const uint y = byteIndex / parameters.outputWidth;
+            const uint x = byteIndex - y * parameters.outputWidth;
+            packed |=
+                lumaByte(sampleOutputPixel(x, y)) << (offset * 8u);
+        }
+    } else {
+        const uint firstPair = (firstByte - yPlaneSize) >> 1;
+        const uvec2 uv0 = outputChromaPair(firstPair);
+        packed = uv0.x | (uv0.y << 8u);
+        if (firstByte + 2u < byteCount) {
+            const uvec2 uv1 = outputChromaPair(firstPair + 1u);
+            packed |= (uv1.x << 16u) | (uv1.y << 24u);
+        }
+    }
+    outputFrame.words[wordIndex] = packed;
+}

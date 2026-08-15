@@ -1,5 +1,6 @@
 #pragma once
 
+#define VK_USE_PLATFORM_WIN32_KHR
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
 #include <Windows.h>
@@ -16,6 +17,7 @@ namespace VulkanHooks {
 struct DeviceDispatch {
     VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
     PFN_vkGetDeviceProcAddr getDeviceProcAddr = nullptr;
+    PFN_vkDeviceWaitIdle deviceWaitIdle = nullptr;
     PFN_vkGetDeviceQueue getDeviceQueue = nullptr;
     PFN_vkGetDeviceQueue2 getDeviceQueue2 = nullptr;
     PFN_vkCreateSwapchainKHR createSwapchainKHR = nullptr;
@@ -32,6 +34,7 @@ struct DeviceDispatch {
     PFN_vkQueueSubmit queueSubmit = nullptr;
     PFN_vkQueueSubmit2 queueSubmit2 = nullptr;
     PFN_vkQueueSubmit2KHR queueSubmit2KHR = nullptr;
+    PFN_vkQueuePresentKHR queuePresentKHR = nullptr;
     PFN_vkGetFenceStatus getFenceStatus = nullptr;
     PFN_vkCreateFence createFence = nullptr;
     PFN_vkDestroyFence destroyFence = nullptr;
@@ -43,6 +46,8 @@ struct DeviceDispatch {
     PFN_vkCreateDescriptorPool createDescriptorPool = nullptr;
     PFN_vkDestroyDescriptorPool destroyDescriptorPool = nullptr;
     PFN_vkCmdBlitImage cmdBlitImage = nullptr;
+    PFN_vkCmdResolveImage cmdResolveImage = nullptr;
+    PFN_vkCmdClearColorImage cmdClearColorImage = nullptr;
     PFN_vkCmdPipelineBarrier cmdPipelineBarrier = nullptr;
     PFN_vkCmdPipelineBarrier2 cmdPipelineBarrier2 = nullptr;
     PFN_vkCmdPipelineBarrier2KHR cmdPipelineBarrier2KHR = nullptr;
@@ -91,7 +96,17 @@ struct SwapchainMetadata {
     VkExtent2D extent{};
     VkImageUsageFlags usage = 0;
     uint32_t minImageCount = 0;
+    // The HWND is captured from the exact VkSurfaceKHR supplied when this
+    // swapchain was created.  It is intentionally not inferred from the
+    // foreground window: early startup can have splash/helper windows in the
+    // same process.
+    HWND hwnd = NULL;
     std::vector<VkImage> images;
+};
+
+struct SurfaceMetadata {
+    VkInstance instance = VK_NULL_HANDLE;
+    HWND hwnd = NULL;
 };
 
 struct QueueMetadata {
@@ -103,18 +118,26 @@ struct QueueMetadata {
 struct TrackingSnapshot {
     VkInstance instance = VK_NULL_HANDLE;
     std::unordered_map<VkDevice, DeviceDispatch> devices;
+    // Dispatch immediately below the Toolscreen redirect layer. Minecraft's
+    // calls use devices; Toolscreen-owned renderer work uses nativeDevices so
+    // it cannot recursively re-enter OBS while OBS is already dispatching.
+    std::unordered_map<VkDevice, DeviceDispatch> nativeDevices;
     std::unordered_map<VkImage, ImageMetadata> images;
     std::unordered_map<VkSwapchainKHR, SwapchainMetadata> swapchains;
+    std::unordered_map<VkSurfaceKHR, SurfaceMetadata> surfaces;
     std::unordered_map<VkImageView, VkImage> imageViews;
     std::unordered_map<VkQueue, QueueMetadata> queues;
     std::unordered_map<VkCommandPool, VkDevice> commandPools;
+    std::unordered_map<VkCommandPool, uint32_t> commandPoolFamilies;
     std::unordered_map<VkCommandBuffer, VkDevice> commandBuffers;
+    std::unordered_map<VkCommandBuffer, uint32_t> commandBufferFamilies;
     std::unordered_map<VkFence, VkDevice> fences;
     std::unordered_map<VkSemaphore, VkDevice> semaphores;
 };
 
 std::shared_ptr<const TrackingSnapshot> GetSnapshot();
 bool InstallIfAvailable();
+bool EnableProcessLocalObsRedirectLayer(HMODULE toolscreenModule);
 void NotifyModuleLoaded(HMODULE module);
 FARPROC InterceptLoaderGetProcAddress(HMODULE module, LPCSTR name, FARPROC realFunction);
 void Shutdown();
