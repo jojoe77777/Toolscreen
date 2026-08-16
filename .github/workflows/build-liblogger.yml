@@ -275,6 +275,9 @@ jobs:
 
   package-liblogger-binaries:
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
     needs:
       - build-liblogger-windows
       - build-liblogger-linux
@@ -357,6 +360,33 @@ jobs:
             printf 'SHA512 %s  %s\n' "$hash" "$rel_path"
             printf '%s  %s\n' "$hash" "$rel_path" >> "$manifest"
           done < <(find release -type f ! -name 'SHA512SUMS.txt' -print0 | sort -z)
+
+      - name: Publish latest signed Windows liblogger
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          LIBLOGGER_SIGNED_RELEASE_TAG: liblogger-signed-latest
+        run: |
+          set -euo pipefail
+          assets=(
+            release/windows/liblogger_x64.dll
+            release/windows/liblogger_x64.pdb
+          )
+
+          for asset in "${assets[@]}"; do
+            test -f "$asset"
+          done
+
+          if ! gh release view "$LIBLOGGER_SIGNED_RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$LIBLOGGER_SIGNED_RELEASE_TAG" \
+              --target "$GITHUB_SHA" \
+              --title "Latest signed LibLogger" \
+              --notes "Latest signed Windows x64 LibLogger build." \
+              --prerelease
+          fi
+
+          gh release upload "$LIBLOGGER_SIGNED_RELEASE_TAG" "${assets[@]}" --clobber
 
       - name: Upload combined liblogger zip artifact
         uses: actions/upload-artifact@v4
