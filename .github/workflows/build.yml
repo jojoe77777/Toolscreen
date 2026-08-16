@@ -94,9 +94,9 @@ jobs:
 
           cmake --preset ci-ninja-x64 -DTOOLSCREEN_ENABLE_JAR_PACKAGING=OFF -DTOOLSCREEN_ENABLE_EXE_PACKAGING=OFF -DTOOLSCREEN_BUILD_DOWNLOADER_ARTIFACTS=OFF -DTOOLSCREEN_STAGE_LIBLOGGER_PDB=OFF -DTOOLSCREEN_PREBUILT_LIBLOGGER_DLL_PATH="$prebuiltLoggerDllPath"
 
-      - name: Build DLLs and GUI integration test runner
+      - name: Build DLLs and test runners
         shell: pwsh
-        run: cmake --build --preset ci-release --parallel --target Toolscreen toolscreen_gui_integration_tests toolscreen_interactive_create_tests toolscreen_game_state_source_tests toolscreen_path_sanitize_tests toolscreen_background_fit_layout_tests
+        run: cmake --build --preset ci-release --parallel --target Toolscreen toolscreen_gui_integration_tests toolscreen_interactive_create_tests toolscreen_game_state_source_tests toolscreen_path_sanitize_tests toolscreen_background_fit_layout_tests toolscreen_startup_lifecycle_tests
 
       - name: Run fast CTest smoke tests
         shell: pwsh

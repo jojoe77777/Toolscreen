@@ -85,6 +85,16 @@ if errorlevel 1 (
     goto :fail
 )
 
+if "%RUN_TESTS%"=="1" (
+    echo Building startup lifecycle test runner with preset %BUILD_PRESET%...
+    cmake --build --preset %BUILD_PRESET% --target toolscreen_startup_lifecycle_tests
+    if errorlevel 1 (
+        set "FAILURE_STEP=Build startup lifecycle test runner"
+        set "FAILURE_CODE=28"
+        goto :fail
+    )
+)
+
 if not exist "%CLI_TEST_RUNNER%" (
     set "FAILURE_STEP=Locate GUI integration test runner"
     set "FAILURE_CODE=26"

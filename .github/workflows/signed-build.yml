@@ -123,9 +123,9 @@ jobs:
 
           cmake --preset ci-ninja-x64 -DTOOLSCREEN_PACKAGING_DLL_PATH="$signedDllPath" -DTOOLSCREEN_PREBUILT_LIBLOGGER_DLL_PATH="$prebuiltLoggerDllPath" -DTOOLSCREEN_PREBUILT_LIBLOGGER_PDB_PATH="$prebuiltLoggerPdbPath"
 
-      - name: Build unsigned DLLs and CLI integration test runner
+      - name: Build unsigned DLLs and test runners
         shell: pwsh
-        run: cmake --build --preset ci-release --parallel --target Toolscreen toolscreen_gui_integration_tests toolscreen_interactive_create_tests toolscreen_game_state_source_tests toolscreen_path_sanitize_tests toolscreen_background_fit_layout_tests
+        run: cmake --build --preset ci-release --parallel --target Toolscreen toolscreen_gui_integration_tests toolscreen_interactive_create_tests toolscreen_game_state_source_tests toolscreen_path_sanitize_tests toolscreen_background_fit_layout_tests toolscreen_startup_lifecycle_tests
 
       - name: Run CLI integration tests
         shell: pwsh
