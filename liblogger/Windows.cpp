@@ -190,37 +190,6 @@ JNIEnv* AttachThreadWithName(const std::string& threadName) {
     }
 }
 
-// JNI requires native threads to detach before they exit.  Relying on the
-// native thread terminating is not sufficient on newer JVMs: the Java thread
-// record can remain alive and keep DestroyJavaVM waiting during shutdown.
-//
-// This guard is used only by LibLogger-owned std::threads.  It also cleans up
-// an attachment made later by LogToMinecraft if the initial named attachment
-// ran before the JVM was ready.
-class ScopedJvmThreadAttachment {
-public:
-    explicit ScopedJvmThreadAttachment(const std::string& threadName) {
-        AttachThreadWithName(threadName);
-    }
-
-    ~ScopedJvmThreadAttachment() {
-        JavaVM* jvm = nullptr;
-        jsize vmCount = 0;
-        if (DynamicGetCreatedJavaVMs(&jvm, 1, &vmCount) != JNI_OK ||
-            vmCount == 0 || jvm == nullptr) {
-            return;
-        }
-
-        JNIEnv* env = nullptr;
-        if (jvm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) == JNI_OK) {
-            jvm->DetachCurrentThread();
-        }
-    }
-
-    ScopedJvmThreadAttachment(const ScopedJvmThreadAttachment&) = delete;
-    ScopedJvmThreadAttachment& operator=(const ScopedJvmThreadAttachment&) = delete;
-};
-
 std::string Base64Encode(const std::string& input) {
     return macaron::Base64::Encode(input);
 }
@@ -902,7 +871,7 @@ void HandleLoadedModule(HMODULE hModule) {
     WCHAR loadedPath[MAX_PATH];
     if (GetModuleFileNameW(hModule, loadedPath, MAX_PATH) == 0) {
         std::thread([]() {
-            ScopedJvmThreadAttachment attachment("LibLogger");
+            AttachThreadWithName("LibLogger");
             LogErrorToMinecraft("ModuleAnalysisError", "Could not get module file name");
         }).detach();
         return;
@@ -910,7 +879,7 @@ void HandleLoadedModule(HMODULE hModule) {
     
     // Defer expensive module analysis to background thread
     std::thread([path = std::wstring(loadedPath)]() {
-        ScopedJvmThreadAttachment attachment("LibLogger");
+        AttachThreadWithName("LibLogger");
         try {
             // Calculate hash first (cheap operation) to check if we've seen this module before
             std::wstring hashW = CalculateSHA512(path.c_str());
@@ -971,7 +940,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 
         // Run initial scan in a separate thread (don't check in DllMain - can cause deadlock)
         std::thread([]() {
-            ScopedJvmThreadAttachment attachment("LibLogger");
+            AttachThreadWithName("LibLogger");
             RunInitialScanOptimized();
         }).detach();
 
