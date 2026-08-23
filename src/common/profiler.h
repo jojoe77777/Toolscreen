@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <mutex>
+#include <memory>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -44,13 +45,13 @@ class Profiler {
 
     // Minimal timing event for lock-free submission
     struct TimingEvent {
-        const char* sectionName;
+        const char* sectionName = nullptr;
         std::array<const char*, 24> scopeNames{};
-        double durationMs;
-        uint32_t threadId;       // Thread that generated this event
-        uint8_t depth;
-        uint8_t scopeDepth;
-        bool isRenderThread;     // Whether from render thread
+        double durationMs = 0.0;
+        uint32_t threadId = 0;       // Thread that generated this event
+        uint8_t depth = 0;
+        uint8_t scopeDepth = 0;
+        bool isRenderThread = false; // Whether from render thread
     };
 
     // Lock-free ring buffer for timing events (per-thread)
@@ -130,7 +131,7 @@ class Profiler {
     void SetEnabled(bool enabled) { m_enabled = enabled; }
     bool IsEnabled() const { return m_enabled; }
 
-    void RegisterThreadBuffer(ThreadRingBuffer* buffer);
+    void RegisterThreadBuffer(const std::shared_ptr<ThreadRingBuffer>& buffer);
 
   private:
     Profiler() = default;
@@ -139,6 +140,7 @@ class Profiler {
     std::atomic<bool> m_enabled{ false };
     std::atomic<bool> m_processingThreadRunning{ false };
     std::thread m_processingThread;
+    std::recursive_mutex m_processMutex;
 
     // Processed data (only accessed by processing thread and display)
     std::unordered_map<std::string, ProfileEntry> m_renderThreadEntries;
@@ -159,7 +161,7 @@ class Profiler {
 
     // Thread registry (lock-free via atomic flag)
     std::atomic_flag m_registryLock = ATOMIC_FLAG_INIT;
-    std::vector<ThreadRingBuffer*> m_threadRegistry;
+    std::vector<std::shared_ptr<ThreadRingBuffer>> m_threadRegistry;
 
     void ProcessingThreadMain();
     void ProcessEvents();

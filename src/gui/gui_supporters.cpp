@@ -8,6 +8,8 @@
 
 #include <GL/glew.h>
 #include <algorithm>
+#include <condition_variable>
+#include <limits>
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <thread>
@@ -33,11 +35,19 @@ std::vector<SupporterRoleEntry> g_supporterRoles;
 std::atomic<bool> g_supportersLoaded{ false };
 std::atomic<bool> g_supportersFetchEverFailed{ false };
 static std::atomic<bool> g_supportersFetchStarted{ false };
+static std::atomic<bool> g_supportersFetchStopRequested{ false };
+static std::thread g_supportersFetchThread;
+static std::mutex g_supportersFetchWaitMutex;
+static std::condition_variable g_supportersFetchWaitCv;
 std::atomic<bool> g_supporterTierTexturesDirty{ false };
 static std::mutex g_supporterTierTexturesMutex;
 static std::unordered_map<std::string, SupporterTierTextureEntry> g_supporterTierTextures;
 
-static bool HttpGetToString(const std::wstring& url, std::string& outBody, std::string& outError) {
+constexpr size_t kMaxSupportersMetadataBytes = 4ull * 1024ull * 1024ull;
+constexpr size_t kMaxSupporterIconDownloadBytes = 16ull * 1024ull * 1024ull;
+constexpr size_t kMaxSupporterIconDecodedBytes = 64ull * 1024ull * 1024ull;
+
+static bool HttpGetToString(const std::wstring& url, size_t maxBodyBytes, std::string& outBody, std::string& outError) {
     URL_COMPONENTS urlComp{};
     urlComp.dwStructSize = sizeof(urlComp);
     urlComp.dwSchemeLength = (DWORD)-1;
@@ -47,6 +57,11 @@ static bool HttpGetToString(const std::wstring& url, std::string& outBody, std::
 
     if (!WinHttpCrackUrl(url.c_str(), 0, 0, &urlComp)) {
         outError = "WinHttpCrackUrl failed";
+        return false;
+    }
+    if (!urlComp.lpszHostName || urlComp.dwHostNameLength == 0 ||
+        (urlComp.nScheme != INTERNET_SCHEME_HTTP && urlComp.nScheme != INTERNET_SCHEME_HTTPS)) {
+        outError = "URL must contain an HTTP or HTTPS host";
         return false;
     }
 
@@ -118,6 +133,11 @@ static bool HttpGetToString(const std::wstring& url, std::string& outBody, std::
                 ok = true;
                 break;
             }
+            if (outBody.size() > maxBodyBytes ||
+                static_cast<size_t>(bytesAvailable) > maxBodyBytes - outBody.size()) {
+                outError = "HTTP response exceeded the allowed size of " + std::to_string(maxBodyBytes) + " bytes";
+                break;
+            }
 
             std::string chunk;
             chunk.resize(bytesAvailable);
@@ -182,16 +202,30 @@ static bool DecodeSupporterTierImage(const std::string& encodedBytes, DecodedSup
         return false;
     }
 
-    stbi_set_flip_vertically_on_load_thread(0);
-
     int width = 0;
     int height = 0;
     int channels = 0;
+    if (encodedBytes.size() > static_cast<size_t>((std::numeric_limits<int>::max)()) ||
+        !stbi_info_from_memory(reinterpret_cast<const stbi_uc*>(encodedBytes.data()), static_cast<int>(encodedBytes.size()),
+                               &width, &height, &channels) ||
+        width <= 0 || height <= 0 ||
+        static_cast<size_t>(width) > kMaxSupporterIconDecodedBytes / 4u / static_cast<size_t>(height)) {
+        outError = "Image dimensions are invalid or exceed the 64 MiB decoded-size limit";
+        return false;
+    }
+
+    stbi_set_flip_vertically_on_load_thread(0);
+
     unsigned char* pixels = stbi_load_from_memory(reinterpret_cast<const stbi_uc*>(encodedBytes.data()),
                                                   static_cast<int>(encodedBytes.size()), &width, &height, &channels, 4);
     if (!pixels || width <= 0 || height <= 0) {
         outError = std::string("Failed to decode image: ") + (stbi_failure_reason() ? stbi_failure_reason() : "unknown");
         if (pixels) { stbi_image_free(pixels); }
+        return false;
+    }
+    if (static_cast<size_t>(width) > kMaxSupporterIconDecodedBytes / 4u / static_cast<size_t>(height)) {
+        stbi_image_free(pixels);
+        outError = "Decoded image dimensions exceed the 64 MiB size limit";
         return false;
     }
 
@@ -207,6 +241,7 @@ static void PopulateSupporterTierImages(std::vector<SupporterRoleEntry>& roles) 
     std::unordered_map<std::string, DecodedSupporterTierImage> decodeCache;
 
     for (auto& role : roles) {
+        if (g_supportersFetchStopRequested.load(std::memory_order_acquire)) { return; }
         role.tierIconWidth = 0;
         role.tierIconHeight = 0;
         role.tierIconGeneration = 0;
@@ -232,7 +267,7 @@ static void PopulateSupporterTierImages(std::vector<SupporterRoleEntry>& roles) 
 
         std::string imageBody;
         std::string fetchError;
-        if (!HttpGetToString(Utf8ToWide(role.imageUrl), imageBody, fetchError)) {
+        if (!HttpGetToString(Utf8ToWide(role.imageUrl), kMaxSupporterIconDownloadBytes, imageBody, fetchError)) {
             Log("Supporters metadata: failed to fetch tier image '" + role.imageUrl + "': " + fetchError);
             decodeCache.emplace(role.imageUrl, DecodedSupporterTierImage{});
             continue;
@@ -340,52 +375,72 @@ void StartSupportersFetch() {
     if (!g_supportersFetchStarted.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) { return; }
     Log("Supporters metadata: starting background fetch thread.");
 
-    std::thread([]() {
-        static const std::wstring kMembershipUrl =
-            L"https://raw.githubusercontent.com/jojoe77777/toolscreen-meta/refs/heads/main/membership.json";
-        static constexpr int kMinRetryDelaySeconds = 30;
-        static constexpr int kMaxRetryDelaySeconds = 3600;
+    g_supportersFetchStopRequested.store(false, std::memory_order_release);
+    try {
+        g_supportersFetchThread = std::thread([]() {
+            static const std::wstring kMembershipUrl =
+                L"https://raw.githubusercontent.com/jojoe77777/toolscreen-meta/refs/heads/main/membership.json";
+            static constexpr int kMinRetryDelaySeconds = 30;
+            static constexpr int kMaxRetryDelaySeconds = 3600;
 
-        Log("Supporters metadata: fetch thread running.");
+            Log("Supporters metadata: fetch thread running.");
 
-        int retryDelaySeconds = kMinRetryDelaySeconds;
-        while (true) {
-            std::string fetchError;
+            int retryDelaySeconds = kMinRetryDelaySeconds;
+            while (!g_supportersFetchStopRequested.load(std::memory_order_acquire)) {
+                std::string fetchError;
 
-            try {
-                std::string body;
-                if (HttpGetToString(kMembershipUrl, body, fetchError)) {
-                    std::vector<SupporterRoleEntry> parsedRoles;
-                    std::string parseError;
-                    if (ParseSupportersJson(body, parsedRoles, parseError)) {
-                        PopulateSupporterTierImages(parsedRoles);
+                try {
+                    std::string body;
+                    if (HttpGetToString(kMembershipUrl, kMaxSupportersMetadataBytes, body, fetchError)) {
+                        std::vector<SupporterRoleEntry> parsedRoles;
+                        std::string parseError;
+                        if (ParseSupportersJson(body, parsedRoles, parseError)) {
+                            PopulateSupporterTierImages(parsedRoles);
 
-                        {
-                            std::unique_lock<std::shared_mutex> writeLock(g_supportersMutex);
-                            g_supporterRoles = std::move(parsedRoles);
+                            {
+                                std::unique_lock<std::shared_mutex> writeLock(g_supportersMutex);
+                                g_supporterRoles = std::move(parsedRoles);
+                            }
+
+                            g_supporterTierTexturesDirty.store(true, std::memory_order_release);
+                            g_supportersLoaded.store(true, std::memory_order_release);
+                            g_supportersFetchEverFailed.store(false, std::memory_order_release);
+                            Log("Loaded supporters metadata.");
+                            return;
                         }
 
-                        g_supporterTierTexturesDirty.store(true, std::memory_order_release);
-                        g_supportersLoaded.store(true, std::memory_order_release);
-                        g_supportersFetchEverFailed.store(false, std::memory_order_release);
-                        Log("Loaded supporters metadata.");
-                        return;
+                        fetchError = parseError;
                     }
-
-                    fetchError = parseError;
+                } catch (const std::exception& e) {
+                    fetchError = std::string("Unexpected exception: ") + e.what();
+                } catch (...) {
+                    fetchError = "Unexpected unknown exception";
                 }
-            } catch (const std::exception& e) {
-                fetchError = std::string("Unexpected exception: ") + e.what();
-            } catch (...) {
-                fetchError = "Unexpected unknown exception";
+
+                if (fetchError.empty()) { fetchError = "Unknown fetch failure"; }
+                g_supportersFetchEverFailed.store(true, std::memory_order_release);
+                Log("Supporters metadata fetch failed; retrying in " + std::to_string(retryDelaySeconds) + "s. Reason: " + fetchError);
+
+                std::unique_lock<std::mutex> waitLock(g_supportersFetchWaitMutex);
+                if (g_supportersFetchWaitCv.wait_for(waitLock, std::chrono::seconds(retryDelaySeconds), [] {
+                        return g_supportersFetchStopRequested.load(std::memory_order_acquire);
+                    })) {
+                    return;
+                }
+                retryDelaySeconds = (std::min)(retryDelaySeconds * 2, kMaxRetryDelaySeconds);
             }
+        });
+    } catch (const std::exception& e) {
+        Log("Supporters metadata: failed to start fetch thread: " + std::string(e.what()));
+        g_supportersFetchStarted.store(false, std::memory_order_release);
+    } catch (...) {
+        Log("Supporters metadata: failed to start fetch thread with an unknown error.");
+        g_supportersFetchStarted.store(false, std::memory_order_release);
+    }
+}
 
-            if (fetchError.empty()) { fetchError = "Unknown fetch failure"; }
-            g_supportersFetchEverFailed.store(true, std::memory_order_release);
-            Log("Supporters metadata fetch failed; retrying in " + std::to_string(retryDelaySeconds) + "s. Reason: " + fetchError);
-
-            std::this_thread::sleep_for(std::chrono::seconds(retryDelaySeconds));
-            retryDelaySeconds = (std::min)(retryDelaySeconds * 2, kMaxRetryDelaySeconds);
-        }
-    }).detach();
+void StopSupportersFetch() {
+    g_supportersFetchStopRequested.store(true, std::memory_order_release);
+    g_supportersFetchWaitCv.notify_all();
+    if (g_supportersFetchThread.joinable()) { g_supportersFetchThread.join(); }
 }

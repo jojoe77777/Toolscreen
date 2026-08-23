@@ -4199,15 +4199,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
                             Log("WARNING: Could not rename old log to " + WideToUtf8(archivedLogPath) +
                                 ", error code: " + std::to_string(GetLastError()));
                         } else {
-                            // Compress the archived log to .gz on a background thread
-                            // so we don't block DLL initialization
-                            std::wstring archiveSrc = archivedLogPath;
-                            std::thread([archiveSrc]() {
-                                std::wstring gzPath = archiveSrc + L".gz";
-                                if (CompressFileToGzip(archiveSrc, gzPath)) {
-                                    DeleteFileW(archiveSrc.c_str());
-                                }
-                            }).detach();
+                            // The managed log worker owns compression lifetime;
+                            // do not leave detached code running across DLL unload.
+                            QueueArchivedLogCompression(archivedLogPath);
                         }
                     } else {
                         CloseHandle(hFile);
@@ -4238,8 +4232,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         LogVersionInfo();
         if (g_toolscreenPath.empty()) { Log("FATAL: Could not get toolscreen directory."); }
         
-        StartSupportersFetch();
-
         g_gameVersion = GetGameVersionFromCommandLine();
         // Layer activation is capability-based: it is inert for OpenGL-only
         // clients and works when a launcher omits a Minecraft version flag.
@@ -4456,6 +4448,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         g_stopHookCompat.store(true, std::memory_order_release);
         if (g_hookCompatThread.joinable()) { g_hookCompatThread.join(); }
         StopNinjabrainClient();
+        StopSupportersFetch();
 
         // Stop background threads
         StopBrowserOverlayThread();

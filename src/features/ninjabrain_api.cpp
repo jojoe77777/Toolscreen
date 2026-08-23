@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <utility>
 
 namespace {
@@ -33,9 +34,18 @@ std::string TrimString(std::string value) {
 }
 
 double NormalizeAngleDegrees(double angle) {
-    while (angle > 180.0) { angle -= 360.0; }
-    while (angle < -180.0) { angle += 360.0; }
+    if (!std::isfinite(angle)) { return 0.0; }
+    angle = std::fmod(angle, 360.0);
+    if (angle > 180.0) { angle -= 360.0; }
+    if (angle < -180.0) { angle += 360.0; }
     return angle;
+}
+
+int ChunkCoordinateToBlock(int chunkCoordinate) {
+    const long long blockCoordinate = static_cast<long long>(chunkCoordinate) * 16ll + 4ll;
+    return static_cast<int>((std::clamp)(blockCoordinate,
+                                         static_cast<long long>((std::numeric_limits<int>::min)()),
+                                         static_cast<long long>((std::numeric_limits<int>::max)())));
 }
 
 void LogIfPresent(const NinjabrainLogCallback& callback, const std::string& message) {
@@ -324,8 +334,8 @@ void ApplyNinjabrainStrongholdEvent(
         }
 
         if (next.predictionCount > 0) {
-            next.strongholdX = next.predictions[0].chunkX * 16 + 4;
-            next.strongholdZ = next.predictions[0].chunkZ * 16 + 4;
+            next.strongholdX = ChunkCoordinateToBlock(next.predictions[0].chunkX);
+            next.strongholdZ = ChunkCoordinateToBlock(next.predictions[0].chunkZ);
             next.distance = next.predictions[0].overworldDistance;
             next.certainty = next.predictions[0].certainty;
             next.validPrediction = true;

@@ -183,6 +183,8 @@ const auto& GetTestCaseDefinitions() {
         {"rebind-indicator-renders-below-settings-gui", &RunRebindIndicatorRendersBelowSettingsGuiTest},
         {"config-error-gui", &RunConfigErrorGuiTest},
         {"profiler-unspecified-breakdown", &RunProfilerUnspecifiedBreakdownTest},
+        {"profiler-exited-thread-lifetime", &RunProfilerExitedThreadLifetimeTest},
+        {"ninjabrain-extreme-prediction-payload", &RunNinjabrainExtremePredictionPayloadTest},
         {"settings-gui-basic", &RunSettingsGuiBasicTest},
         {"settings-gui-advanced", &RunSettingsGuiAdvancedTest},
         {"settings-mouse-translation-prefers-live-viewport", &RunSettingsMouseTranslationPrefersLiveViewportTest},
@@ -276,8 +278,9 @@ const auto& GetTestGroupDefinitions() {
              "fullscreen-relative-display-dimensions-follow-window-resize",
              "fullscreen-relative-gui-publish-preserves-recalculated-size"}},
         {"rebind", {"key-rebind-", "key-repeat-", "hotkey-runtime-"}, {}},
-        {"render", {"mode-"}, {"rebind-indicator-renders-below-settings-gui", "render-ninjabrain-information-message-translation-spans"}},
-        {"settings-and-ui", {"settings-"}, {"config-error-gui", "profiler-unspecified-breakdown"}},
+        {"render", {"mode-"}, {"rebind-indicator-renders-below-settings-gui", "render-ninjabrain-information-message-translation-spans",
+                                  "ninjabrain-extreme-prediction-payload"}},
+        {"settings-and-ui", {"settings-"}, {"config-error-gui", "profiler-unspecified-breakdown", "profiler-exited-thread-lifetime"}},
         {"logs-and-profiles", {"log-", "profile-"}, {}},
     };
 

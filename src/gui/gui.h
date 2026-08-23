@@ -30,7 +30,7 @@ struct Color {
 
 struct DecodedImageData {
     enum Type { Background, UserImage };
-    Type type;
+    Type type = UserImage;
     std::string id;
     int width = 0, height = 0, channels = 0;
     unsigned char* data = nullptr;
@@ -53,6 +53,7 @@ void HandleImGuiContextReset();
 void InitializeImGuiContext(HWND hwnd);
 std::recursive_mutex& GetImGuiContextMutex();
 void StartSupportersFetch();
+void StopSupportersFetch();
 bool IsGuiHotkeyPressed(WPARAM wParam);
 bool IsHotkeyBindingActive();
 bool IsRebindBindingActive();

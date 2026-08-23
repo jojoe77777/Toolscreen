@@ -10334,7 +10334,7 @@ ModeTransitionState GetModeTransitionState() {
     const ViewportTransitionSnapshot& snapshot =
         g_viewportTransitionSnapshots[g_viewportTransitionSnapshotIndex.load(std::memory_order_acquire)];
 
-    ModeTransitionState state;
+    ModeTransitionState state{};
     state.active = snapshot.active;
     if (state.active) {
         state.width = snapshot.currentWidth;
@@ -11008,12 +11008,24 @@ void RenderNinjabrainOverlay(const NinjabrainOverlayConfig& nb, ImFont* font, co
             displayZ = chunkZ;
             return;
         }
-        displayX = chunkX * 16 + 4;
-        displayZ = chunkZ * 16 + 4;
+        const auto toBlockCoordinate = [](int chunk) {
+            const long long value = static_cast<long long>(chunk) * 16ll + 4ll;
+            return static_cast<int>((std::clamp)(value,
+                                                 static_cast<long long>((std::numeric_limits<int>::min)()),
+                                                 static_cast<long long>((std::numeric_limits<int>::max)())));
+        };
+        displayX = toBlockCoordinate(chunkX);
+        displayZ = toBlockCoordinate(chunkZ);
     };
     auto getNetherDisplay = [&](int chunkX, int chunkZ, int& displayX, int& displayZ) {
-        displayX = chunkX * 2;
-        displayZ = chunkZ * 2;
+        const auto doubled = [](int chunk) {
+            const long long value = static_cast<long long>(chunk) * 2ll;
+            return static_cast<int>((std::clamp)(value,
+                                                 static_cast<long long>((std::numeric_limits<int>::min)()),
+                                                 static_cast<long long>((std::numeric_limits<int>::max)())));
+        };
+        displayX = doubled(chunkX);
+        displayZ = doubled(chunkZ);
     };
 
     if (!failedResult && showPredictionTable) {

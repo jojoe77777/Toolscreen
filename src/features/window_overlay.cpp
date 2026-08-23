@@ -65,19 +65,12 @@ HWND FindWindowByTitleAndClass(const std::string& title, const std::string& clas
         std::string targetClass;
         std::string targetExecutable;
         std::string matchPriority;
-        HWND exactMatch;
-        HWND classMatch;
-        HWND executableMatch;
+        HWND exactMatch = nullptr;
+        HWND classMatch = nullptr;
+        HWND executableMatch = nullptr;
     };
 
-    EnumData data;
-    data.targetTitle = title;
-    data.targetClass = className;
-    data.targetExecutable = executableName;
-    data.matchPriority = matchPriority;
-    data.exactMatch = NULL;
-    data.classMatch = NULL;
-    data.executableMatch = NULL;
+    EnumData data{ title, className, executableName, matchPriority };
 
     EnumWindows(
         [](HWND hwnd, LPARAM lParam) -> BOOL {

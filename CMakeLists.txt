@@ -1201,6 +1201,8 @@ set(TOOLSCREEN_GUI_INTEGRATION_TEST_CASES
     rebind-indicator-renders-below-settings-gui
     config-error-gui
     profiler-unspecified-breakdown
+    profiler-exited-thread-lifetime
+    ninjabrain-extreme-prediction-payload
     settings-gui-basic
     settings-gui-advanced
     settings-key-repeat-system-repeat-hides-local-controls
@@ -1331,6 +1333,7 @@ set(TOOLSCREEN_INTERACTIVE_CREATE_TEST_CASES
     fixed_pixels_use_viewport_anchor
     tiny_source_clamped_to_min
     huge_dest_scale_clamped
+    extreme_coordinates_saturate_without_overflow
 )
 
 foreach(test_case IN LISTS TOOLSCREEN_INTERACTIVE_CREATE_TEST_CASES)
@@ -1512,12 +1515,64 @@ set(TOOLSCREEN_GAME_STATE_SOURCE_TEST_CASES
     alive_wrong_pid_false
     alive_stale_heartbeat_false
     alive_future_skew_within_threshold_true
+    alive_corrupt_heartbeat_false
+    alive_negative_current_time_false
 )
 
 foreach(test_case IN LISTS TOOLSCREEN_GAME_STATE_SOURCE_TEST_CASES)
     add_test(
         NAME toolscreen_game_state_source_${test_case}
         COMMAND $<TARGET_FILE:toolscreen_game_state_source_tests> --run ${test_case}
+    )
+endforeach()
+
+add_executable(toolscreen_expression_parser_tests
+    tests/expression_parser_tests.cpp
+    src/common/expression_parser.cpp
+)
+
+target_include_directories(toolscreen_expression_parser_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_compile_definitions(toolscreen_expression_parser_tests PRIVATE
+    NOMINMAX
+    UNICODE
+    _UNICODE
+)
+
+if(MSVC)
+    target_compile_options(toolscreen_expression_parser_tests PRIVATE /W3 /MP /EHsc)
+endif()
+
+toolscreen_configure_target_outputs(toolscreen_expression_parser_tests)
+toolscreen_enable_release_symbols(toolscreen_expression_parser_tests)
+
+set(TOOLSCREEN_EXPRESSION_PARSER_TEST_CASES
+    arithmetic_and_variables
+    malformed_numbers_do_not_throw
+    non_finite_and_integer_overflow_use_fallback
+)
+
+foreach(test_case IN LISTS TOOLSCREEN_EXPRESSION_PARSER_TEST_CASES)
+    add_test(
+        NAME toolscreen_expression_parser_${test_case}
+        COMMAND $<TARGET_FILE:toolscreen_expression_parser_tests> --run ${test_case}
+    )
+endforeach()
+
+add_executable(toolscreen_base64_tests tests/base64_tests.cpp)
+target_include_directories(toolscreen_base64_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/liblogger)
+if(MSVC)
+    target_compile_options(toolscreen_base64_tests PRIVATE /W3 /MP /EHsc)
+endif()
+toolscreen_configure_target_outputs(toolscreen_base64_tests)
+toolscreen_enable_release_symbols(toolscreen_base64_tests)
+
+foreach(test_case IN ITEMS round_trips_text_and_binary rejects_invalid_input_safely)
+    add_test(
+        NAME toolscreen_base64_${test_case}
+        COMMAND $<TARGET_FILE:toolscreen_base64_tests> --run ${test_case}
     )
 endforeach()
 

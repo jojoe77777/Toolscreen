@@ -26,6 +26,8 @@
  */
 
 #include <cstdint>
+#include <limits>
+#include <stdexcept>
 #include <string>
 
 namespace macaron {
@@ -41,10 +43,17 @@ namespace macaron {
                 '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '+', '/' };
 
             size_t in_len = data.size();
-            size_t out_len = 4 * ((in_len + 2) / 3);
+            if (in_len > (std::numeric_limits<size_t>::max)() - 2) {
+                throw std::length_error("Base64 input is too large");
+            }
+            const size_t encodedGroups = (in_len + 2) / 3;
+            if (encodedGroups > (std::numeric_limits<size_t>::max)() / 4) {
+                throw std::length_error("Base64 output is too large");
+            }
+            size_t out_len = 4 * encodedGroups;
             std::string ret(out_len, '\0');
             size_t i;
-            char* p = const_cast<char*>(ret.c_str());
+            char* p = ret.data();
 
             for (i = 0; in_len > 2 && i < in_len - 2; i += 3) {
                 *p++ = sEncodingTable[(data[i] >> 2) & 0x3F];
@@ -92,6 +101,16 @@ namespace macaron {
             if (in_len % 4 != 0)
                 return "Input data size is not a multiple of 4";
 
+            for (size_t i = 0; i < in_len; ++i) {
+                const unsigned char ch = static_cast<unsigned char>(input[i]);
+                const bool isPadding = ch == '=';
+                if ((!isPadding && kDecodingTable[ch] == 64) ||
+                    (isPadding && i + 2 < in_len) ||
+                    (i + 1 < in_len && input[i] == '=' && input[i + 1] != '=')) {
+                    return "Input data contains invalid Base64 characters or padding";
+                }
+            }
+
             size_t out_len = in_len / 4 * 3;
             if (in_len >= 1 && input[in_len - 1] == '=')
                 out_len--;
@@ -103,16 +122,16 @@ namespace macaron {
             for (size_t i = 0, j = 0; i < in_len;) {
                 uint32_t a = input[i] == '='
                     ? 0 & i++
-                    : kDecodingTable[static_cast<int>(input[i++])];
+                    : kDecodingTable[static_cast<unsigned char>(input[i++])];
                 uint32_t b = input[i] == '='
                     ? 0 & i++
-                    : kDecodingTable[static_cast<int>(input[i++])];
+                    : kDecodingTable[static_cast<unsigned char>(input[i++])];
                 uint32_t c = input[i] == '='
                     ? 0 & i++
-                    : kDecodingTable[static_cast<int>(input[i++])];
+                    : kDecodingTable[static_cast<unsigned char>(input[i++])];
                 uint32_t d = input[i] == '='
                     ? 0 & i++
-                    : kDecodingTable[static_cast<int>(input[i++])];
+                    : kDecodingTable[static_cast<unsigned char>(input[i++])];
 
                 uint32_t triple =
                     (a << 3 * 6) + (b << 2 * 6) + (c << 1 * 6) + (d << 0 * 6);

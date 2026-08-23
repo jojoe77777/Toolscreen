@@ -178,7 +178,7 @@ struct WindowInfo {
     std::string title;
     std::string className;
     std::string executableName;
-    HWND hwnd;
+    HWND hwnd = nullptr;
 
     std::string GetDisplayName() const {
         std::string display;

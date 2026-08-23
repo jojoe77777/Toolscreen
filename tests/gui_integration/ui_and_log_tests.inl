@@ -1844,3 +1844,56 @@ void RunLogReleasedSlotReuseTest(TestRunMode runMode = TestRunMode::Automated) {
     Expect(!ContainsFileName(fileNames, "latest-2.log.owner"),
            "Expected slot reuse to avoid allocating a higher-numbered latest log unnecessarily.");
 }
+
+void RunProfilerExitedThreadLifetimeTest(TestRunMode runMode = TestRunMode::Automated) {
+    (void)runMode;
+
+    const std::filesystem::path root = PrepareCaseDirectory("profiler_exited_thread_lifetime");
+    ResetGlobalTestState(root);
+
+    Profiler& profiler = Profiler::GetInstance();
+    profiler.Clear();
+    profiler.SetEnabled(true);
+    profiler.StartProcessingThread();
+
+    std::atomic<bool> releaseWorker{ false };
+    std::thread worker([&] {
+        while (!releaseWorker.load(std::memory_order_acquire)) {
+            PROFILE_SCOPE("Short-lived worker scope");
+            std::this_thread::yield();
+        }
+    });
+    for (int iteration = 0; iteration < 20; ++iteration) {
+        profiler.Clear();
+        std::this_thread::yield();
+    }
+    releaseWorker.store(true, std::memory_order_release);
+    worker.join();
+
+    // Processing after the worker's thread-local storage is destroyed must
+    // not dereference a stale registry pointer.
+    profiler.EndFrame();
+    profiler.EndFrame();
+
+    profiler.StopProcessingThread();
+    profiler.Clear();
+    profiler.SetEnabled(false);
+}
+
+void RunNinjabrainExtremePredictionPayloadTest(TestRunMode runMode = TestRunMode::Automated) {
+    (void)runMode;
+
+    NinjabrainData data;
+    ApplyNinjabrainStrongholdEvent(
+        R"({"resultType":"TRIANGULATION","playerPosition":{"xInOverworld":0.0,"zInOverworld":0.0,"horizontalAngle":1e300},"predictions":[{"chunkX":2147483647,"chunkZ":-2147483648,"certainty":0.5,"overworldDistance":1.0}]})",
+        data,
+        {});
+
+    Expect(data.validPrediction, "Expected the extreme prediction payload to remain parseable.");
+    Expect(data.strongholdX == (std::numeric_limits<int>::max)(),
+           "Expected an overflowing positive chunk coordinate to saturate.");
+    Expect(data.strongholdZ == (std::numeric_limits<int>::min)(),
+           "Expected an overflowing negative chunk coordinate to saturate.");
+    Expect(data.predictionAngles[0].valid && std::isfinite(data.predictionAngles[0].neededCorrection),
+           "Expected huge angles to normalize to a finite value without an unbounded loop.");
+}

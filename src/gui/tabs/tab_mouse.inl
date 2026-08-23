@@ -95,7 +95,7 @@
                             std::string displayName = cursorName;
 
                             if (!displayName.empty()) {
-                                displayName[0] = std::toupper(displayName[0]);
+                                displayName[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(displayName[0])));
                                 for (auto& c : displayName) {
                                     if (c == '_' || c == '-') c = ' ';
                                 }

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -132,6 +133,9 @@ public:
         const double result = parseExpression();
         if (m_currentToken.kind != ExprTokenKind::End) {
             throw std::runtime_error("Unexpected token at end: " + m_currentToken.text);
+        }
+        if (!std::isfinite(result)) {
+            throw std::runtime_error("Expression result must be finite");
         }
         return result;
     }
@@ -323,7 +327,12 @@ int EvaluateExpression(const std::string& expr, int screenWidth, int screenHeigh
     try {
         ExpressionParser parser(trimmed, screenWidth, screenHeight);
         const double result = parser.parse();
-        return static_cast<int>(std::floor(result));
+        const double floored = std::floor(result);
+        if (floored < static_cast<double>((std::numeric_limits<int>::min)()) ||
+            floored > static_cast<double>((std::numeric_limits<int>::max)())) {
+            return defaultValue;
+        }
+        return static_cast<int>(floored);
     } catch (const std::exception&) {
         return defaultValue;
     }
@@ -358,10 +367,17 @@ bool ValidateExpression(const std::string& expr, std::string& errorOut) {
         return false;
     }
 
-    ExpressionParser parser(trimmed, 1920, 1080);
-    const std::string error = parser.validate();
-    if (!error.empty()) {
-        errorOut = error;
+    try {
+        ExpressionParser parser(trimmed, 1920, 1080);
+        const std::string error = parser.validate();
+        if (!error.empty()) {
+            errorOut = error;
+            return false;
+        }
+    } catch (const std::exception& ex) {
+        // Tokenization can fail before ExpressionParser::validate() starts
+        // (for example, std::stod(".") or an out-of-range numeric literal).
+        errorOut = ex.what();
         return false;
     }
 

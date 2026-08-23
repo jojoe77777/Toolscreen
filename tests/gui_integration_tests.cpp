@@ -29,6 +29,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <array>
 #include <string>

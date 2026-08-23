@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <optional>
 #include <sstream>
 #include <unordered_set>
@@ -62,6 +63,17 @@ std::optional<double> GetNumericValue(const toml::table& tbl, const std::string&
 
 bool IsZeroOrOneValue(double value) {
     return value == 0.0 || value == 1.0;
+}
+
+int NumericDimensionToInt(double value, int fallback) {
+    if (!std::isfinite(value)) { return fallback; }
+    if (value <= static_cast<double>((std::numeric_limits<int>::min)())) {
+        return (std::numeric_limits<int>::min)();
+    }
+    if (value >= static_cast<double>((std::numeric_limits<int>::max)())) {
+        return (std::numeric_limits<int>::max)();
+    }
+    return static_cast<int>(value);
 }
 
 const char* EyeZoomFontSizeModeToTomlString(EyeZoomFontSizeMode mode) {
@@ -228,7 +240,7 @@ void ModeConfigFromTomlInternal(const toml::table& tbl, ModeConfig& cfg, const s
                     cfg.width = (std::max)(1, static_cast<int>(std::lround(cfg.relativeWidth * static_cast<float>(cachedScreenWidth))));
                 }
             } else {
-                cfg.width = static_cast<int>(*widthVal);
+                cfg.width = NumericDimensionToInt(*widthVal, ConfigDefaults::MODE_WIDTH);
             }
         }
     }
@@ -245,7 +257,7 @@ void ModeConfigFromTomlInternal(const toml::table& tbl, ModeConfig& cfg, const s
                     cfg.height = (std::max)(1, static_cast<int>(std::lround(cfg.relativeHeight * static_cast<float>(cachedScreenHeight))));
                 }
             } else {
-                cfg.height = static_cast<int>(*heightVal);
+                cfg.height = NumericDimensionToInt(*heightVal, ConfigDefaults::MODE_HEIGHT);
             }
         }
     }
@@ -256,10 +268,10 @@ void ModeConfigFromTomlInternal(const toml::table& tbl, ModeConfig& cfg, const s
     if (tbl.contains("useRelativeSize") || tbl.contains("relativeWidth") || tbl.contains("relativeHeight")) {
         cfg.useRelativeSize = GetOr(tbl, "useRelativeSize", false);
         if (auto relativeWidth = GetNumericValue(tbl, "relativeWidth")) {
-            cfg.relativeWidth = static_cast<float>(*relativeWidth);
+            cfg.relativeWidth = std::isfinite(*relativeWidth) ? static_cast<float>(*relativeWidth) : -1.0f;
         }
         if (auto relativeHeight = GetNumericValue(tbl, "relativeHeight")) {
-            cfg.relativeHeight = static_cast<float>(*relativeHeight);
+            cfg.relativeHeight = std::isfinite(*relativeHeight) ? static_cast<float>(*relativeHeight) : -1.0f;
         }
     } else if (widthIsPercentage || heightIsPercentage) {
         cfg.useRelativeSize = true;

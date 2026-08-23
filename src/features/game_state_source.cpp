@@ -1,7 +1,5 @@
 #include "features/game_state_source.h"
 
-#include <cstdlib>
-
 #include <nlohmann/json.hpp>
 
 namespace game_state_source {
@@ -71,9 +69,16 @@ GameStateSourceKind Select(bool hermesAlive, bool stateOutputAvailable) {
 
 bool EvaluateHermesAlive(const unsigned char bytes[16], uint64_t currentPid, long long nowEpochMs) {
     const uint64_t pid = ReadBigEndianU64(bytes);
-    const long long heartbeatMs = static_cast<long long>(ReadBigEndianU64(bytes + 8));
     if (pid != currentPid) { return false; }
-    return std::llabs(nowEpochMs - heartbeatMs) < kHermesAliveStaleThresholdMs;
+
+    // The heartbeat lives in shared memory owned by another mod, so treat it
+    // as untrusted bytes. Avoid signed conversion/subtraction overflow for a
+    // corrupt timestamp while preserving the allowed small future skew.
+    if (nowEpochMs < 0) { return false; }
+    const uint64_t heartbeatMs = ReadBigEndianU64(bytes + 8);
+    const uint64_t nowMs = static_cast<uint64_t>(nowEpochMs);
+    const uint64_t difference = nowMs >= heartbeatMs ? nowMs - heartbeatMs : heartbeatMs - nowMs;
+    return difference < static_cast<uint64_t>(kHermesAliveStaleThresholdMs);
 }
 
 }  // namespace game_state_source

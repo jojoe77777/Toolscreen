@@ -138,6 +138,16 @@ void AliveFutureSkewWithinThresholdTrue() {
     CheckTrue(EvaluateHermesAlive(bytes.data(), 1234, 100000), "1s future skew alive");
 }
 
+void AliveCorruptHeartbeatFalse() {
+    auto bytes = MakeAliveBytes(1234, UINT64_MAX);
+    CheckTrue(!EvaluateHermesAlive(bytes.data(), 1234, 100000), "corrupt maximum heartbeat rejected");
+}
+
+void AliveNegativeCurrentTimeFalse() {
+    auto bytes = MakeAliveBytes(1234, 100000);
+    CheckTrue(!EvaluateHermesAlive(bytes.data(), 1234, -1), "negative current time rejected");
+}
+
 struct TestCase {
     const char* name;
     std::function<void()> run;
@@ -164,6 +174,8 @@ const std::vector<TestCase>& Registry() {
         {"alive_wrong_pid_false", &AliveWrongPidFalse},
         {"alive_stale_heartbeat_false", &AliveStaleHeartbeatFalse},
         {"alive_future_skew_within_threshold_true", &AliveFutureSkewWithinThresholdTrue},
+        {"alive_corrupt_heartbeat_false", &AliveCorruptHeartbeatFalse},
+        {"alive_negative_current_time_false", &AliveNegativeCurrentTimeFalse},
     };
     return cases;
 }

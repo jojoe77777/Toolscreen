@@ -45,6 +45,7 @@
 #include <fstream>
 #include <functional>
 #include <future>
+#include <limits>
 #include <optional>
 #include <set>
 #include <shared_mutex>
@@ -1472,6 +1473,7 @@ constexpr MclogsUploadEndpoint kFallbackMclogsUploadEndpoint{ L"https://api.mclo
                                                               "api.mclogs.minestrator.com" };
 constexpr size_t kMclogsMaxContentBytes = 10u * 1024u * 1024u;
 constexpr size_t kMclogsMaxContentLines = 25000u;
+constexpr size_t kMclogsMaxResponseBytes = 1u * 1024u * 1024u;
 
 struct HttpJsonResponse {
     DWORD statusCode = 0;
@@ -1621,6 +1623,11 @@ bool HttpPostToString(const std::wstring& url, const std::wstring& requestHeader
         outError = "WinHttpCrackUrl failed";
         return false;
     }
+    if (!urlComp.lpszHostName || urlComp.dwHostNameLength == 0 ||
+        (urlComp.nScheme != INTERNET_SCHEME_HTTP && urlComp.nScheme != INTERNET_SCHEME_HTTPS)) {
+        outError = "URL must contain an HTTP or HTTPS host";
+        return false;
+    }
 
     const std::wstring host(urlComp.lpszHostName, urlComp.dwHostNameLength);
     std::wstring path(urlComp.lpszUrlPath ? std::wstring(urlComp.lpszUrlPath, urlComp.dwUrlPathLength) : L"/");
@@ -1660,6 +1667,10 @@ bool HttpPostToString(const std::wstring& url, const std::wstring& requestHeader
 
     bool ok = false;
     do {
+        if (requestBody.size() > std::numeric_limits<DWORD>::max()) {
+            outError = "HTTP request body is too large";
+            break;
+        }
         const DWORD requestSize = static_cast<DWORD>(requestBody.size());
         if (!WinHttpSendRequest(hRequest, requestHeaders.c_str(), static_cast<DWORD>(-1L), const_cast<char*>(requestBody.data()), requestSize,
                                 requestSize, 0)) {
@@ -1691,6 +1702,11 @@ bool HttpPostToString(const std::wstring& url, const std::wstring& requestHeader
                 break;
             }
             if (bytesAvailable == 0) {
+                break;
+            }
+            if (outResponse.body.size() > kMclogsMaxResponseBytes ||
+                bytesAvailable > kMclogsMaxResponseBytes - outResponse.body.size()) {
+                outError = "HTTP response exceeded the size limit";
                 break;
             }
 
@@ -2621,6 +2637,11 @@ void RenderInteractiveCreateBanner() {
 }
 
 void RenderSettingsGUI() {
+    // Start network-backed optional UI data only once the DLL is fully loaded
+    // and rendering, never while DllMain holds the Windows loader lock.
+#ifndef TOOLSCREEN_GUI_INTEGRATION_TESTS
+    StartSupportersFetch();
+#endif
     ResetTransientBindingUiState();
 
 #ifdef TOOLSCREEN_GUI_INTEGRATION_TESTS

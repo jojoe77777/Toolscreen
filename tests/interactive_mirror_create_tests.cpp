@@ -4,6 +4,7 @@
 #include <cstring>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -117,6 +118,22 @@ void HugeDestScaleClamped() {
     CheckFloatNear(p.scale, InteractiveMirrorLimits::kMaxScale, 0.001f, "scale clamped");
 }
 
+void ExtremeCoordinatesSaturateWithoutOverflow() {
+    const int max = std::numeric_limits<int>::max();
+    const int min = std::numeric_limits<int>::min();
+    InteractiveRect src{max, min, max, max};
+    InteractiveRect dst{max, min, max, min};
+    auto p = BuildInteractiveMirrorParams(src, dst, false, min, max, 1, 1, max, max, max, max);
+    CheckIntEq(p.captureWidth, InteractiveMirrorLimits::kMaxCaptureDimension, "captureWidth bounded");
+    CheckIntEq(p.captureHeight, InteractiveMirrorLimits::kMaxCaptureDimension, "captureHeight bounded");
+    CheckIntEq(p.inputX, max, "inputX saturated");
+    CheckIntEq(p.inputY, min, "inputY saturated");
+    CheckIntEq(p.outputX, max, "outputX saturated");
+    Check(std::isfinite(p.scale), "scale finite");
+    Check(std::isfinite(p.relativeX), "relativeX finite");
+    Check(std::isfinite(p.relativeY), "relativeY finite");
+}
+
 struct TestCase {
     const char* name;
     std::function<void()> run;
@@ -133,6 +150,7 @@ const std::vector<TestCase>& Registry() {
         {"fixed_pixels_use_viewport_anchor", &FixedPixelsUseViewportAnchor},
         {"tiny_source_clamped_to_min", &TinySourceClampedToMin},
         {"huge_dest_scale_clamped", &HugeDestScaleClamped},
+        {"extreme_coordinates_saturate_without_overflow", &ExtremeCoordinatesSaturateWithoutOverflow},
     };
     return cases;
 }

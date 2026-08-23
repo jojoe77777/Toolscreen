@@ -2,12 +2,24 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <limits>
 
 namespace {
 
-int RoundDiv(int numerator, float scale) {
-    if (scale <= 0.0001f) return numerator;
-    return static_cast<int>(std::lround(static_cast<float>(numerator) / scale));
+int SaturatingRound(double value) {
+    constexpr double kIntMin = static_cast<double>(std::numeric_limits<int>::min());
+    constexpr double kIntMax = static_cast<double>(std::numeric_limits<int>::max());
+    if (std::isnan(value)) return 0;
+    if (!std::isfinite(value)) return value < 0.0 ? std::numeric_limits<int>::min() : std::numeric_limits<int>::max();
+    if (value <= kIntMin) return std::numeric_limits<int>::min();
+    if (value >= kIntMax) return std::numeric_limits<int>::max();
+    return static_cast<int>(std::lround(value));
+}
+
+int RoundDiv(int64_t numerator, float scale) {
+    if (scale <= 0.0001f) return SaturatingRound(static_cast<double>(numerator));
+    return SaturatingRound(static_cast<double>(numerator) / static_cast<double>(scale));
 }
 
 int ClampInt(int value, int lo, int hi) {
@@ -41,8 +53,8 @@ InteractiveMirrorParams BuildInteractiveMirrorParams(const InteractiveRect& sour
 
     params.captureWidth = ClampInt(RoundDiv(sourceRectScreen.w, xScale), kMinCaptureDimension, kMaxCaptureDimension);
     params.captureHeight = ClampInt(RoundDiv(sourceRectScreen.h, yScale), kMinCaptureDimension, kMaxCaptureDimension);
-    params.inputX = RoundDiv(sourceRectScreen.x - finalX, xScale);
-    params.inputY = RoundDiv(sourceRectScreen.y - finalY, yScale);
+    params.inputX = RoundDiv(static_cast<int64_t>(sourceRectScreen.x) - finalX, xScale);
+    params.inputY = RoundDiv(static_cast<int64_t>(sourceRectScreen.y) - finalY, yScale);
     params.captureRelativeTo = "topLeftViewport";
 
     const float fitW = static_cast<float>(destRectScreen.w) / static_cast<float>(params.captureWidth);
@@ -53,10 +65,12 @@ InteractiveMirrorParams BuildInteractiveMirrorParams(const InteractiveRect& sour
     params.scaleX = fitScale;
     params.scaleY = fitScale;
 
-    const int contentW = static_cast<int>(std::lround(static_cast<float>(params.captureWidth) * fitScale));
-    const int contentH = static_cast<int>(std::lround(static_cast<float>(params.captureHeight) * fitScale));
-    const int contentX = destRectScreen.x + (destRectScreen.w - contentW) / 2;
-    const int contentY = destRectScreen.y + (destRectScreen.h - contentH) / 2;
+    const int contentW = SaturatingRound(static_cast<double>(params.captureWidth) * fitScale);
+    const int contentH = SaturatingRound(static_cast<double>(params.captureHeight) * fitScale);
+    const int contentX = SaturatingRound(static_cast<double>(destRectScreen.x) +
+                                         (static_cast<int64_t>(destRectScreen.w) - contentW) / 2);
+    const int contentY = SaturatingRound(static_cast<double>(destRectScreen.y) +
+                                         (static_cast<int64_t>(destRectScreen.h) - contentH) / 2);
 
     if (relativeToScreen) {
         params.outputRelativeTo = "topLeftScreen";
@@ -65,8 +79,8 @@ InteractiveMirrorParams BuildInteractiveMirrorParams(const InteractiveRect& sour
         params.useRelativePosition = true;
     } else {
         params.outputRelativeTo = "topLeftViewport";
-        params.outputX = contentX - finalX;
-        params.outputY = contentY - finalY;
+        params.outputX = SaturatingRound(static_cast<double>(static_cast<int64_t>(contentX) - finalX));
+        params.outputY = SaturatingRound(static_cast<double>(static_cast<int64_t>(contentY) - finalY));
         params.useRelativePosition = false;
     }
     params.relativeX = (fullW > 0) ? static_cast<float>(contentX) / static_cast<float>(fullW) : 0.0f;

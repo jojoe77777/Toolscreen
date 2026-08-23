@@ -104,13 +104,14 @@ std::wstring NormalizeDisplayWide(std::wstring value) {
 }
 
 bool ReadFileBytes(const std::filesystem::path& path, std::vector<uint8_t>& outBytes) {
+    constexpr std::streamoff kMaxFontFileBytes = 64 * 1024 * 1024;
     std::ifstream input(path, std::ios::binary | std::ios::ate);
     if (!input.is_open()) {
         return false;
     }
 
     const std::streamoff size = input.tellg();
-    if (size <= 0) {
+    if (size <= 0 || size > kMaxFontFileBytes) {
         return false;
     }
 
@@ -121,7 +122,7 @@ bool ReadFileBytes(const std::filesystem::path& path, std::vector<uint8_t>& outB
 }
 
 bool TryReadBigEndianU16(const std::vector<uint8_t>& bytes, size_t offset, uint16_t& outValue) {
-    if (offset + 2 > bytes.size()) {
+    if (offset > bytes.size() || bytes.size() - offset < 2) {
         return false;
     }
 
@@ -130,7 +131,7 @@ bool TryReadBigEndianU16(const std::vector<uint8_t>& bytes, size_t offset, uint1
 }
 
 bool TryReadBigEndianU32(const std::vector<uint8_t>& bytes, size_t offset, uint32_t& outValue) {
-    if (offset + 4 > bytes.size()) {
+    if (offset > bytes.size() || bytes.size() - offset < 4) {
         return false;
     }
 
@@ -142,7 +143,7 @@ bool TryReadBigEndianU32(const std::vector<uint8_t>& bytes, size_t offset, uint3
 }
 
 std::wstring DecodeSfntNameString(const std::vector<uint8_t>& bytes, size_t offset, uint16_t length, uint16_t platformId) {
-    if (offset + length > bytes.size()) {
+    if (offset > bytes.size() || static_cast<size_t>(length) > bytes.size() - offset) {
         return {};
     }
 

@@ -303,6 +303,7 @@ struct BitWriter {
     int bitCount = 0;
 
     void WriteBits(uint32_t value, int count) {
+        if (count <= 0 || count > 16) return;
         bitBuffer |= ((value & ((1u << count) - 1u)) << bitCount);
         bitCount += count;
         while (bitCount >= 8) {
@@ -338,7 +339,7 @@ static void BuildCanonicalCodes(const uint8_t* lengths, size_t count, std::vecto
 
     for (size_t symbol = 0; symbol < count; symbol++) {
         uint8_t len = lengths[symbol];
-        if (len == 0) continue;
+        if (len == 0 || len > 15) continue;
         uint16_t c = static_cast<uint16_t>(nextCode[len]++);
         out[symbol].bits = len;
         out[symbol].code = ReverseBits(c, len);
@@ -1501,8 +1502,8 @@ void WriteCurrentModeToFile(const std::string& modeId) {
     std::wstring filePathCopy = g_modeFilePath;
 
     // Fire-and-forget async write - never blocks the calling thread
-    // NOTE: Do NOT use PROFILE_SCOPE inside short-lived detached threads!
-    // The thread-local profiler buffer gets destroyed when the thread exits,
+    // NOTE: Do NOT use PROFILE_SCOPE inside short-lived detached threads; the
+    // extra per-thread profiling buffer is unnecessary for this tiny write.
     std::thread([modeIdCopy, filePathCopy]() {
         // Open via std::filesystem::path so wide Win32 APIs are used.
         std::ofstream modeFile(std::filesystem::path(filePathCopy), std::ios_base::out | std::ios_base::trunc);
@@ -1575,12 +1576,12 @@ bool SwitchToMode(const std::string& newModeId, const std::string& source, bool 
             fromY = g_modeTransition.currentY;
             useAnimatedPosition = true;
 
-            int origDeltaW = std::abs(g_modeTransition.toWidth - g_modeTransition.fromWidth);
-            int origDeltaH = std::abs(g_modeTransition.toHeight - g_modeTransition.fromHeight);
-            int origDeltaX = std::abs(g_modeTransition.toX - g_modeTransition.fromX);
-            int origDeltaY = std::abs(g_modeTransition.toY - g_modeTransition.fromY);
-            float origDistance =
-                std::sqrt((float)(origDeltaW * origDeltaW + origDeltaH * origDeltaH + origDeltaX * origDeltaX + origDeltaY * origDeltaY));
+            const double origDeltaW = std::abs(static_cast<double>(g_modeTransition.toWidth) - g_modeTransition.fromWidth);
+            const double origDeltaH = std::abs(static_cast<double>(g_modeTransition.toHeight) - g_modeTransition.fromHeight);
+            const double origDeltaX = std::abs(static_cast<double>(g_modeTransition.toX) - g_modeTransition.fromX);
+            const double origDeltaY = std::abs(static_cast<double>(g_modeTransition.toY) - g_modeTransition.fromY);
+            const double origDistance = std::sqrt(origDeltaW * origDeltaW + origDeltaH * origDeltaH +
+                                                  origDeltaX * origDeltaX + origDeltaY * origDeltaY);
 
             if (origDistance > 0) {
             }
@@ -1685,12 +1686,12 @@ bool SwitchToMode(const std::string& newModeId, const std::string& source, bool 
     }
 
     if (useAnimatedPosition && toModeCopy.gameTransition == GameTransitionType::Bounce) {
-        int newDeltaW = std::abs(toWidth - fromWidth);
-        int newDeltaH = std::abs(toHeight - fromHeight);
-        int newDeltaX = std::abs(toX - fromX);
-        int newDeltaY = std::abs(toY - fromY);
-        float newDistance =
-            std::sqrt((float)(newDeltaW * newDeltaW + newDeltaH * newDeltaH + newDeltaX * newDeltaX + newDeltaY * newDeltaY));
+        const double newDeltaW = std::abs(static_cast<double>(toWidth) - fromWidth);
+        const double newDeltaH = std::abs(static_cast<double>(toHeight) - fromHeight);
+        const double newDeltaX = std::abs(static_cast<double>(toX) - fromX);
+        const double newDeltaY = std::abs(static_cast<double>(toY) - fromY);
+        const double newDistance = std::sqrt(newDeltaW * newDeltaW + newDeltaH * newDeltaH +
+                                             newDeltaX * newDeltaX + newDeltaY * newDeltaY);
 
         // Use snapshot for thread-safe lookup (reuse modeSnap if still valid, else re-acquire)
         auto distSnap = GetConfigSnapshot();
@@ -1699,15 +1700,15 @@ bool SwitchToMode(const std::string& newModeId, const std::string& source, bool 
             int refFromW = fullW, refFromH = fullH, refFromX = 0, refFromY = 0;
             int refToW = toWidth, refToH = toHeight, refToX = toX, refToY = toY;
 
-            int fullDeltaW = std::abs(refToW - refFromW);
-            int fullDeltaH = std::abs(refToH - refFromH);
-            int fullDeltaX = std::abs(refToX - refFromX);
-            int fullDeltaY = std::abs(refToY - refFromY);
-            float fullDistance =
-                std::sqrt((float)(fullDeltaW * fullDeltaW + fullDeltaH * fullDeltaH + fullDeltaX * fullDeltaX + fullDeltaY * fullDeltaY));
+            const double fullDeltaW = std::abs(static_cast<double>(refToW) - refFromW);
+            const double fullDeltaH = std::abs(static_cast<double>(refToH) - refFromH);
+            const double fullDeltaX = std::abs(static_cast<double>(refToX) - refFromX);
+            const double fullDeltaY = std::abs(static_cast<double>(refToY) - refFromY);
+            const double fullDistance = std::sqrt(fullDeltaW * fullDeltaW + fullDeltaH * fullDeltaH +
+                                                  fullDeltaX * fullDeltaX + fullDeltaY * fullDeltaY);
 
             if (fullDistance > 0) {
-                distanceRatio = newDistance / fullDistance;
+                distanceRatio = static_cast<float>(newDistance / fullDistance);
                 distanceRatio = (std::max)(0.1f, (std::min)(1.0f, distanceRatio));
 
                 int originalDuration = toModeCopy.transitionDurationMs;
@@ -1837,7 +1838,9 @@ bool IsHardcodedMode(const std::string& id) {
 bool EqualsIgnoreCase(const std::string& a, const std::string& b) {
     if (a.size() != b.size()) { return false; }
 
-    return std::equal(a.begin(), a.end(), b.begin(), [](char a, char b) { return std::tolower(a) == std::tolower(b); });
+    return std::equal(a.begin(), a.end(), b.begin(), [](unsigned char a, unsigned char b) {
+        return std::tolower(a) == std::tolower(b);
+    });
 }
 
 std::string ModeSourceTypeToString(ModeSourceType type) {

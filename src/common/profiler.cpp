@@ -70,27 +70,27 @@ Profiler::~Profiler() { StopProcessingThread(); }
 
 // RAII guard to invalidate buffer when thread exits
 struct ThreadBufferGuard {
-    Profiler::ThreadRingBuffer* buffer;
+    std::shared_ptr<Profiler::ThreadRingBuffer> buffer;
     ~ThreadBufferGuard() {
         if (buffer) { buffer->isValid.store(false, std::memory_order_release); }
     }
 };
 
 Profiler::ThreadRingBuffer& Profiler::GetThreadBuffer() {
-    thread_local ThreadRingBuffer tls_buffer;
-    thread_local ThreadBufferGuard guard{ &tls_buffer }; // Will invalidate on thread exit
+    thread_local auto tls_buffer = std::make_shared<ThreadRingBuffer>();
+    thread_local ThreadBufferGuard guard{ tls_buffer }; // Will invalidate on thread exit
     thread_local bool registered = false;
 
     if (!registered) {
-        tls_buffer.threadId = static_cast<uint32_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
-        GetInstance().RegisterThreadBuffer(&tls_buffer);
+        tls_buffer->threadId = static_cast<uint32_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+        GetInstance().RegisterThreadBuffer(tls_buffer);
         registered = true;
     }
 
-    return tls_buffer;
+    return *tls_buffer;
 }
 
-void Profiler::RegisterThreadBuffer(ThreadRingBuffer* buffer) {
+void Profiler::RegisterThreadBuffer(const std::shared_ptr<ThreadRingBuffer>& buffer) {
     // Brief spin-lock for registration only (rare operation)
     while (m_registryLock.test_and_set(std::memory_order_acquire)) {}
     m_threadRegistry.push_back(buffer);
@@ -208,16 +208,19 @@ void Profiler::SubmitExternalTiming(const char* sectionName, double durationMs) 
 }
 
 void Profiler::StartProcessingThread() {
-    if (m_processingThreadRunning.load()) return;
+    bool expected = false;
+    if (!m_processingThreadRunning.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) { return; }
 
-    m_processingThreadRunning.store(true);
-    m_processingThread = std::thread(&Profiler::ProcessingThreadMain, this);
+    try {
+        m_processingThread = std::thread(&Profiler::ProcessingThreadMain, this);
+    } catch (...) {
+        m_processingThreadRunning.store(false, std::memory_order_release);
+        throw;
+    }
 }
 
 void Profiler::StopProcessingThread() {
-    if (!m_processingThreadRunning.load()) return;
-
-    m_processingThreadRunning.store(false);
+    if (!m_processingThreadRunning.exchange(false, std::memory_order_acq_rel)) return;
     if (m_processingThread.joinable()) { m_processingThread.join(); }
 }
 
@@ -229,12 +232,17 @@ void Profiler::ProcessingThreadMain() {
 }
 
 void Profiler::ProcessEvents() {
+    std::lock_guard<std::recursive_mutex> processLock(m_processMutex);
+
     // Process events from all registered thread buffers
     while (m_registryLock.test_and_set(std::memory_order_acquire)) {}
-    std::vector<ThreadRingBuffer*> buffers = m_threadRegistry; // Copy to release lock quickly
+    std::vector<std::shared_ptr<ThreadRingBuffer>> buffers = m_threadRegistry; // Keep buffers alive while processing.
+    std::erase_if(m_threadRegistry, [](const std::shared_ptr<ThreadRingBuffer>& buffer) {
+        return !buffer->isValid.load(std::memory_order_acquire);
+    });
     m_registryLock.clear(std::memory_order_release);
 
-    for (ThreadRingBuffer* buffer : buffers) {
+    for (const auto& buffer : buffers) {
         // Skip invalidated buffers (thread has exited)
         if (!buffer->isValid.load(std::memory_order_acquire)) { continue; }
 
@@ -393,6 +401,8 @@ void Profiler::BuildDisplayTree(const std::unordered_map<std::string, ProfileEnt
 void Profiler::EndFrame() {
     if (!m_enabled) return;
 
+    std::lock_guard<std::recursive_mutex> processLock(m_processMutex);
+
     auto currentTime = std::chrono::steady_clock::now();
 
     ProcessEvents();
@@ -509,13 +519,17 @@ std::vector<std::pair<std::string, Profiler::ProfileEntry>> Profiler::GetProfile
 }
 
 void Profiler::Clear() {
+    std::lock_guard<std::recursive_mutex> processLock(m_processMutex);
+
     // Clear all thread buffers
     while (m_registryLock.test_and_set(std::memory_order_acquire)) {}
 
-    for (ThreadRingBuffer* buffer : m_threadRegistry) {
-        buffer->readIndex.store(0, std::memory_order_relaxed);
-        buffer->writeIndex.store(0, std::memory_order_relaxed);
-        buffer->scopeStack.clear();
+    for (const auto& buffer : m_threadRegistry) {
+        // Only the producer thread may change writeIndex or its scope stack.
+        // Advancing the consumer cursor safely discards currently queued
+        // events without racing an active profiled worker.
+        const size_t writeIndex = buffer->writeIndex.load(std::memory_order_acquire);
+        buffer->readIndex.store(writeIndex, std::memory_order_release);
     }
 
     m_registryLock.clear(std::memory_order_release);

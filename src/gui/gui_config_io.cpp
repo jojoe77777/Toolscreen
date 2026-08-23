@@ -315,29 +315,43 @@ void SaveConfig() {
         std::thread([configPath, sharedSnapshot = std::move(sharedSnapshot), activeProfileName, activeProfileTracked,
                      profileSnapshot = std::move(profileSnapshot)]() {
             _set_se_translator(SEHTranslator);
+            bool saveSucceeded = true;
             try {
                 try {
                     if (!SaveConfigToTomlFile(sharedSnapshot, configPath)) {
                         Log("ERROR: Failed to write config file.");
+                        saveSucceeded = false;
                     }
                 } catch (const std::exception& e) {
                     Log("ERROR: Failed to write config file: " + std::string(e.what()));
+                    saveSucceeded = false;
                 }
                 if (activeProfileTracked && !SaveProfileSnapshotIfTracked(activeProfileName, profileSnapshot)) {
                     Log("INFO: Skipped async profile save for removed or renamed profile '" + activeProfileName + "'.");
+                    saveSucceeded = false;
                 }
             } catch (const SE_Exception& e) {
                 LogException("ConfigSaveThread (SEH)", e.getCode(), e.getInfo());
+                saveSucceeded = false;
             } catch (const std::exception& e) {
                 LogException("ConfigSaveThread", e);
+                saveSucceeded = false;
             } catch (...) {
                 Log("EXCEPTION in ConfigSaveThread: Unknown exception");
+                saveSucceeded = false;
             }
-            s_isConfigSaving = false;
+            if (!saveSucceeded) { g_configIsDirty.store(true, std::memory_order_release); }
+            s_isConfigSaving.store(false, std::memory_order_release);
         }).detach();
     } catch (const std::exception& e) {
+        // Thread construction can fail after the dirty flag and saving latch
+        // have been updated. Restore both so a later frame can retry.
+        g_configIsDirty.store(true, std::memory_order_release);
+        s_isConfigSaving.store(false, std::memory_order_release);
         Log("ERROR: Failed to prepare config for save: " + std::string(e.what()));
     } catch (...) {
+        g_configIsDirty.store(true, std::memory_order_release);
+        s_isConfigSaving.store(false, std::memory_order_release);
         Log("ERROR: Unknown exception in SaveConfig");
     }
 }
