@@ -42,6 +42,10 @@ std::unordered_set<std::string> g_seenHashes;
 // Version number
 const std::string LIBLOGGER_VERSION = LIBLOGGER_VERSION_STR;
 
+static constexpr const wchar_t* kBlockedSignerVendors[] = {
+    L"Overwolf",
+};
+
 // JNI is not safe to enter merely because jvm.dll exports
 // JNI_GetCreatedJavaVMs. During early VM bootstrap, attaching a native thread
 // can crash inside the VM (notably with ZGC). All producers therefore enqueue
@@ -454,7 +458,7 @@ std::wstring ResolveLoadLibraryPath(LPCWSTR requestedPath) {
     }
 }
 
-bool ShouldBlockLoadLibrary(LPCWSTR requestedPath) {
+bool ShouldBlockLoadLibrary(LPCWSTR requestedPath, std::wstring& blockedPath) {
     std::wstring resolvedPath = ResolveLoadLibraryPath(requestedPath);
     if (resolvedPath.empty()) {
         return false;
@@ -462,7 +466,20 @@ bool ShouldBlockLoadLibrary(LPCWSTR requestedPath) {
 
     // GetSignerName returns a signer only after WinVerifyTrust accepts the
     // embedded or catalog signature. Invalid and unsigned files stay allowed.
-    return ContainsOrdinalIgnoreCase(GetSignerName(resolvedPath.c_str()), L"Overwolf");
+    std::wstring signerName = GetSignerName(resolvedPath.c_str());
+    bool isBlockedVendor = false;
+    for (const wchar_t* blockedVendor : kBlockedSignerVendors) {
+        if (ContainsOrdinalIgnoreCase(signerName, blockedVendor)) {
+            isBlockedVendor = true;
+            break;
+        }
+    }
+    if (!isBlockedVendor) {
+        return false;
+    }
+
+    blockedPath = std::move(resolvedPath);
+    return true;
 }
 
 std::wstring ConvertAnsiToWchar(LPCSTR value) {
@@ -483,7 +500,7 @@ std::wstring ConvertAnsiToWchar(LPCSTR value) {
     return converted;
 }
 
-bool IsBlockedLoadLibraryRequest(LPCWSTR requestedPath) {
+bool IsBlockedLoadLibraryRequest(LPCWSTR requestedPath, std::wstring& blockedPath) {
     if (g_isCheckingLoadSignature) {
         return false;
     }
@@ -491,7 +508,7 @@ bool IsBlockedLoadLibraryRequest(LPCWSTR requestedPath) {
     g_isCheckingLoadSignature = true;
     bool shouldBlock = false;
     try {
-        shouldBlock = ShouldBlockLoadLibrary(requestedPath);
+        shouldBlock = ShouldBlockLoadLibrary(requestedPath, blockedPath);
     } catch (...) {
         // Signature inspection is fail-open so unrelated DLL loads are not
         // broken by path, trust-provider, or allocation failures.
@@ -500,7 +517,7 @@ bool IsBlockedLoadLibraryRequest(LPCWSTR requestedPath) {
     return shouldBlock;
 }
 
-bool IsBlockedLoadLibraryRequest(LPCSTR requestedPath) {
+bool IsBlockedLoadLibraryRequest(LPCSTR requestedPath, std::wstring& blockedPath) {
     if (g_isCheckingLoadSignature) {
         return false;
     }
@@ -509,7 +526,7 @@ bool IsBlockedLoadLibraryRequest(LPCSTR requestedPath) {
     bool shouldBlock = false;
     try {
         std::wstring widePath = ConvertAnsiToWchar(requestedPath);
-        shouldBlock = !widePath.empty() && ShouldBlockLoadLibrary(widePath.c_str());
+        shouldBlock = !widePath.empty() && ShouldBlockLoadLibrary(widePath.c_str(), blockedPath);
     } catch (...) {
         // Keep the same fail-open behavior as the wide-character hook.
     }
@@ -786,9 +803,9 @@ std::string EncodeImportsList(const std::string& imports) {
     return result;
 }
 
-// Log module info to Minecraft console
-// Format: moduleLoaded <base64_dllPath> <fileHash> <base64_signerName> <base64_imports>
-void LogModuleToMinecraft(const ModuleInfo& info) {
+// Log module info to Minecraft console.
+// Format: <eventName> <base64_dllPath> <fileHash> <base64_signerName> <base64_imports>
+void LogModuleToMinecraft(const ModuleInfo& info, const std::string& eventName = "moduleLoaded") {
     try {
         // Convert to strings and encode
         std::string encodedPath = Base64Encode(ConvertWcharToChar(info.path));
@@ -796,8 +813,7 @@ void LogModuleToMinecraft(const ModuleInfo& info) {
         std::string encodedSigner = Base64Encode(ConvertWcharToChar(info.signerName));
         std::string encodedImports = EncodeImportsList(ConvertWcharToChar(info.importedModules));
 
-        // Format: moduleLoaded <base64_path> <hash> <base64_signer> <base64_imports>
-        std::string formattedMessage = "moduleLoaded " + encodedPath + " " + hash + " " + encodedSigner + " " + encodedImports;
+        std::string formattedMessage = eventName + " " + encodedPath + " " + hash + " " + encodedSigner + " " + encodedImports;
         
         LogToMinecraft(formattedMessage);
     } catch (const std::exception& e) {
@@ -906,8 +922,29 @@ void HandleLoadedModule(HMODULE hModule) {
     }).detach();
 }
 
+void HandleBlockedModule(const std::wstring& blockedPath) {
+    try {
+        std::thread([path = blockedPath]() {
+            try {
+                ModuleInfo info = AnalyzeModule(path);
+                LogModuleToMinecraft(info, "moduleBlocked");
+            } catch (const std::exception& e) {
+                LogErrorToMinecraft("BlockedModuleAnalysisError", std::string(e.what()));
+            } catch (...) {
+                LogErrorToMinecraft("BlockedModuleAnalysisError", "Unknown exception");
+            }
+        }).detach();
+    } catch (const std::exception& e) {
+        LogErrorToMinecraft("BlockedModuleAnalysisError", std::string(e.what()));
+    } catch (...) {
+        LogErrorToMinecraft("BlockedModuleAnalysisError", "Unknown exception");
+    }
+}
+
 HMODULE WINAPI DetourLoadLibraryW(LPCWSTR lpLibFileName) {
-    if (IsBlockedLoadLibraryRequest(lpLibFileName)) {
+    std::wstring blockedPath;
+    if (IsBlockedLoadLibraryRequest(lpLibFileName, blockedPath)) {
+        HandleBlockedModule(blockedPath);
         SetLastError(ERROR_ACCESS_DENIED);
         return nullptr;
     }
@@ -918,7 +955,9 @@ HMODULE WINAPI DetourLoadLibraryW(LPCWSTR lpLibFileName) {
 }
 
 HMODULE WINAPI DetourLoadLibraryA(LPCSTR lpLibFileName) {
-    if (IsBlockedLoadLibraryRequest(lpLibFileName)) {
+    std::wstring blockedPath;
+    if (IsBlockedLoadLibraryRequest(lpLibFileName, blockedPath)) {
+        HandleBlockedModule(blockedPath);
         SetLastError(ERROR_ACCESS_DENIED);
         return nullptr;
     }
@@ -929,7 +968,9 @@ HMODULE WINAPI DetourLoadLibraryA(LPCSTR lpLibFileName) {
 }
 
 HMODULE WINAPI DetourLoadLibraryExW(LPCWSTR lpLibFileName, HANDLE hFile, DWORD dwFlags) {
-    if (IsBlockedLoadLibraryRequest(lpLibFileName)) {
+    std::wstring blockedPath;
+    if (IsBlockedLoadLibraryRequest(lpLibFileName, blockedPath)) {
+        HandleBlockedModule(blockedPath);
         SetLastError(ERROR_ACCESS_DENIED);
         return nullptr;
     }
@@ -940,7 +981,9 @@ HMODULE WINAPI DetourLoadLibraryExW(LPCWSTR lpLibFileName, HANDLE hFile, DWORD d
 }
 
 HMODULE WINAPI DetourLoadLibraryExA(LPCSTR lpLibFileName, HANDLE hFile, DWORD dwFlags) {
-    if (IsBlockedLoadLibraryRequest(lpLibFileName)) {
+    std::wstring blockedPath;
+    if (IsBlockedLoadLibraryRequest(lpLibFileName, blockedPath)) {
+        HandleBlockedModule(blockedPath);
         SetLastError(ERROR_ACCESS_DENIED);
         return nullptr;
     }
