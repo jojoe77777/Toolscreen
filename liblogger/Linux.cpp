@@ -3,6 +3,8 @@
 #include <jni.h>
 
 #include <atomic>
+#include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <csignal>
 #include <cstring>
@@ -14,6 +16,8 @@
 #include <link.h>
 #include <mqueue.h>
 #include <mutex>
+#include <limits>
+#include <new>
 #include <openssl/sha.h>
 #include <pthread.h>
 #include <sstream>
@@ -51,6 +55,7 @@ using PtrJNI_GetCreatedJavaVMs = jint(JNICALL*)(JavaVM**, jsize, jsize*);
 #define LIBLOGGER_VERSION_STR "1.1.0"
 #endif
 static constexpr std::string_view kLibLoggerVersion = LIBLOGGER_VERSION_STR;
+static constexpr uintmax_t kMaxAnalyzedModuleSize = 512ULL * 1024ULL * 1024ULL;
 
 static std::atomic<bool> g_initializationStarted(false);
 static std::atomic<bool> g_scannerThreadShouldRun(false);
@@ -209,6 +214,9 @@ void LogToMinecraft(const std::string& message) {
 
 	jclass systemClass = env->FindClass("java/lang/System");
 	if (!systemClass) {
+		if (env->ExceptionCheck()) {
+			env->ExceptionClear();
+		}
 		if (needsDetach) {
 			jvm->DetachCurrentThread();
 		}
@@ -217,6 +225,9 @@ void LogToMinecraft(const std::string& message) {
 
 	jfieldID outFieldId = env->GetStaticFieldID(systemClass, "out", "Ljava/io/PrintStream;");
 	if (!outFieldId) {
+		if (env->ExceptionCheck()) {
+			env->ExceptionClear();
+		}
 		env->DeleteLocalRef(systemClass);
 		if (needsDetach) {
 			jvm->DetachCurrentThread();
@@ -226,6 +237,9 @@ void LogToMinecraft(const std::string& message) {
 
 	jobject printStream = env->GetStaticObjectField(systemClass, outFieldId);
 	if (!printStream) {
+		if (env->ExceptionCheck()) {
+			env->ExceptionClear();
+		}
 		env->DeleteLocalRef(systemClass);
 		if (needsDetach) {
 			jvm->DetachCurrentThread();
@@ -235,6 +249,9 @@ void LogToMinecraft(const std::string& message) {
 
 	jclass printStreamClass = env->GetObjectClass(printStream);
 	if (!printStreamClass) {
+		if (env->ExceptionCheck()) {
+			env->ExceptionClear();
+		}
 		env->DeleteLocalRef(printStream);
 		env->DeleteLocalRef(systemClass);
 		if (needsDetach) {
@@ -245,6 +262,9 @@ void LogToMinecraft(const std::string& message) {
 
 	jmethodID printlnMethod = env->GetMethodID(printStreamClass, "println", "(Ljava/lang/String;)V");
 	if (!printlnMethod) {
+		if (env->ExceptionCheck()) {
+			env->ExceptionClear();
+		}
 		env->DeleteLocalRef(printStreamClass);
 		env->DeleteLocalRef(printStream);
 		env->DeleteLocalRef(systemClass);
@@ -296,18 +316,29 @@ static std::string CalculateSHA512(const std::string& filePath) {
 	}
 
 	SHA512_CTX sha512;
-	SHA512_Init(&sha512);
+	if (SHA512_Init(&sha512) != 1) {
+		return "[Hash Failed: Initialize]";
+	}
 
 	char buffer[4096];
 	while (file.read(buffer, sizeof(buffer))) {
-		SHA512_Update(&sha512, buffer, file.gcount());
+		if (SHA512_Update(&sha512, buffer, sizeof(buffer)) != 1) {
+			return "[Hash Failed: Hashing Data]";
+		}
 	}
 	if (file.gcount() > 0) {
-		SHA512_Update(&sha512, buffer, file.gcount());
+		if (SHA512_Update(&sha512, buffer, static_cast<size_t>(file.gcount())) != 1) {
+			return "[Hash Failed: Hashing Data]";
+		}
+	}
+	if (!file.eof()) {
+		return "[Hash Failed: File Read]";
 	}
 
 	unsigned char hash[SHA512_DIGEST_LENGTH];
-	SHA512_Final(hash, &sha512);
+	if (SHA512_Final(hash, &sha512) != 1) {
+		return "[Hash Failed: Finish Hash]";
+	}
 
 	static constexpr char kHexDigits[] = "0123456789abcdef";
 	std::string result;
@@ -331,13 +362,13 @@ static std::string GetImportedModules(const std::string& filePath) {
 	using Elf_Phdr_Local = Elf64_Phdr;
 	using Elf_Dyn_Local = Elf64_Dyn;
 	using Elf_Addr_Local = Elf64_Addr;
-	using Elf_Off_Local = Elf64_Off;
+	static constexpr unsigned char kExpectedElfClass = ELFCLASS64;
 #elif defined(__i386__) || defined(__arm__)
 	using Elf_Ehdr_Local = Elf32_Ehdr;
 	using Elf_Phdr_Local = Elf32_Phdr;
 	using Elf_Dyn_Local = Elf32_Dyn;
 	using Elf_Addr_Local = Elf32_Addr;
-	using Elf_Off_Local = Elf32_Off;
+	static constexpr unsigned char kExpectedElfClass = ELFCLASS32;
 #else
 #error "Unsupported architecture for ELF parsing"
 #endif
@@ -348,75 +379,131 @@ static std::string GetImportedModules(const std::string& filePath) {
 	}
 
 	file.seekg(0, std::ios::end);
-	if (file.tellg() < static_cast<std::streamoff>(sizeof(Elf_Ehdr_Local))) {
+	const std::streamoff fileSize = file.tellg();
+	if (fileSize < static_cast<std::streamoff>(sizeof(Elf_Ehdr_Local)) ||
+		static_cast<uintmax_t>(fileSize) > kMaxAnalyzedModuleSize ||
+		static_cast<uintmax_t>(fileSize) > std::numeric_limits<size_t>::max()) {
 		return "";
 	}
 
 	file.seekg(0, std::ios::beg);
-	Elf_Ehdr_Local elfHeader;
-	file.read(reinterpret_cast<char*>(&elfHeader), sizeof(elfHeader));
-	if (file.gcount() != static_cast<std::streamsize>(sizeof(elfHeader)) || std::memcmp(elfHeader.e_ident, ELFMAG, SELFMAG) != 0) {
+	std::vector<unsigned char> fileData(static_cast<size_t>(fileSize));
+	if (!file.read(reinterpret_cast<char*>(fileData.data()), fileSize)) {
 		return "";
 	}
 
-	if (elfHeader.e_phoff == 0 || elfHeader.e_phnum == 0) {
+	Elf_Ehdr_Local elfHeader = {};
+	std::memcpy(&elfHeader, fileData.data(), sizeof(elfHeader));
+	if (std::memcmp(elfHeader.e_ident, ELFMAG, SELFMAG) != 0 ||
+		elfHeader.e_ident[EI_CLASS] != kExpectedElfClass ||
+		elfHeader.e_ident[EI_DATA] != ELFDATA2LSB ||
+		elfHeader.e_phoff == 0 || elfHeader.e_phnum == 0 ||
+		elfHeader.e_phentsize != sizeof(Elf_Phdr_Local)) {
 		return "";
 	}
 
-	file.seekg(elfHeader.e_phoff, std::ios::beg);
+	const uint64_t programHeaderOffset = elfHeader.e_phoff;
+	const uint64_t programHeaderBytes =
+		static_cast<uint64_t>(elfHeader.e_phnum) * sizeof(Elf_Phdr_Local);
+	if (programHeaderOffset > fileData.size() ||
+		programHeaderBytes > fileData.size() - static_cast<size_t>(programHeaderOffset)) {
+		return "";
+	}
+
 	std::vector<Elf_Phdr_Local> programHeaders(elfHeader.e_phnum);
-	file.read(reinterpret_cast<char*>(programHeaders.data()), elfHeader.e_phentsize * elfHeader.e_phnum);
+	std::memcpy(
+		programHeaders.data(),
+		fileData.data() + static_cast<size_t>(programHeaderOffset),
+		static_cast<size_t>(programHeaderBytes));
 
-	const Elf_Phdr_Local* dynamicHeader = nullptr;
-	for (const auto& header : programHeaders) {
+	Elf_Phdr_Local dynamicHeader = {};
+	bool foundDynamicHeader = false;
+	for (const Elf_Phdr_Local& header : programHeaders) {
 		if (header.p_type == PT_DYNAMIC) {
-			dynamicHeader = &header;
+			dynamicHeader = header;
+			foundDynamicHeader = true;
 			break;
 		}
 	}
-	if (!dynamicHeader) {
+	if (!foundDynamicHeader || dynamicHeader.p_filesz < sizeof(Elf_Dyn_Local) ||
+		dynamicHeader.p_offset > fileData.size() ||
+		dynamicHeader.p_filesz > fileData.size() - static_cast<size_t>(dynamicHeader.p_offset)) {
 		return "";
 	}
 
-	file.seekg(dynamicHeader->p_offset, std::ios::beg);
-	std::vector<Elf_Dyn_Local> dynamicEntries(dynamicHeader->p_filesz / sizeof(Elf_Dyn_Local));
-	file.read(reinterpret_cast<char*>(dynamicEntries.data()), dynamicHeader->p_filesz);
-
 	Elf_Addr_Local stringTableAddress = 0;
-	for (const auto& entry : dynamicEntries) {
+	size_t stringTableSize = 0;
+	std::vector<size_t> neededNameOffsets;
+	const size_t dynamicEntryCount = static_cast<size_t>(dynamicHeader.p_filesz / sizeof(Elf_Dyn_Local));
+	for (size_t index = 0; index < dynamicEntryCount; ++index) {
+		Elf_Dyn_Local entry = {};
+		std::memcpy(
+			&entry,
+			fileData.data() + static_cast<size_t>(dynamicHeader.p_offset) + index * sizeof(entry),
+			sizeof(entry));
+		if (entry.d_tag == DT_NULL) {
+			break;
+		}
 		if (entry.d_tag == DT_STRTAB) {
 			stringTableAddress = entry.d_un.d_ptr;
-			break;
+		} else if (entry.d_tag == DT_STRSZ) {
+			stringTableSize = static_cast<size_t>(entry.d_un.d_val);
+		} else if (entry.d_tag == DT_NEEDED) {
+			neededNameOffsets.push_back(static_cast<size_t>(entry.d_un.d_val));
 		}
 	}
 	if (stringTableAddress == 0) {
 		return "";
 	}
 
-	Elf_Off_Local stringTableOffset = 0;
-	for (const auto& header : programHeaders) {
-		if (header.p_type == PT_LOAD && stringTableAddress >= header.p_vaddr && stringTableAddress < header.p_vaddr + header.p_memsz) {
-			stringTableOffset = (stringTableAddress - header.p_vaddr) + header.p_offset;
-			break;
+	size_t stringTableOffset = 0;
+	size_t stringBytesAvailable = 0;
+	bool foundStringTable = false;
+	for (const Elf_Phdr_Local& header : programHeaders) {
+		if (header.p_type != PT_LOAD || stringTableAddress < header.p_vaddr) {
+			continue;
 		}
+
+		const uint64_t tableDelta = static_cast<uint64_t>(stringTableAddress - header.p_vaddr);
+		if (tableDelta >= header.p_filesz) {
+			continue;
+		}
+
+		const uint64_t rawOffset = static_cast<uint64_t>(header.p_offset) + tableDelta;
+		if (rawOffset > fileData.size()) {
+			continue;
+		}
+
+		stringTableOffset = static_cast<size_t>(rawOffset);
+		stringBytesAvailable = std::min(
+			fileData.size() - stringTableOffset,
+			static_cast<size_t>(static_cast<uint64_t>(header.p_filesz) - tableDelta));
+		if (stringTableSize != 0) {
+			stringBytesAvailable = std::min(stringBytesAvailable, stringTableSize);
+		}
+		foundStringTable = true;
+		break;
 	}
-	if (stringTableOffset == 0) {
+	if (!foundStringTable) {
 		return "";
 	}
 
 	std::stringstream result;
 	bool firstModule = true;
-	for (const auto& entry : dynamicEntries) {
-		if (entry.d_tag != DT_NEEDED) {
+	for (size_t nameOffset : neededNameOffsets) {
+		if (nameOffset >= stringBytesAvailable) {
 			continue;
 		}
 
-		file.seekg(stringTableOffset + entry.d_un.d_val, std::ios::beg);
-		std::string libraryName;
-		std::getline(file, libraryName, '\0');
-		if (libraryName.empty()) {
+		const char* nameStart = reinterpret_cast<const char*>(fileData.data() + stringTableOffset + nameOffset);
+		const size_t maximumNameLength = stringBytesAvailable - nameOffset;
+		const void* terminator = std::memchr(nameStart, '\0', maximumNameLength);
+		if (!terminator || terminator == nameStart) {
 			continue;
 		}
+		const std::string libraryName(
+			nameStart,
+			static_cast<const char*>(terminator) - nameStart);
 
 		if (!firstModule) {
 			result << ',';
@@ -428,13 +515,13 @@ static std::string GetImportedModules(const std::string& filePath) {
 	return result.str();
 }
 
-static ModuleInfo AnalyzeModule(const std::string& modulePath) {
-	ModuleInfo info;
-	info.path = modulePath;
-	info.hash = CalculateSHA512(modulePath);
-	info.signerName = GetSignerName();
-	info.importedModules = GetImportedModules(modulePath);
-	return info;
+static bool IsValidSha512(const std::string& hash) {
+	return hash.size() == SHA512_DIGEST_LENGTH * 2 &&
+		std::all_of(hash.begin(), hash.end(), [](char character) {
+			return (character >= '0' && character <= '9') ||
+				(character >= 'a' && character <= 'f') ||
+				(character >= 'A' && character <= 'F');
+		});
 }
 
 static std::string EncodeImportsList(const std::string& imports) {
@@ -477,7 +564,7 @@ static void ProcessModulePath(const std::string& modulePath) {
 	}
 
 	const std::string hash = CalculateSHA512(modulePath);
-	{
+	if (IsValidSha512(hash)) {
 		std::lock_guard<std::mutex> lock(g_seenHashesMutex);
 		if (!g_seenHashes.insert(hash).second) {
 			return;
@@ -543,8 +630,13 @@ void ProcessSecurityEventQueue() {
 		return;
 	}
 
-	SecurityEventMessage message = {};
-	while (mq_receive(g_messageQueue, reinterpret_cast<char*>(&message), sizeof(message), nullptr) != -1) {
+	while (true) {
+		SecurityEventMessage message = {};
+		if (mq_receive(g_messageQueue, reinterpret_cast<char*>(&message), sizeof(message), nullptr) == -1) {
+			break;
+		}
+		message.eventName[sizeof(message.eventName) - 1] = '\0';
+		message.eventData[sizeof(message.eventData) - 1] = '\0';
 		LogToMinecraft(std::string("securityEvent ") + message.eventName + " " + message.eventData);
 	}
 }
@@ -557,9 +649,11 @@ static void RecordBaselineModules() {
 		return 0;
 	}, &baselineModules);
 
-	std::lock_guard<std::mutex> lock(g_knownModulesMutex);
-	for (const auto& modulePath : baselineModules) {
-		g_knownModules.insert(modulePath);
+	{
+		std::lock_guard<std::mutex> lock(g_knownModulesMutex);
+		for (const auto& modulePath : baselineModules) {
+			g_knownModules.insert(modulePath);
+		}
 	}
 
 	for (const auto& modulePath : baselineModules) {
@@ -568,7 +662,7 @@ static void RecordBaselineModules() {
 }
 
 void WatchdogMain(pid_t parentPid) {
-	const mqd_t childQueue = mq_open(g_messageQueueName.c_str(), O_WRONLY);
+	const mqd_t childQueue = mq_open(g_messageQueueName.c_str(), O_WRONLY | O_NONBLOCK);
 	if (childQueue == static_cast<mqd_t>(-1)) {
 		_exit(1);
 	}
@@ -592,7 +686,12 @@ void WatchdogMain(pid_t parentPid) {
 		std::string line;
 		while (std::getline(statusFile, line)) {
 			if (line.rfind("TracerPid:", 0) == 0) {
-				currentTracerPid = std::stoi(line.substr(line.find('\t') + 1));
+				std::stringstream tracerPidStream(line.substr(std::strlen("TracerPid:")));
+				long parsedTracerPid = 0;
+				if (tracerPidStream >> parsedTracerPid && parsedTracerPid > 0 &&
+					parsedTracerPid <= std::numeric_limits<pid_t>::max()) {
+					currentTracerPid = static_cast<pid_t>(parsedTracerPid);
+				}
 				break;
 			}
 		}
@@ -619,8 +718,29 @@ void WatchdogMain(pid_t parentPid) {
 	_exit(0);
 }
 
+void CleanupSecurityMonitoringIpc() {
+	if (g_messageQueue != static_cast<mqd_t>(-1)) {
+		mq_close(g_messageQueue);
+		g_messageQueue = static_cast<mqd_t>(-1);
+	}
+	if (!g_messageQueueName.empty()) {
+		mq_unlink(g_messageQueueName.c_str());
+		g_messageQueueName.clear();
+	}
+
+	if (g_heartbeatData) {
+		g_heartbeatData->~HeartbeatData();
+		shmdt(g_heartbeatData);
+		g_heartbeatData = nullptr;
+	}
+	if (g_shmId != -1) {
+		shmctl(g_shmId, IPC_RMID, nullptr);
+		g_shmId = -1;
+	}
+}
+
 bool InitializeSecurityMonitoring() {
-	g_shmId = shmget(IPC_PRIVATE, sizeof(HeartbeatData), IPC_CREAT | 0666);
+	g_shmId = shmget(IPC_PRIVATE, sizeof(HeartbeatData), IPC_CREAT | 0600);
 	if (g_shmId < 0) {
 		return false;
 	}
@@ -628,10 +748,11 @@ bool InitializeSecurityMonitoring() {
 	g_heartbeatData = reinterpret_cast<HeartbeatData*>(shmat(g_shmId, nullptr, 0));
 	if (g_heartbeatData == reinterpret_cast<void*>(-1)) {
 		g_heartbeatData = nullptr;
+		shmctl(g_shmId, IPC_RMID, nullptr);
+		g_shmId = -1;
 		return false;
 	}
-	g_heartbeatData->parentHeartbeat = 0;
-	g_heartbeatData->watchdogHeartbeat = 0;
+	new (g_heartbeatData) HeartbeatData{};
 
 	g_messageQueueName = "/mc_security_mq_" + std::to_string(getpid());
 	mq_unlink(g_messageQueueName.c_str());
@@ -641,18 +762,22 @@ bool InitializeSecurityMonitoring() {
 	attributes.mq_maxmsg = 10;
 	attributes.mq_msgsize = sizeof(SecurityEventMessage);
 	attributes.mq_curmsgs = 0;
-	g_messageQueue = mq_open(g_messageQueueName.c_str(), O_CREAT | O_RDONLY | O_NONBLOCK, 0644, &attributes);
+	g_messageQueue = mq_open(g_messageQueueName.c_str(), O_CREAT | O_RDONLY | O_NONBLOCK, 0600, &attributes);
 	if (g_messageQueue == static_cast<mqd_t>(-1)) {
+		CleanupSecurityMonitoringIpc();
 		return false;
 	}
 
 	g_watchdogPid = fork();
 	if (g_watchdogPid == 0) {
+		mq_close(g_messageQueue);
+		g_messageQueue = static_cast<mqd_t>(-1);
 		WatchdogMain(getppid());
 	}
 
 	if (g_watchdogPid < 0) {
 		g_watchdogPid = -1;
+		CleanupSecurityMonitoringIpc();
 		return false;
 	}
 
@@ -767,34 +892,24 @@ void EnsureInitialized() {
 void Cleanup() {
 	g_scannerThreadShouldRun.store(false);
 
-	if (g_watchdogPid > 0) {
-		kill(g_watchdogPid, SIGTERM);
-		waitpid(g_watchdogPid, nullptr, 0);
-		g_watchdogPid = -1;
-	}
-
 	if (g_initializationThread.joinable() && g_initializationThread.get_id() != std::this_thread::get_id()) {
 		g_initializationThread.join();
 	}
+
+	// Initialization owns creation of the watchdog. Join it before terminating
+	// the child so a concurrent shutdown cannot miss a newly forked process.
+	if (g_watchdogPid > 0) {
+		kill(g_watchdogPid, SIGTERM);
+		while (waitpid(g_watchdogPid, nullptr, 0) == -1 && errno == EINTR) {
+		}
+		g_watchdogPid = -1;
+	}
+
 	if (g_scannerThread.joinable() && g_scannerThread.get_id() != std::this_thread::get_id()) {
 		g_scannerThread.join();
 	}
 
-	if (g_messageQueue != static_cast<mqd_t>(-1)) {
-		mq_close(g_messageQueue);
-		mq_unlink(g_messageQueueName.c_str());
-		g_messageQueue = static_cast<mqd_t>(-1);
-	}
-	g_messageQueueName.clear();
-
-	if (g_heartbeatData) {
-		shmdt(g_heartbeatData);
-		g_heartbeatData = nullptr;
-	}
-	if (g_shmId != -1) {
-		shmctl(g_shmId, IPC_RMID, nullptr);
-		g_shmId = -1;
-	}
+	CleanupSecurityMonitoringIpc();
 
 	{
 		std::lock_guard<std::mutex> lock(g_knownModulesMutex);

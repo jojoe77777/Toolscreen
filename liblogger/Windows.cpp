@@ -1,3 +1,6 @@
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include "MinHook.h"
 #include "base64.h"
 #include <jni.h>
@@ -18,8 +21,12 @@
 #include <thread>
 #include <mutex>
 #include <atomic>
+#include <algorithm>
 #include <condition_variable>
+#include <cstring>
 #include <deque>
+#include <limits>
+#include <type_traits>
 #include <unordered_set>
 #include <mscat.h>
 
@@ -148,13 +155,18 @@ JNIEnv* AttachThreadWithName(const std::string& threadName) {
                         jmethodID setNameMethod = env->GetMethodID(threadClass, "setName", "(Ljava/lang/String;)V");
                         if (setNameMethod) {
                             jstring jThreadName = env->NewStringUTF(threadName.c_str());
-                            env->CallVoidMethod(currentThread, setNameMethod, jThreadName);
-                            env->DeleteLocalRef(jThreadName);
+                            if (jThreadName) {
+                                env->CallVoidMethod(currentThread, setNameMethod, jThreadName);
+                                env->DeleteLocalRef(jThreadName);
+                            }
                         }
                         env->DeleteLocalRef(currentThread);
                     }
                 }
                 env->DeleteLocalRef(threadClass);
+            }
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
             }
             return env;
         }
@@ -175,8 +187,11 @@ std::wstring ConvertCharToWchar(const char* str) {
     int size_needed = MultiByteToWideChar(CP_UTF8, 0, str, -1, nullptr, 0);
     if (size_needed <= 1) return L"";
     
-    std::wstring wstrTo(size_needed - 1, 0); // size_needed includes null terminator
-    MultiByteToWideChar(CP_UTF8, 0, str, -1, &wstrTo[0], size_needed);
+    std::wstring wstrTo(static_cast<size_t>(size_needed), L'\0');
+    if (MultiByteToWideChar(CP_UTF8, 0, str, -1, wstrTo.data(), size_needed) == 0) {
+        return L"";
+    }
+    wstrTo.resize(static_cast<size_t>(size_needed - 1));
     return wstrTo;
 }
 
@@ -186,8 +201,11 @@ std::string ConvertWcharToChar(const std::wstring& wstr) {
     int size_needed = WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), -1, nullptr, 0, nullptr, nullptr);
     if (size_needed <= 1) return "";
     
-    std::string strTo(size_needed - 1, 0); // size_needed includes null terminator
-    WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), -1, &strTo[0], size_needed, nullptr, nullptr);
+    std::string strTo(static_cast<size_t>(size_needed), '\0');
+    if (WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), -1, strTo.data(), size_needed, nullptr, nullptr) == 0) {
+        return "";
+    }
+    strTo.resize(static_cast<size_t>(size_needed - 1));
     return strTo;
 }
 
@@ -266,7 +284,13 @@ std::wstring CalculateSHA512(LPCWSTR filePath) {
 
     BYTE buffer[8192]; // Increased buffer size for better performance
     DWORD bytesRead = 0;
-    while (ReadFile(hFile.get(), buffer, sizeof(buffer), &bytesRead, nullptr) && bytesRead > 0) {
+    while (true) {
+        if (!ReadFile(hFile.get(), buffer, sizeof(buffer), &bytesRead, nullptr)) {
+            return L"[Hash Failed: File Read]";
+        }
+        if (bytesRead == 0) {
+            break;
+        }
         if (!BCRYPT_SUCCESS(BCryptHashData(hHash.get(), buffer, bytesRead, 0))) {
             return L"[Hash Failed: Hashing Data]";
         }
@@ -307,7 +331,10 @@ std::wstring GetSignerName(LPCWSTR filePath) {
         for (DWORD signerIndex = 0; signerIndex < pProvData->csSigners; ++signerIndex) {
             CRYPT_PROVIDER_SGNR* pSgnr = WTHelperGetProvSignerFromChain(pProvData, signerIndex, FALSE, 0);
             if (!pSgnr || !pSgnr->pChainContext || pSgnr->pChainContext->cChain == 0 ||
-                pSgnr->pChainContext->rgpChain[0]->cElement == 0) {
+                !pSgnr->pChainContext->rgpChain || !pSgnr->pChainContext->rgpChain[0] ||
+                pSgnr->pChainContext->rgpChain[0]->cElement == 0 ||
+                !pSgnr->pChainContext->rgpChain[0]->rgpElement ||
+                !pSgnr->pChainContext->rgpChain[0]->rgpElement[0]) {
                 continue;
             }
 
@@ -316,12 +343,28 @@ std::wstring GetSignerName(LPCWSTR filePath) {
                 continue;
             }
 
-            WCHAR szName[256];
-            if (CertGetNameStringW(pCertContext, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, nullptr, szName, 256) > 1) {
+            DWORD nameLength = CertGetNameStringW(
+                pCertContext,
+                CERT_NAME_SIMPLE_DISPLAY_TYPE,
+                0,
+                nullptr,
+                nullptr,
+                0);
+            if (nameLength > 1) {
+                std::vector<wchar_t> nameBuffer(nameLength);
+                if (CertGetNameStringW(
+                        pCertContext,
+                        CERT_NAME_SIMPLE_DISPLAY_TYPE,
+                        0,
+                        nullptr,
+                        nameBuffer.data(),
+                        nameLength) <= 1) {
+                    continue;
+                }
                 if (!signerNames.empty()) {
                     signerNames += L"; ";
                 }
-                signerNames += szName;
+                signerNames += nameBuffer.data();
                 if (isCatalog) {
                     signerNames += L" (Catalog)";
                 }
@@ -339,30 +382,73 @@ std::wstring GetSignerName(LPCWSTR filePath) {
         WinVerifyTrust(nullptr, &policyGUID, &wtd);
     };
 
-    // Try direct signature first
+    auto isNoSignatureStatus = [](LONG status) {
+        return status == TRUST_E_NOSIGNATURE ||
+            status == TRUST_E_SUBJECT_FORM_UNKNOWN ||
+            status == TRUST_E_PROVIDER_UNKNOWN;
+    };
+
+    auto initializeFileTrustData = [](WINTRUST_DATA& trustData, WINTRUST_FILE_INFO& trustFileInfo) {
+        trustData = {};
+        trustData.cbStruct = sizeof(WINTRUST_DATA);
+        trustData.dwUIChoice = WTD_UI_NONE;
+        trustData.fdwRevocationChecks = WTD_REVOKE_NONE;
+        trustData.dwUnionChoice = WTD_CHOICE_FILE;
+        trustData.pFile = &trustFileInfo;
+        trustData.dwStateAction = WTD_STATEACTION_VERIFY;
+    };
+
+    // Verify the primary embedded signature and discover any secondary
+    // signatures. Each secondary signature is then verified independently so
+    // vendor matching cannot be bypassed with a dual-signed file.
     WINTRUST_FILE_INFO fileInfo = { sizeof(WINTRUST_FILE_INFO), filePath };
+    WINTRUST_SIGNATURE_SETTINGS signatureSettings = {};
+    signatureSettings.cbStruct = sizeof(signatureSettings);
+    signatureSettings.dwFlags = WSS_GET_SECONDARY_SIG_COUNT | WSS_VERIFY_SPECIFIC;
+    signatureSettings.dwIndex = 0;
+
     WINTRUST_DATA winTrustData = {};
-    winTrustData.cbStruct = sizeof(WINTRUST_DATA);
-    winTrustData.dwUIChoice = WTD_UI_NONE;
-    winTrustData.fdwRevocationChecks = WTD_REVOKE_NONE;
-    winTrustData.dwUnionChoice = WTD_CHOICE_FILE;
-    winTrustData.pFile = &fileInfo;
-    winTrustData.dwStateAction = WTD_STATEACTION_VERIFY;
+    initializeFileTrustData(winTrustData, fileInfo);
+    winTrustData.pSignatureSettings = &signatureSettings;
 
     lStatus = WinVerifyTrust(nullptr, &policyGUID, &winTrustData);
+    const DWORD secondarySignatureCount = signatureSettings.cSecondarySigs;
+    bool foundEmbeddedSignature = !isNoSignatureStatus(lStatus);
+    std::wstring embeddedSignerNames;
 
     if (lStatus == ERROR_SUCCESS) {
-        std::wstring result = extractSignerName(winTrustData, false);
-        cleanupWinTrust(winTrustData);
-        return result;
+        embeddedSignerNames = extractSignerName(winTrustData, false);
+    }
+    cleanupWinTrust(winTrustData);
+
+    for (DWORD signatureIndex = 1; signatureIndex <= secondarySignatureCount; ++signatureIndex) {
+        WINTRUST_SIGNATURE_SETTINGS secondarySettings = {};
+        secondarySettings.cbStruct = sizeof(secondarySettings);
+        secondarySettings.dwIndex = signatureIndex;
+        secondarySettings.dwFlags = WSS_VERIFY_SPECIFIC;
+
+        WINTRUST_DATA secondaryTrustData = {};
+        initializeFileTrustData(secondaryTrustData, fileInfo);
+        secondaryTrustData.pSignatureSettings = &secondarySettings;
+
+        LONG secondaryStatus = WinVerifyTrust(nullptr, &policyGUID, &secondaryTrustData);
+        foundEmbeddedSignature = foundEmbeddedSignature || !isNoSignatureStatus(secondaryStatus);
+        if (secondaryStatus == ERROR_SUCCESS) {
+            std::wstring signerNames = extractSignerName(secondaryTrustData, false);
+            if (!embeddedSignerNames.empty() && !signerNames.empty()) {
+                embeddedSignerNames += L"; ";
+            }
+            embeddedSignerNames += signerNames;
+        }
+        cleanupWinTrust(secondaryTrustData);
     }
 
-    if (lStatus != TRUST_E_NOSIGNATURE) {
-        cleanupWinTrust(winTrustData);
+    if (!embeddedSignerNames.empty()) {
+        return embeddedSignerNames;
+    }
+    if (foundEmbeddedSignature) {
         return L"[Invalid Signature]";
     }
-
-    cleanupWinTrust(winTrustData);
 
     // Try catalog signature
     HCATADMIN hCatAdmin = nullptr;
@@ -376,8 +462,13 @@ std::wstring GetSignerName(LPCWSTR filePath) {
         return L"[Unsigned]";
     }
 
-    std::vector<BYTE> hash(1024);
-    DWORD hashSize = static_cast<DWORD>(hash.size());
+    DWORD hashSize = 0;
+    if (!CryptCATAdminCalcHashFromFileHandle2(hCatAdmin, hFile.get(), &hashSize, nullptr, 0) || hashSize == 0) {
+        CryptCATAdminReleaseContext(hCatAdmin, 0);
+        return L"[Unsigned]";
+    }
+
+    std::vector<BYTE> hash(hashSize);
     if (!CryptCATAdminCalcHashFromFileHandle2(hCatAdmin, hFile.get(), &hashSize, hash.data(), 0)) {
         CryptCATAdminReleaseContext(hCatAdmin, 0);
         return L"[Unsigned]";
@@ -397,14 +488,32 @@ std::wstring GetSignerName(LPCWSTR filePath) {
         return L"[Unsigned]";
     }
 
-    // Verify catalog signature
-    WINTRUST_FILE_INFO catFileInfo = { sizeof(WINTRUST_FILE_INFO), catInfo.wszCatalogFile };
+    static constexpr wchar_t kHexDigits[] = L"0123456789ABCDEF";
+    std::wstring memberTag;
+    memberTag.reserve(hash.size() * 2);
+    for (BYTE byte : hash) {
+        memberTag.push_back(kHexDigits[byte >> 4]);
+        memberTag.push_back(kHexDigits[byte & 0x0F]);
+    }
+
+    // Verify the file's membership in the catalog as well as the catalog's
+    // signature. Verifying the catalog file alone does not authenticate this
+    // particular module.
+    WINTRUST_CATALOG_INFO catalogTrustInfo = {};
+    catalogTrustInfo.cbStruct = sizeof(catalogTrustInfo);
+    catalogTrustInfo.pcwszCatalogFilePath = catInfo.wszCatalogFile;
+    catalogTrustInfo.pcwszMemberTag = memberTag.c_str();
+    catalogTrustInfo.pcwszMemberFilePath = filePath;
+    catalogTrustInfo.hMemberFile = hFile.get();
+    catalogTrustInfo.pbCalculatedFileHash = hash.data();
+    catalogTrustInfo.cbCalculatedFileHash = hashSize;
+
     WINTRUST_DATA wtdCat = {};
     wtdCat.cbStruct = sizeof(wtdCat);
     wtdCat.dwUIChoice = WTD_UI_NONE;
     wtdCat.fdwRevocationChecks = WTD_REVOKE_NONE;
-    wtdCat.dwUnionChoice = WTD_CHOICE_FILE;
-    wtdCat.pFile = &catFileInfo;
+    wtdCat.dwUnionChoice = WTD_CHOICE_CATALOG;
+    wtdCat.pCatalog = &catalogTrustInfo;
     wtdCat.dwStateAction = WTD_STATEACTION_VERIFY;
 
     lStatus = WinVerifyTrust(nullptr, &policyGUID, &wtdCat);
@@ -421,13 +530,15 @@ std::wstring GetSignerName(LPCWSTR filePath) {
 }
 
 bool ContainsOrdinalIgnoreCase(const std::wstring& value, const wchar_t* needle) {
-    const int needleLength = static_cast<int>(wcslen(needle));
-    if (needleLength == 0 || value.size() < static_cast<size_t>(needleLength)) {
+    const size_t needleLength = wcslen(needle);
+    if (needleLength == 0 || value.size() < needleLength ||
+        needleLength > static_cast<size_t>(std::numeric_limits<int>::max())) {
         return false;
     }
 
-    for (size_t offset = 0; offset + needleLength <= value.size(); ++offset) {
-        if (CompareStringOrdinal(value.data() + offset, needleLength, needle, needleLength, TRUE) == CSTR_EQUAL) {
+    const int compareLength = static_cast<int>(needleLength);
+    for (size_t offset = 0; offset <= value.size() - needleLength; ++offset) {
+        if (CompareStringOrdinal(value.data() + offset, compareLength, needle, compareLength, TRUE) == CSTR_EQUAL) {
             return true;
         }
     }
@@ -541,12 +652,15 @@ std::vector<char> ReadPeFile(LPCWSTR filePath) {
     }
 
     std::streamsize fileSize = file.tellg();
-    if (fileSize == -1) {
+    if (fileSize < 0) {
         throw std::runtime_error("PE Read Error: Failed to get file size");
     }
     file.seekg(0, std::ios::beg);
     if (fileSize == 0) {
         throw std::runtime_error("PE Read Error: File is empty");
+    }
+    if (static_cast<unsigned long long>(fileSize) > std::numeric_limits<DWORD>::max()) {
+        throw std::runtime_error("PE Read Error: File is too large");
     }
 
     std::vector<char> buffer;
@@ -566,91 +680,261 @@ std::vector<char> ReadPeFile(LPCWSTR filePath) {
         throw std::runtime_error("PE Format Error: File too small for DOS header");
     }
 
-    PIMAGE_DOS_HEADER dosHeader = reinterpret_cast<PIMAGE_DOS_HEADER>(buffer.data());
-    if (dosHeader->e_magic != IMAGE_DOS_SIGNATURE) {
+    IMAGE_DOS_HEADER dosHeader = {};
+    std::memcpy(&dosHeader, buffer.data(), sizeof(dosHeader));
+    if (dosHeader.e_magic != IMAGE_DOS_SIGNATURE) {
         throw std::runtime_error("PE Format Error: DOS signature mismatch (not an 'MZ' file)");
     }
 
-    if (static_cast<size_t>(fileSize) < dosHeader->e_lfanew + sizeof(IMAGE_NT_HEADERS)) {
+    if (dosHeader.e_lfanew < 0) {
         throw std::runtime_error("PE Format Error: Invalid NT header offset or file too small");
     }
 
-    PIMAGE_NT_HEADERS ntHeader = reinterpret_cast<PIMAGE_NT_HEADERS>(buffer.data() + dosHeader->e_lfanew);
-    if (ntHeader->Signature != IMAGE_NT_SIGNATURE) {
+    const size_t ntOffset = static_cast<size_t>(dosHeader.e_lfanew);
+    if (ntOffset > buffer.size() ||
+        sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER) > buffer.size() - ntOffset) {
+        throw std::runtime_error("PE Format Error: Invalid NT header offset or file too small");
+    }
+
+    DWORD signature = 0;
+    std::memcpy(&signature, buffer.data() + ntOffset, sizeof(signature));
+    if (signature != IMAGE_NT_SIGNATURE) {
         throw std::runtime_error("PE Format Error: Invalid PE signature");
     }
 
     return buffer;
 }
 
-DWORD RvaToOffset(PIMAGE_NT_HEADERS ntHeader, DWORD rva, DWORD fileSize) {
-    PIMAGE_SECTION_HEADER sectionHeader = IMAGE_FIRST_SECTION(ntHeader);
-    for (WORD i = 0; i < ntHeader->FileHeader.NumberOfSections; i++, sectionHeader++) {
-        if (rva >= sectionHeader->VirtualAddress && rva < sectionHeader->VirtualAddress + sectionHeader->Misc.VirtualSize) {
-            DWORD offset = (rva - sectionHeader->VirtualAddress) + sectionHeader->PointerToRawData;
-            return (offset < fileSize) ? offset : 0;
-        }
+bool HasBytes(const std::vector<char>& buffer, size_t offset, size_t byteCount) {
+    return offset <= buffer.size() && byteCount <= buffer.size() - offset;
+}
+
+template <typename T>
+bool ReadPeStructure(const std::vector<char>& buffer, size_t offset, T& value) {
+    if (!HasBytes(buffer, offset, sizeof(T))) {
+        return false;
     }
-    return 0;
+    std::memcpy(&value, buffer.data() + offset, sizeof(T));
+    return true;
+}
+
+bool RvaToOffset(
+    const std::vector<char>& buffer,
+    size_t sectionTableOffset,
+    WORD numberOfSections,
+    DWORD sizeOfHeaders,
+    DWORD rva,
+    size_t requiredBytes,
+    size_t& fileOffset,
+    size_t& availableBytes) {
+    if (rva < sizeOfHeaders) {
+        const size_t headerOffset = static_cast<size_t>(rva);
+        if (!HasBytes(buffer, headerOffset, requiredBytes)) {
+            return false;
+        }
+        fileOffset = headerOffset;
+        availableBytes = std::min(buffer.size() - headerOffset, static_cast<size_t>(sizeOfHeaders - rva));
+        return requiredBytes <= availableBytes;
+    }
+
+    for (WORD sectionIndex = 0; sectionIndex < numberOfSections; ++sectionIndex) {
+        IMAGE_SECTION_HEADER section = {};
+        const size_t sectionOffset = sectionTableOffset + static_cast<size_t>(sectionIndex) * sizeof(section);
+        if (!ReadPeStructure(buffer, sectionOffset, section)) {
+            return false;
+        }
+
+        const uint64_t sectionStart = section.VirtualAddress;
+        const uint64_t sectionSpan = std::max(section.Misc.VirtualSize, section.SizeOfRawData);
+        const uint64_t sectionEnd = sectionStart + sectionSpan;
+        if (rva < sectionStart || static_cast<uint64_t>(rva) >= sectionEnd) {
+            continue;
+        }
+
+        const uint64_t sectionDelta = static_cast<uint64_t>(rva) - sectionStart;
+        if (sectionDelta >= section.SizeOfRawData) {
+            return false;
+        }
+
+        const uint64_t rawOffset = static_cast<uint64_t>(section.PointerToRawData) + sectionDelta;
+        const uint64_t rawAvailable = static_cast<uint64_t>(section.SizeOfRawData) - sectionDelta;
+        if (rawOffset > buffer.size()) {
+            return false;
+        }
+
+        fileOffset = static_cast<size_t>(rawOffset);
+        availableBytes = std::min(buffer.size() - fileOffset, static_cast<size_t>(rawAvailable));
+        return requiredBytes <= availableBytes;
+    }
+    return false;
 }
 
 std::wstring GetImportedModules(const std::vector<char>& buffer) {
     try {
-        PIMAGE_NT_HEADERS ntHeader = (PIMAGE_NT_HEADERS)(buffer.data() + ((PIMAGE_DOS_HEADER)buffer.data())->e_lfanew);
-        PIMAGE_DATA_DIRECTORY importDataDir;
-        if (ntHeader->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
-            importDataDir = &((PIMAGE_NT_HEADERS64)ntHeader)->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
-        } else {
-            importDataDir = &ntHeader->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+        IMAGE_DOS_HEADER dosHeader = {};
+        if (!ReadPeStructure(buffer, 0, dosHeader) || dosHeader.e_lfanew < 0) {
+            return L"[PE Error: Invalid DOS Header]";
         }
 
-        if (importDataDir->VirtualAddress == 0) {
+        const size_t ntOffset = static_cast<size_t>(dosHeader.e_lfanew);
+        IMAGE_FILE_HEADER fileHeader = {};
+        if (!ReadPeStructure(buffer, ntOffset + sizeof(DWORD), fileHeader)) {
+            return L"[PE Error: Invalid File Header]";
+        }
+
+        const size_t optionalHeaderOffset = ntOffset + sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER);
+        if (!HasBytes(buffer, optionalHeaderOffset, fileHeader.SizeOfOptionalHeader)) {
+            return L"[PE Error: Invalid Optional Header]";
+        }
+
+        WORD optionalMagic = 0;
+        if (!ReadPeStructure(buffer, optionalHeaderOffset, optionalMagic)) {
+            return L"[PE Error: Invalid Optional Header]";
+        }
+
+        IMAGE_DATA_DIRECTORY importDirectory = {};
+        DWORD sizeOfHeaders = 0;
+        DWORD numberOfRvaAndSizes = 0;
+        size_t dataDirectoryOffset = 0;
+        if (optionalMagic == IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
+            if (fileHeader.SizeOfOptionalHeader < offsetof(IMAGE_OPTIONAL_HEADER64, DataDirectory) ||
+                !ReadPeStructure(
+                    buffer,
+                    optionalHeaderOffset + offsetof(IMAGE_OPTIONAL_HEADER64, SizeOfHeaders),
+                    sizeOfHeaders) ||
+                !ReadPeStructure(
+                    buffer,
+                    optionalHeaderOffset + offsetof(IMAGE_OPTIONAL_HEADER64, NumberOfRvaAndSizes),
+                    numberOfRvaAndSizes)) {
+                return L"[PE Error: Invalid PE32+ Optional Header]";
+            }
+            dataDirectoryOffset = offsetof(IMAGE_OPTIONAL_HEADER64, DataDirectory);
+        } else if (optionalMagic == IMAGE_NT_OPTIONAL_HDR32_MAGIC) {
+            if (fileHeader.SizeOfOptionalHeader < offsetof(IMAGE_OPTIONAL_HEADER32, DataDirectory) ||
+                !ReadPeStructure(
+                    buffer,
+                    optionalHeaderOffset + offsetof(IMAGE_OPTIONAL_HEADER32, SizeOfHeaders),
+                    sizeOfHeaders) ||
+                !ReadPeStructure(
+                    buffer,
+                    optionalHeaderOffset + offsetof(IMAGE_OPTIONAL_HEADER32, NumberOfRvaAndSizes),
+                    numberOfRvaAndSizes)) {
+                return L"[PE Error: Invalid PE32 Optional Header]";
+            }
+            dataDirectoryOffset = offsetof(IMAGE_OPTIONAL_HEADER32, DataDirectory);
+        } else {
+            return L"[PE Error: Unsupported Optional Header]";
+        }
+
+        if (numberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_IMPORT) {
             return L"";
         }
 
-        DWORD importDirOffset = RvaToOffset(ntHeader, importDataDir->VirtualAddress, static_cast<DWORD>(buffer.size()));
-        if (importDirOffset == 0) {
+        const size_t importDirectoryOffset =
+            dataDirectoryOffset + IMAGE_DIRECTORY_ENTRY_IMPORT * sizeof(IMAGE_DATA_DIRECTORY);
+        if (importDirectoryOffset + sizeof(importDirectory) > fileHeader.SizeOfOptionalHeader ||
+            !ReadPeStructure(buffer, optionalHeaderOffset + importDirectoryOffset, importDirectory)) {
+            return L"[PE Error: Invalid Import Data Directory]";
+        }
+
+        if (importDirectory.VirtualAddress == 0) {
+            return L"";
+        }
+
+        const size_t sectionTableOffset = optionalHeaderOffset + fileHeader.SizeOfOptionalHeader;
+        const size_t sectionTableSize = static_cast<size_t>(fileHeader.NumberOfSections) * sizeof(IMAGE_SECTION_HEADER);
+        if (!HasBytes(buffer, sectionTableOffset, sectionTableSize)) {
+            return L"[PE Error: Invalid Section Table]";
+        }
+
+        size_t importOffset = 0;
+        size_t importBytesAvailable = 0;
+        if (!RvaToOffset(
+                buffer,
+                sectionTableOffset,
+                fileHeader.NumberOfSections,
+                sizeOfHeaders,
+                importDirectory.VirtualAddress,
+                sizeof(IMAGE_IMPORT_DESCRIPTOR),
+                importOffset,
+                importBytesAvailable)) {
             return L"[PE Error: Invalid Import Directory RVA]";
         }
 
-        PIMAGE_IMPORT_DESCRIPTOR importDesc = (PIMAGE_IMPORT_DESCRIPTOR)(buffer.data() + importDirOffset);
+        if (importDirectory.Size != 0) {
+            importBytesAvailable = std::min(importBytesAvailable, static_cast<size_t>(importDirectory.Size));
+        }
+
         std::wstringstream result;
         bool firstModule = true;
-        while (importDesc->Name != 0) {
-            DWORD nameOffset = RvaToOffset(ntHeader, importDesc->Name, static_cast<DWORD>(buffer.size()));
-            if (nameOffset == 0) {
-                importDesc++;
+        for (size_t descriptorOffset = 0;
+             descriptorOffset <= importBytesAvailable - sizeof(IMAGE_IMPORT_DESCRIPTOR);
+             descriptorOffset += sizeof(IMAGE_IMPORT_DESCRIPTOR)) {
+            IMAGE_IMPORT_DESCRIPTOR importDescriptor = {};
+            if (!ReadPeStructure(buffer, importOffset + descriptorOffset, importDescriptor)) {
+                return L"[PE Error: Truncated Import Directory]";
+            }
+            if (importDescriptor.Name == 0) {
+                return result.str();
+            }
+
+            size_t nameOffset = 0;
+            size_t nameBytesAvailable = 0;
+            if (!RvaToOffset(
+                    buffer,
+                    sectionTableOffset,
+                    fileHeader.NumberOfSections,
+                    sizeOfHeaders,
+                    importDescriptor.Name,
+                    1,
+                    nameOffset,
+                    nameBytesAvailable)) {
                 continue;
             }
+
+            const void* terminator = std::memchr(buffer.data() + nameOffset, '\0', nameBytesAvailable);
+            if (!terminator) {
+                return L"[PE Error: Unterminated Import Name]";
+            }
+
+            const char* nameStart = buffer.data() + nameOffset;
+            const size_t nameLength = static_cast<const char*>(terminator) - nameStart;
             if (!firstModule) {
                 result << L", ";
             }
-            std::string s((const char*)(buffer.data() + nameOffset));
-            result << ConvertCharToWchar(s.c_str());
+            result << ConvertCharToWchar(std::string(nameStart, nameLength).c_str());
             firstModule = false;
-            importDesc++;
         }
-        return result.str();
+
+        return L"[PE Error: Unterminated Import Directory]";
     } catch (const std::exception& e) {
-        std::string err(e.what());
-        return ConvertCharToWchar(err.c_str());
+        return ConvertCharToWchar(e.what());
+    } catch (...) {
+        return L"[Unknown Exception in GetImportedModules]";
     }
 }
 
 std::wstring GetFileTimestamp(LPCWSTR filePath, bool isCreationTime) {
-    ScopedHandle hFile(CreateFileW(filePath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL));
+    ScopedHandle hFile(CreateFileW(
+        filePath,
+        GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        0,
+        nullptr));
     if (hFile.get() == INVALID_HANDLE_VALUE) {
         return L"[Error Reading Time]";
     }
 
-    FILETIME ft, ftLocal;
-    SYSTEMTIME st;
-    if (!GetFileTime(hFile.get(), isCreationTime ? &ft : NULL, NULL, isCreationTime ? NULL : &ft)) {
+    FILETIME ft = {}, ftLocal = {};
+    SYSTEMTIME st = {};
+    if (!GetFileTime(hFile.get(), isCreationTime ? &ft : nullptr, nullptr, isCreationTime ? nullptr : &ft) ||
+        !FileTimeToLocalFileTime(&ft, &ftLocal) ||
+        !FileTimeToSystemTime(&ftLocal, &st)) {
         return L"[Error Reading Time]";
     }
 
-    FileTimeToLocalFileTime(&ft, &ftLocal);
-    FileTimeToSystemTime(&ftLocal, &st);
     std::wstringstream ss;
     ss << st.wYear << L"-" << std::setfill(L'0') << std::setw(2) << st.wMonth << L"-" << std::setw(2) << st.wDay
         << L" " << std::setw(2) << st.wHour << L":" << std::setw(2) << st.wMinute << L":" << std::setw(2) << st.wSecond;
@@ -823,6 +1107,14 @@ void LogModuleToMinecraft(const ModuleInfo& info, const std::string& eventName =
     }
 }
 
+bool IsValidSha512(const std::wstring& hash) {
+    return hash.size() == 128 && std::all_of(hash.begin(), hash.end(), [](wchar_t character) {
+        return (character >= L'0' && character <= L'9') ||
+            (character >= L'a' && character <= L'f') ||
+            (character >= L'A' && character <= L'F');
+    });
+}
+
 void RunInitialScanOptimized() {
     try {
         // Wait for our process to have a window
@@ -850,21 +1142,15 @@ void RunInitialScanOptimized() {
                     // Analyze module and log immediately using JNI references
                     ModuleInfo info = AnalyzeModule(me32.szExePath);
                     
-                    std::string encodedPath = Base64Encode(ConvertWcharToChar(info.path));
                     std::string hash = ConvertWcharToChar(info.hash);
-                    std::string encodedSigner = Base64Encode(ConvertWcharToChar(info.signerName));
-                    std::string encodedImports = EncodeImportsList(ConvertWcharToChar(info.importedModules));
 
                     // Add to seen hashes cache
-                    {
+                    if (IsValidSha512(info.hash)) {
                         std::lock_guard<std::mutex> lock(g_seenHashesMutex);
                         g_seenHashes.insert(hash);
                     }
 
-                    // Format: moduleLoaded <base64_path> <hash> <base64_signer> <base64_imports>
-                    std::string formattedMessage = "moduleLoaded " + encodedPath + " " + hash + " " + encodedSigner + " " + encodedImports;
-                    
-                    LogToMinecraft(formattedMessage);
+                    LogModuleToMinecraft(info);
                 } catch (const std::exception& e) {
                     LogErrorToMinecraft("ModuleAnalysisError", std::string("Initial Scan Module Analysis Error: ") + e.what());
                 } catch (...) {
@@ -883,46 +1169,69 @@ void RunInitialScanOptimized() {
     }
 }
 
-void HandleLoadedModule(HMODULE hModule) {
-    if (!hModule) return;
-    
-    WCHAR loadedPath[MAX_PATH];
-    if (GetModuleFileNameW(hModule, loadedPath, MAX_PATH) == 0) {
-        std::thread([]() {
-            LogErrorToMinecraft("ModuleAnalysisError", "Could not get module file name");
-        }).detach();
-        return;
-    }
-    
-    // Defer expensive module analysis to background thread
-    std::thread([path = std::wstring(loadedPath)]() {
-        try {
-            // Calculate hash first (cheap operation) to check if we've seen this module before
-            std::wstring hashW = CalculateSHA512(path.c_str());
-            std::string hash = ConvertWcharToChar(hashW);
-            
-            // Check if we've already seen this hash
-            {
-                std::lock_guard<std::mutex> lock(g_seenHashesMutex);
-                if (g_seenHashes.count(hash) > 0) {
-                    // Already seen this module, skip expensive detection
-                    return;
-                }
-                g_seenHashes.insert(hash);
-            }
-            
-            // New module - do full analysis
-            ModuleInfo info = AnalyzeModule(path);
-            LogModuleToMinecraft(info);
-        } catch (const std::exception& e) {
-            LogErrorToMinecraft("ModuleAnalysisError", std::string(e.what()));
-        } catch (...) {
-            LogErrorToMinecraft("ModuleAnalysisError", "Unknown exception");
+std::wstring GetLoadedModulePath(HMODULE hModule) {
+    std::vector<wchar_t> pathBuffer(MAX_PATH);
+    while (pathBuffer.size() <= 32768) {
+        DWORD length = GetModuleFileNameW(hModule, pathBuffer.data(), static_cast<DWORD>(pathBuffer.size()));
+        if (length == 0) {
+            return L"";
         }
-    }).detach();
+        if (length < pathBuffer.size()) {
+            return std::wstring(pathBuffer.data(), length);
+        }
+        pathBuffer.resize(pathBuffer.size() * 2);
+    }
+    return L"";
 }
 
-void HandleBlockedModule(const std::wstring& blockedPath) {
+void HandleLoadedModule(HMODULE hModule) noexcept {
+    if (!hModule) return;
+
+    try {
+        std::wstring loadedPath = GetLoadedModulePath(hModule);
+        if (loadedPath.empty()) {
+            LogErrorToMinecraft("ModuleAnalysisError", "Could not get module file name");
+            return;
+        }
+
+        // Defer expensive module analysis to a background thread.
+        std::thread([path = std::move(loadedPath)]() {
+            try {
+                std::wstring hashW = CalculateSHA512(path.c_str());
+                std::string hash = ConvertWcharToChar(hashW);
+
+                // Hash failures must not deduplicate unrelated modules under a
+                // shared error string.
+                if (IsValidSha512(hashW)) {
+                    std::lock_guard<std::mutex> lock(g_seenHashesMutex);
+                    if (g_seenHashes.count(hash) > 0) {
+                        return;
+                    }
+                    g_seenHashes.insert(hash);
+                }
+
+                ModuleInfo info = AnalyzeModule(path);
+                LogModuleToMinecraft(info);
+            } catch (const std::exception& e) {
+                LogErrorToMinecraft("ModuleAnalysisError", std::string(e.what()));
+            } catch (...) {
+                LogErrorToMinecraft("ModuleAnalysisError", "Unknown exception");
+            }
+        }).detach();
+    } catch (const std::exception& e) {
+        try {
+            LogErrorToMinecraft("ModuleAnalysisError", std::string(e.what()));
+        } catch (...) {
+        }
+    } catch (...) {
+        try {
+            LogErrorToMinecraft("ModuleAnalysisError", "Unknown exception");
+        } catch (...) {
+        }
+    }
+}
+
+void HandleBlockedModule(const std::wstring& blockedPath) noexcept {
     try {
         std::thread([path = blockedPath]() {
             try {
@@ -935,9 +1244,15 @@ void HandleBlockedModule(const std::wstring& blockedPath) {
             }
         }).detach();
     } catch (const std::exception& e) {
-        LogErrorToMinecraft("BlockedModuleAnalysisError", std::string(e.what()));
+        try {
+            LogErrorToMinecraft("BlockedModuleAnalysisError", std::string(e.what()));
+        } catch (...) {
+        }
     } catch (...) {
-        LogErrorToMinecraft("BlockedModuleAnalysisError", "Unknown exception");
+        try {
+            LogErrorToMinecraft("BlockedModuleAnalysisError", "Unknown exception");
+        } catch (...) {
+        }
     }
 }
 
@@ -993,6 +1308,22 @@ HMODULE WINAPI DetourLoadLibraryExA(LPCSTR lpLibFileName, HANDLE hFile, DWORD dw
     return hModule;
 }
 
+void RunBackgroundWorkers() {
+    try {
+        std::thread(RunInitialScanOptimized).detach();
+    } catch (const std::exception& e) {
+        LogErrorToMinecraft("InitialScanFatalError", std::string("Failed to start initial scan: ") + e.what());
+    } catch (...) {
+        LogErrorToMinecraft("InitialScanFatalError", "Failed to start initial scan: Unknown exception");
+    }
+    RunJniLogWorker();
+}
+
+DWORD WINAPI BackgroundWorkerThreadProc(LPVOID) {
+    RunBackgroundWorkers();
+    return 0;
+}
+
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
     if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hModule);
@@ -1015,18 +1346,25 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             return FALSE;
         }
 
-        // Run initial scan in a separate thread (don't check in DllMain - can cause deadlock)
-        std::thread(RunJniLogWorker).detach();
-        std::thread([]() {
-            RunInitialScanOptimized();
-        }).detach();
+        // CreateThread returns without waiting for the new thread to run. Its
+        // entry point starts after DllMain releases the loader lock.
+        HANDLE backgroundThread = CreateThread(nullptr, 0, BackgroundWorkerThreadProc, nullptr, 0, nullptr);
+        if (!backgroundThread) {
+            MH_DisableHook(MH_ALL_HOOKS);
+            MH_Uninitialize();
+            return FALSE;
+        }
+        CloseHandle(backgroundThread);
 
     } else if (ul_reason_for_call == DLL_PROCESS_DETACH) {
         g_shuttingDown.store(true, std::memory_order_release);
         g_jniLogCondition.notify_all();
-        // Cleanup
-        MH_DisableHook(MH_ALL_HOOKS);
-        MH_Uninitialize();
+        // The OS is already tearing down the process when lpReserved is set;
+        // avoid loader-lock work that cannot provide any useful cleanup.
+        if (lpReserved == nullptr) {
+            MH_DisableHook(MH_ALL_HOOKS);
+            MH_Uninitialize();
+        }
     }
     return TRUE;
 }

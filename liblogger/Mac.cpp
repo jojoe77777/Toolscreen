@@ -7,6 +7,7 @@
 #include <CommonCrypto/CommonDigest.h>
 
 #include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
@@ -19,6 +20,7 @@
 #include <mach-o/fat.h>
 #include <mach-o/loader.h>
 #include <mutex>
+#include <limits>
 #include <pthread.h>
 #include <set>
 #include <sstream>
@@ -41,6 +43,7 @@ using PtrJNI_GetCreatedJavaVMs = jint(JNICALL*)(JavaVM**, jsize, jsize*);
 #define LIBLOGGER_VERSION_STR "1.1.0"
 #endif
 static constexpr std::string_view kLibLoggerVersion = LIBLOGGER_VERSION_STR;
+static constexpr uintmax_t kMaxAnalyzedModuleSize = 512ULL * 1024ULL * 1024ULL;
 
 static std::atomic<bool> g_initializationStarted(false);
 static std::atomic<bool> g_scannerThreadShouldRun(false);
@@ -125,6 +128,9 @@ void LogToMinecraft(const std::string& message) {
 
 	jclass systemClass = env->FindClass("java/lang/System");
 	if (!systemClass) {
+		if (env->ExceptionCheck()) {
+			env->ExceptionClear();
+		}
 		if (needsDetach) {
 			jvm->DetachCurrentThread();
 		}
@@ -133,6 +139,9 @@ void LogToMinecraft(const std::string& message) {
 
 	jfieldID outFieldId = env->GetStaticFieldID(systemClass, "out", "Ljava/io/PrintStream;");
 	if (!outFieldId) {
+		if (env->ExceptionCheck()) {
+			env->ExceptionClear();
+		}
 		env->DeleteLocalRef(systemClass);
 		if (needsDetach) {
 			jvm->DetachCurrentThread();
@@ -142,6 +151,9 @@ void LogToMinecraft(const std::string& message) {
 
 	jobject printStream = env->GetStaticObjectField(systemClass, outFieldId);
 	if (!printStream) {
+		if (env->ExceptionCheck()) {
+			env->ExceptionClear();
+		}
 		env->DeleteLocalRef(systemClass);
 		if (needsDetach) {
 			jvm->DetachCurrentThread();
@@ -151,6 +163,9 @@ void LogToMinecraft(const std::string& message) {
 
 	jclass printStreamClass = env->GetObjectClass(printStream);
 	if (!printStreamClass) {
+		if (env->ExceptionCheck()) {
+			env->ExceptionClear();
+		}
 		env->DeleteLocalRef(printStream);
 		env->DeleteLocalRef(systemClass);
 		if (needsDetach) {
@@ -161,6 +176,9 @@ void LogToMinecraft(const std::string& message) {
 
 	jmethodID printlnMethod = env->GetMethodID(printStreamClass, "println", "(Ljava/lang/String;)V");
 	if (!printlnMethod) {
+		if (env->ExceptionCheck()) {
+			env->ExceptionClear();
+		}
 		env->DeleteLocalRef(printStreamClass);
 		env->DeleteLocalRef(printStream);
 		env->DeleteLocalRef(systemClass);
@@ -223,18 +241,29 @@ static std::string CalculateSHA512(const std::string& filePath) {
 	}
 
 	CC_SHA512_CTX sha512;
-	CC_SHA512_Init(&sha512);
+	if (CC_SHA512_Init(&sha512) != 1) {
+		return "[Hash Failed: Initialize]";
+	}
 
 	char buffer[4096];
 	while (file.read(buffer, sizeof(buffer))) {
-		CC_SHA512_Update(&sha512, buffer, static_cast<CC_LONG>(file.gcount()));
+		if (CC_SHA512_Update(&sha512, buffer, static_cast<CC_LONG>(sizeof(buffer))) != 1) {
+			return "[Hash Failed: Hashing Data]";
+		}
 	}
 	if (file.gcount() > 0) {
-		CC_SHA512_Update(&sha512, buffer, static_cast<CC_LONG>(file.gcount()));
+		if (CC_SHA512_Update(&sha512, buffer, static_cast<CC_LONG>(file.gcount())) != 1) {
+			return "[Hash Failed: Hashing Data]";
+		}
+	}
+	if (!file.eof()) {
+		return "[Hash Failed: File Read]";
 	}
 
 	unsigned char hash[CC_SHA512_DIGEST_LENGTH];
-	CC_SHA512_Final(hash, &sha512);
+	if (CC_SHA512_Final(hash, &sha512) != 1) {
+		return "[Hash Failed: Finish Hash]";
+	}
 
 	static constexpr char kHexDigits[] = "0123456789abcdef";
 	std::string result;
@@ -267,6 +296,15 @@ static std::string GetSignerName(const std::string& filePath) {
 		return status == errSecCSUnsigned ? "[Unsigned]" : "[Unsigned, Signer Check Failed]";
 	}
 
+	status = SecStaticCodeCheckValidity(
+		codeRef,
+		static_cast<SecCSFlags>(kSecCSStrictValidate | kSecCSCheckAllArchitectures),
+		nullptr);
+	if (status != errSecSuccess) {
+		CFRelease(codeRef);
+		return status == errSecCSUnsigned ? "[Unsigned]" : "[Invalid Signature]";
+	}
+
 	CFDictionaryRef signingInfo = nullptr;
 	status = SecCodeCopySigningInformation(codeRef, kSecCSSigningInformation, &signingInfo);
 	CFRelease(codeRef);
@@ -283,9 +321,19 @@ static std::string GetSignerName(const std::string& filePath) {
 		const auto* certificate = static_cast<const __SecCertificate*>(CFArrayGetValueAtIndex(certificates, 0));
 		CFStringRef commonName = nullptr;
 		if (certificate && SecCertificateCopyCommonName(const_cast<SecCertificateRef>(certificate), &commonName) == errSecSuccess && commonName) {
-			char buffer[256] = {};
-			if (CFStringGetCString(commonName, buffer, sizeof(buffer), kCFStringEncodingUTF8)) {
-				signerName = buffer;
+			const CFIndex maximumLength = CFStringGetMaximumSizeForEncoding(
+				CFStringGetLength(commonName),
+				kCFStringEncodingUTF8);
+			if (maximumLength >= 0 &&
+				static_cast<uint64_t>(maximumLength) < std::numeric_limits<size_t>::max()) {
+				std::vector<char> buffer(static_cast<size_t>(maximumLength) + 1, '\0');
+				if (CFStringGetCString(
+						commonName,
+						buffer.data(),
+						static_cast<CFIndex>(buffer.size()),
+						kCFStringEncodingUTF8)) {
+					signerName = buffer.data();
+				}
 			}
 			CFRelease(commonName);
 		}
@@ -295,13 +343,30 @@ static std::string GetSignerName(const std::string& filePath) {
 	return signerName;
 }
 
-static void ParseMachOSlice(std::ifstream& file, std::streamoff offset, std::set<std::string>& importedModules) {
-	file.clear();
-	file.seekg(offset);
+static bool HasBytes(const std::vector<unsigned char>& data, size_t offset, size_t byteCount) {
+	return offset <= data.size() && byteCount <= data.size() - offset;
+}
+
+template <typename T>
+static bool ReadStructure(const std::vector<unsigned char>& data, size_t offset, T& value) {
+	if (!HasBytes(data, offset, sizeof(T))) {
+		return false;
+	}
+	std::memcpy(&value, data.data() + offset, sizeof(T));
+	return true;
+}
+
+static void ParseMachOSlice(
+	const std::vector<unsigned char>& fileData,
+	size_t sliceOffset,
+	size_t sliceSize,
+	std::set<std::string>& importedModules) {
+	if (!HasBytes(fileData, sliceOffset, sliceSize) || sliceSize < sizeof(uint32_t)) {
+		return;
+	}
 
 	uint32_t magic = 0;
-	file.read(reinterpret_cast<char*>(&magic), sizeof(magic));
-	if (!file || file.gcount() != static_cast<std::streamsize>(sizeof(magic))) {
+	if (!ReadStructure(fileData, sliceOffset, magic)) {
 		return;
 	}
 
@@ -312,61 +377,60 @@ static void ParseMachOSlice(std::ifstream& file, std::streamoff offset, std::set
 	}
 
 	uint32_t commandCount = 0;
-	std::streamoff commandOffset = offset;
+	uint32_t commandBytes = 0;
+	size_t commandOffset = sliceOffset;
 	if (is64Bit) {
 		mach_header_64 header = {};
-		file.clear();
-		file.seekg(offset);
-		file.read(reinterpret_cast<char*>(&header), sizeof(header));
-		if (!file || file.gcount() != static_cast<std::streamsize>(sizeof(header))) {
+		if (!ReadStructure(fileData, sliceOffset, header) || sizeof(header) > sliceSize) {
 			return;
 		}
 		commandCount = MaybeSwap32(header.ncmds, shouldSwap);
+		commandBytes = MaybeSwap32(header.sizeofcmds, shouldSwap);
 		commandOffset += sizeof(header);
 	} else {
 		mach_header header = {};
-		file.clear();
-		file.seekg(offset);
-		file.read(reinterpret_cast<char*>(&header), sizeof(header));
-		if (!file || file.gcount() != static_cast<std::streamsize>(sizeof(header))) {
+		if (!ReadStructure(fileData, sliceOffset, header) || sizeof(header) > sliceSize) {
 			return;
 		}
 		commandCount = MaybeSwap32(header.ncmds, shouldSwap);
+		commandBytes = MaybeSwap32(header.sizeofcmds, shouldSwap);
 		commandOffset += sizeof(header);
 	}
 
+	const size_t sliceEnd = sliceOffset + sliceSize;
+	if (commandOffset > sliceEnd || commandBytes > sliceEnd - commandOffset) {
+		return;
+	}
+	const size_t commandsEnd = commandOffset + commandBytes;
+
 	for (uint32_t index = 0; index < commandCount; ++index) {
 		load_command command = {};
-		file.clear();
-		file.seekg(commandOffset);
-		file.read(reinterpret_cast<char*>(&command), sizeof(command));
-		if (!file || file.gcount() != static_cast<std::streamsize>(sizeof(command))) {
-			break;
+		if (commandOffset > commandsEnd || sizeof(command) > commandsEnd - commandOffset ||
+			!ReadStructure(fileData, commandOffset, command)) {
+			return;
 		}
 
 		const uint32_t commandType = MaybeSwap32(command.cmd, shouldSwap);
 		const uint32_t commandSize = MaybeSwap32(command.cmdsize, shouldSwap);
-		if (commandSize < sizeof(load_command)) {
-			break;
+		if (commandSize < sizeof(load_command) || commandSize > commandsEnd - commandOffset) {
+			return;
 		}
 
 		if (commandType == LC_LOAD_DYLIB || commandType == LC_LOAD_WEAK_DYLIB ||
-			commandType == LC_REEXPORT_DYLIB || commandType == LC_LOAD_UPWARD_DYLIB) {
+			commandType == LC_REEXPORT_DYLIB || commandType == LC_LOAD_UPWARD_DYLIB ||
+			commandType == LC_LAZY_LOAD_DYLIB) {
 			dylib_command dylibCommand = {};
-			file.clear();
-			file.seekg(commandOffset);
-			file.read(reinterpret_cast<char*>(&dylibCommand), sizeof(dylibCommand));
-			if (file && file.gcount() == static_cast<std::streamsize>(sizeof(dylibCommand))) {
+			if (commandSize >= sizeof(dylibCommand) && ReadStructure(fileData, commandOffset, dylibCommand)) {
 				const uint32_t nameOffset = MaybeSwap32(dylibCommand.dylib.name.offset, shouldSwap);
-				if (nameOffset < commandSize) {
-					std::vector<char> nameBuffer(commandSize - nameOffset, '\0');
-					file.clear();
-					file.seekg(commandOffset + static_cast<std::streamoff>(nameOffset));
-					file.read(nameBuffer.data(), static_cast<std::streamsize>(nameBuffer.size()));
-
-					const size_t nameLength = ::strnlen(nameBuffer.data(), nameBuffer.size());
-					if (nameLength > 0) {
-						importedModules.emplace(nameBuffer.data(), nameLength);
+				if (nameOffset >= sizeof(dylibCommand) && nameOffset < commandSize) {
+					const char* nameStart = reinterpret_cast<const char*>(
+						fileData.data() + commandOffset + nameOffset);
+					const size_t maximumNameLength = commandSize - nameOffset;
+					const void* terminator = std::memchr(nameStart, '\0', maximumNameLength);
+					if (terminator && terminator != nameStart) {
+						importedModules.emplace(
+							nameStart,
+							static_cast<const char*>(terminator) - nameStart);
 					}
 				}
 			}
@@ -377,14 +441,26 @@ static void ParseMachOSlice(std::ifstream& file, std::streamoff offset, std::set
 }
 
 static std::string GetImportedModules(const std::string& filePath) {
-	std::ifstream file(filePath, std::ios::binary);
+	std::ifstream file(filePath, std::ios::binary | std::ios::ate);
 	if (!file.is_open()) {
 		return "";
 	}
 
+	const std::streamoff fileSize = file.tellg();
+	if (fileSize < static_cast<std::streamoff>(sizeof(uint32_t)) ||
+		static_cast<uintmax_t>(fileSize) > kMaxAnalyzedModuleSize ||
+		static_cast<uintmax_t>(fileSize) > std::numeric_limits<size_t>::max()) {
+		return "";
+	}
+	file.seekg(0, std::ios::beg);
+
+	std::vector<unsigned char> fileData(static_cast<size_t>(fileSize));
+	if (!file.read(reinterpret_cast<char*>(fileData.data()), fileSize)) {
+		return "";
+	}
+
 	uint32_t magic = 0;
-	file.read(reinterpret_cast<char*>(&magic), sizeof(magic));
-	if (!file || file.gcount() != static_cast<std::streamsize>(sizeof(magic))) {
+	if (!ReadStructure(fileData, 0, magic)) {
 		return "";
 	}
 
@@ -394,33 +470,47 @@ static std::string GetImportedModules(const std::string& filePath) {
 		const bool shouldSwap = magic == FAT_CIGAM || magic == FAT_CIGAM_64;
 
 		fat_header header = {};
-		file.clear();
-		file.seekg(0);
-		file.read(reinterpret_cast<char*>(&header), sizeof(header));
-		if (!file || file.gcount() != static_cast<std::streamsize>(sizeof(header))) {
+		if (!ReadStructure(fileData, 0, header)) {
 			return "";
 		}
 
 		const uint32_t architectureCount = MaybeSwap32(header.nfat_arch, shouldSwap);
+		const size_t architectureSize = is64BitFat ? sizeof(fat_arch_64) : sizeof(fat_arch);
+		if (architectureCount > (fileData.size() - sizeof(header)) / architectureSize) {
+			return "";
+		}
+
 		for (uint32_t index = 0; index < architectureCount; ++index) {
+			const size_t architectureOffset = sizeof(header) + static_cast<size_t>(index) * architectureSize;
+			uint64_t sliceOffset = 0;
+			uint64_t sliceSize = 0;
 			if (is64BitFat) {
 				fat_arch_64 architecture = {};
-				file.read(reinterpret_cast<char*>(&architecture), sizeof(architecture));
-				if (!file || file.gcount() != static_cast<std::streamsize>(sizeof(architecture))) {
-					break;
+				if (!ReadStructure(fileData, architectureOffset, architecture)) {
+					return "";
 				}
-				ParseMachOSlice(file, static_cast<std::streamoff>(MaybeSwap64(architecture.offset, shouldSwap)), importedModules);
+				sliceOffset = MaybeSwap64(architecture.offset, shouldSwap);
+				sliceSize = MaybeSwap64(architecture.size, shouldSwap);
 			} else {
 				fat_arch architecture = {};
-				file.read(reinterpret_cast<char*>(&architecture), sizeof(architecture));
-				if (!file || file.gcount() != static_cast<std::streamsize>(sizeof(architecture))) {
-					break;
+				if (!ReadStructure(fileData, architectureOffset, architecture)) {
+					return "";
 				}
-				ParseMachOSlice(file, static_cast<std::streamoff>(MaybeSwap32(architecture.offset, shouldSwap)), importedModules);
+				sliceOffset = MaybeSwap32(architecture.offset, shouldSwap);
+				sliceSize = MaybeSwap32(architecture.size, shouldSwap);
 			}
+
+			if (sliceOffset > fileData.size() || sliceSize > fileData.size() - static_cast<size_t>(sliceOffset)) {
+				continue;
+			}
+			ParseMachOSlice(
+				fileData,
+				static_cast<size_t>(sliceOffset),
+				static_cast<size_t>(sliceSize),
+				importedModules);
 		}
 	} else {
-		ParseMachOSlice(file, 0, importedModules);
+		ParseMachOSlice(fileData, 0, fileData.size(), importedModules);
 	}
 
 	std::ostringstream output;
@@ -463,6 +553,15 @@ static std::string EncodeImportsList(const std::string& imports) {
 	return output.str();
 }
 
+static bool IsValidSha512(const std::string& hash) {
+	return hash.size() == CC_SHA512_DIGEST_LENGTH * 2 &&
+		std::all_of(hash.begin(), hash.end(), [](char character) {
+			return (character >= '0' && character <= '9') ||
+				(character >= 'a' && character <= 'f') ||
+				(character >= 'A' && character <= 'F');
+		});
+}
+
 static void LogModuleToMinecraft(const ModuleInfo& info) {
 	const std::string formattedMessage =
 		"moduleLoaded " + Base64Encode(info.path) + " " + info.hash + " " +
@@ -476,7 +575,7 @@ static void ProcessModulePath(const std::string& modulePath) {
 	}
 
 	const std::string hash = CalculateSHA512(modulePath);
-	{
+	if (IsValidSha512(hash)) {
 		std::lock_guard<std::mutex> lock(g_seenHashesMutex);
 		if (!g_seenHashes.insert(hash).second) {
 			return;
@@ -640,7 +739,6 @@ void Cleanup() {
 		g_seenHashes.clear();
 	}
 
-	g_addImageCallbackRegistered.store(false);
 	g_initializationStarted.store(false);
 }
 
