@@ -1,7 +1,6 @@
 #include "base64.h"
 
 #include <jni.h>
-#include <jvmti.h>
 
 #include <CoreFoundation/CoreFoundation.h>
 #include <Security/Security.h>
@@ -38,15 +37,13 @@ struct ModuleInfo {
 
 using PtrJNI_GetCreatedJavaVMs = jint(JNICALL*)(JavaVM**, jsize, jsize*);
 
-static constexpr std::string_view kFairplayClassSignature = "Lexersolver/mcsrfairplay/natives/NativeCallback;";
 #ifndef LIBLOGGER_VERSION_STR
-#define LIBLOGGER_VERSION_STR "1.0.2"
+#define LIBLOGGER_VERSION_STR "1.1.0"
 #endif
 static constexpr std::string_view kLibLoggerVersion = LIBLOGGER_VERSION_STR;
 
 static std::atomic<bool> g_initializationStarted(false);
 static std::atomic<bool> g_scannerThreadShouldRun(false);
-static std::atomic<bool> g_fairplayDetected(false);
 static std::atomic<bool> g_addImageCallbackRegistered(false);
 
 static std::unordered_set<std::string> g_knownModules;
@@ -85,56 +82,6 @@ JavaVM* WaitForJavaVM() {
 	}
 
 	return nullptr;
-}
-
-bool IsFairplayLoaded(JavaVM* jvm) {
-	if (jvm == nullptr) {
-		return false;
-	}
-
-	JNIEnv* env = nullptr;
-	bool needsDetach = false;
-	const jint envStatus = jvm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6);
-	if (envStatus == JNI_EDETACHED) {
-		if (jvm->AttachCurrentThread(reinterpret_cast<void**>(&env), nullptr) != JNI_OK || env == nullptr) {
-			return false;
-		}
-		needsDetach = true;
-	} else if (envStatus != JNI_OK || env == nullptr) {
-		return false;
-	}
-
-	jvmtiEnv* jvmti = nullptr;
-	if (jvm->GetEnv(reinterpret_cast<void**>(&jvmti), JVMTI_VERSION_1_0) != JNI_OK || jvmti == nullptr) {
-		if (needsDetach) {
-			jvm->DetachCurrentThread();
-		}
-		return false;
-	}
-
-	jint classCount = 0;
-	jclass* classes = nullptr;
-	if (jvmti->GetLoadedClasses(&classCount, &classes) != JVMTI_ERROR_NONE || classes == nullptr) {
-		if (needsDetach) {
-			jvm->DetachCurrentThread();
-		}
-		return false;
-	}
-
-	bool found = false;
-	for (jint index = 0; index < classCount && !found; ++index) {
-		char* signature = nullptr;
-		if (jvmti->GetClassSignature(classes[index], &signature, nullptr) == JVMTI_ERROR_NONE && signature != nullptr) {
-			found = kFairplayClassSignature == signature;
-			jvmti->Deallocate(reinterpret_cast<unsigned char*>(signature));
-		}
-	}
-
-	jvmti->Deallocate(reinterpret_cast<unsigned char*>(classes));
-	if (needsDetach) {
-		jvm->DetachCurrentThread();
-	}
-	return found;
 }
 
 void SetCurrentThreadName(const char* threadName) {
@@ -517,10 +464,6 @@ static std::string EncodeImportsList(const std::string& imports) {
 }
 
 static void LogModuleToMinecraft(const ModuleInfo& info) {
-	if (g_fairplayDetected.load()) {
-		return;
-	}
-
 	const std::string formattedMessage =
 		"moduleLoaded " + Base64Encode(info.path) + " " + info.hash + " " +
 		Base64Encode(info.signerName) + " " + EncodeImportsList(info.importedModules);
@@ -528,7 +471,7 @@ static void LogModuleToMinecraft(const ModuleInfo& info) {
 }
 
 static void ProcessModulePath(const std::string& modulePath) {
-	if (modulePath.empty() || g_fairplayDetected.load() || !IsMachOFile(modulePath)) {
+	if (modulePath.empty() || !IsMachOFile(modulePath)) {
 		return;
 	}
 
@@ -561,7 +504,7 @@ static void EnqueueModulePath(const std::string& modulePath) {
 }
 
 static void HandleQueuedModule(const std::string& modulePath) {
-	if (modulePath.empty() || g_fairplayDetected.load()) {
+	if (modulePath.empty()) {
 		return;
 	}
 
@@ -626,7 +569,7 @@ static void ScannerThreadMain() {
 static void ImageLoadCallback(const mach_header* header, intptr_t vmaddrSlide) {
 	(void)vmaddrSlide;
 
-	if (!g_scannerThreadShouldRun.load() || g_fairplayDetected.load()) {
+	if (!g_scannerThreadShouldRun.load()) {
 		return;
 	}
 
@@ -649,14 +592,6 @@ void InitialScanMain() {
 		std::this_thread::sleep_for(std::chrono::milliseconds(100));
 	}
 	if (!g_scannerThreadShouldRun.load()) {
-		return;
-	}
-
-	if (IsFairplayLoaded(jvm)) {
-		g_fairplayDetected.store(true);
-		g_scannerThreadShouldRun.store(false);
-		LogStatusToMinecraft("Skipping LibLogger due to Fairplay detection");
-		g_pendingModulesCondition.notify_all();
 		return;
 	}
 
@@ -705,7 +640,6 @@ void Cleanup() {
 		g_seenHashes.clear();
 	}
 
-	g_fairplayDetected.store(false);
 	g_addImageCallbackRegistered.store(false);
 	g_initializationStarted.store(false);
 }

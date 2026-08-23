@@ -1,11 +1,8 @@
 #include "MinHook.h"
 #include "base64.h"
 #include <jni.h>
-#include <jvmti.h>
 #include <Windows.h>
-#include <atomic>
 #include <string>
-#include <string_view>
 #include <vector>
 #include <sstream>
 #include <iomanip>
@@ -31,15 +28,12 @@
 void LogToMinecraft(const std::string& message);
 void LogErrorToMinecraft(const std::string& eventName, const std::string& errorMessage);
 
-// Global flag to check if Fairplay was detected
-std::atomic<bool> g_FairplayDetected(false);
-
 // Global cache for seen module hashes to skip expensive detection
 std::mutex g_seenHashesMutex;
 std::unordered_set<std::string> g_seenHashes;
 
 #ifndef LIBLOGGER_VERSION_STR
-#define LIBLOGGER_VERSION_STR "1.0.3"
+#define LIBLOGGER_VERSION_STR "1.1.0"
 #endif
 
 // Version number
@@ -73,42 +67,6 @@ bool WaitForProcessWindow() {
     }
     
     return false;
-}
-
-// Check if Fairplay class is loaded using JVMTI (only called once)
-// Must use JVMTI because FindClass won't work across different classloaders
-bool IsFairplayLoaded(JavaVM* jvm) {
-    jvmtiEnv* jvmti = nullptr;
-    if (jvm->GetEnv(reinterpret_cast<void**>(&jvmti), JVMTI_VERSION_1_0) != JNI_OK || jvmti == nullptr) {
-        return false;
-    }
-    
-    jint classCount = 0;
-    jclass* classes = nullptr;
-    jvmtiError error = jvmti->GetLoadedClasses(&classCount, &classes);
-    
-    if (error != JVMTI_ERROR_NONE) {
-        return false;
-    }
-    
-    static constexpr std::string_view targetSignature = "Lexersolver/mcsrfairplay/natives/NativeCallback;";
-    
-    bool found = false;
-    
-    // Check all loaded classes
-    for (jint i = 0; i < classCount && !found; i++) {
-        char* signature = nullptr;
-        error = jvmti->GetClassSignature(classes[i], &signature, nullptr);
-        
-        if (error == JVMTI_ERROR_NONE && signature != nullptr) {
-            if (signature == targetSignature) {
-                found = true;
-            }
-            jvmti->Deallocate(reinterpret_cast<unsigned char*>(signature));
-        }
-    }    
-    jvmti->Deallocate(reinterpret_cast<unsigned char*>(classes));
-    return found;
 }
 
 // Helper to dynamically load JNI_GetCreatedJavaVMs to avoid linking jvm.lib
@@ -564,29 +522,6 @@ ModuleInfo AnalyzeModule(const std::wstring& modulePath) {
     return info;
 }
 
-void BackOff() {
-    // Log to Minecraft (ignore exceptions)
-    try {
-        LogToMinecraft("Skipping LibLogger due to Fairplay detection");
-    } catch (...) {}
-
-    // Disable hooks and uninitialize (ignore exceptions)
-    try {
-        MH_DisableHook(MH_ALL_HOOKS);
-        MH_Uninitialize();
-    } catch (...) {}
-
-    // Get handle to our DLL and unload it (ignore exceptions)
-    try {
-        HMODULE hOurModule = nullptr;
-        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                          reinterpret_cast<LPCWSTR>(&BackOff), &hOurModule);
-        if (hOurModule) {
-            FreeLibraryAndExitThread(hOurModule, 0);
-        }
-    } catch (...) {}
-}
-
 void LogToMinecraft(const std::string& message) {
     try {
         JavaVM* jvm = nullptr;
@@ -696,11 +631,6 @@ std::string EncodeImportsList(const std::string& imports) {
 // Format: moduleLoaded <base64_dllPath> <fileHash> <base64_signerName> <base64_imports>
 void LogModuleToMinecraft(const ModuleInfo& info) {
     try {
-        // Check if Fairplay was detected
-        if (g_FairplayDetected) {
-            return;
-        }
-        
         // Convert to strings and encode
         std::string encodedPath = Base64Encode(ConvertWcharToChar(info.path));
         std::string hash = ConvertWcharToChar(info.hash);
@@ -731,13 +661,6 @@ void RunInitialScanOptimized() {
         jsize vm_count = 0;
         if (DynamicGetCreatedJavaVMs(&jvm, 1, &vm_count) != JNI_OK || vm_count == 0) {
             LogErrorToMinecraft("InitialScanError", "JVM not available");
-            return;
-        }
-        
-        // Check for Fairplay using JVMTI once before proceeding
-        if (IsFairplayLoaded(jvm)) {
-            g_FairplayDetected = true;
-            BackOff();
             return;
         }
         
@@ -862,11 +785,6 @@ void RunInitialScanOptimized() {
 
 void HandleLoadedModule(HMODULE hModule) {
     if (!hModule) return;
-    
-    // Check if Fairplay was already detected
-    if (g_FairplayDetected) {
-        return;
-    }
     
     WCHAR loadedPath[MAX_PATH];
     if (GetModuleFileNameW(hModule, loadedPath, MAX_PATH) == 0) {
