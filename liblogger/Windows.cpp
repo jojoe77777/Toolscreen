@@ -17,6 +17,9 @@
 #include <wincrypt.h>
 #include <thread>
 #include <mutex>
+#include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <unordered_set>
 #include <mscat.h>
 
@@ -39,6 +42,16 @@ std::unordered_set<std::string> g_seenHashes;
 // Version number
 const std::string LIBLOGGER_VERSION = LIBLOGGER_VERSION_STR;
 
+// JNI is not safe to enter merely because jvm.dll exports
+// JNI_GetCreatedJavaVMs. During early VM bootstrap, attaching a native thread
+// can crash inside the VM (notably with ZGC). All producers therefore enqueue
+// their messages and a single worker begins using JNI only after the game has
+// created a visible window.
+std::mutex g_jniLogMutex;
+std::condition_variable g_jniLogCondition;
+std::deque<std::string> g_jniLogQueue;
+std::atomic<bool> g_shuttingDown{false};
+
 // Callback function for EnumWindows
 BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
     DWORD windowProcessId = 0;
@@ -55,7 +68,7 @@ BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
 bool WaitForProcessWindow() {
     const int retryDelayMs = 100;
     
-    while (true) {
+    while (!g_shuttingDown.load(std::memory_order_acquire)) {
         bool hasWindow = false;
         EnumWindows(EnumWindowsProc, reinterpret_cast<LPARAM>(&hasWindow));
         
@@ -522,77 +535,99 @@ ModuleInfo AnalyzeModule(const std::wstring& modulePath) {
     return info;
 }
 
-void LogToMinecraft(const std::string& message) {
+void WriteToMinecraft(JNIEnv* env, const std::string& message) {
     try {
-        JavaVM* jvm = nullptr;
-        JNIEnv* env = nullptr;
-        
-        // Get JVM
-        jsize vm_count = 0;
-        if (DynamicGetCreatedJavaVMs(&jvm, 1, &vm_count) != JNI_OK || vm_count == 0) {
-            return;
-        }
-        
-        // Try to get env first without attaching
-        jint getEnvResult = jvm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6);
-        bool needsDetach = false;
-        
-        if (getEnvResult == JNI_EDETACHED) {
-            if (jvm->AttachCurrentThread(reinterpret_cast<void**>(&env), nullptr) != JNI_OK) {
-                return;
-            }
-            needsDetach = true;
-        } else if (getEnvResult != JNI_OK) {
-            return;
-        }
-
         jclass systemClass = env->FindClass("java/lang/System");
         if (!systemClass) {
-            if (needsDetach) jvm->DetachCurrentThread();
+            env->ExceptionClear();
             return;
         }
 
         jfieldID outFieldID = env->GetStaticFieldID(systemClass, "out", "Ljava/io/PrintStream;");
         if (!outFieldID) {
+            env->ExceptionClear();
             env->DeleteLocalRef(systemClass);
-            if (needsDetach) jvm->DetachCurrentThread();
             return;
         }
 
         jobject printStream = env->GetStaticObjectField(systemClass, outFieldID);
         if (!printStream) {
+            env->ExceptionClear();
             env->DeleteLocalRef(systemClass);
-            if (needsDetach) jvm->DetachCurrentThread();
             return;
         }
 
         jclass printStreamClass = env->GetObjectClass(printStream);
         if (!printStreamClass) {
+            env->ExceptionClear();
             env->DeleteLocalRef(printStream);
             env->DeleteLocalRef(systemClass);
-            if (needsDetach) jvm->DetachCurrentThread();
             return;
         }
 
         jmethodID printlnMethod = env->GetMethodID(printStreamClass, "println", "(Ljava/lang/String;)V");
         if (!printlnMethod) {
+            env->ExceptionClear();
             env->DeleteLocalRef(printStreamClass);
             env->DeleteLocalRef(printStream);
             env->DeleteLocalRef(systemClass);
-            if (needsDetach) jvm->DetachCurrentThread();
             return;
         }
 
         jstring logMessage = env->NewStringUTF(message.c_str());
-        env->CallVoidMethod(printStream, printlnMethod, logMessage);
-        
-        env->DeleteLocalRef(logMessage);
+        if (logMessage) {
+            env->CallVoidMethod(printStream, printlnMethod, logMessage);
+            env->ExceptionClear();
+            env->DeleteLocalRef(logMessage);
+        } else {
+            env->ExceptionClear();
+        }
         env->DeleteLocalRef(printStreamClass);
         env->DeleteLocalRef(printStream);
         env->DeleteLocalRef(systemClass);
-        if (needsDetach) jvm->DetachCurrentThread();
     } catch (...) {
         // Silently fail to avoid infinite recursion
+    }
+}
+
+void LogToMinecraft(const std::string& message) {
+    {
+        std::lock_guard<std::mutex> lock(g_jniLogMutex);
+        if (g_shuttingDown.load(std::memory_order_relaxed)) {
+            return;
+        }
+        g_jniLogQueue.push_back(message);
+    }
+    g_jniLogCondition.notify_one();
+}
+
+void RunJniLogWorker() {
+    if (!WaitForProcessWindow()) {
+        return;
+    }
+
+    JNIEnv* env = nullptr;
+    while (!g_shuttingDown.load(std::memory_order_acquire) && env == nullptr) {
+        env = AttachThreadWithName("LibLogger");
+        if (env == nullptr) {
+            Sleep(100);
+        }
+    }
+
+    while (env != nullptr) {
+        std::string message;
+        {
+            std::unique_lock<std::mutex> lock(g_jniLogMutex);
+            g_jniLogCondition.wait(lock, [] {
+                return g_shuttingDown.load(std::memory_order_acquire) || !g_jniLogQueue.empty();
+            });
+            if (g_shuttingDown.load(std::memory_order_relaxed) && g_jniLogQueue.empty()) {
+                break;
+            }
+            message = std::move(g_jniLogQueue.front());
+            g_jniLogQueue.pop_front();
+        }
+        WriteToMinecraft(env, message);
     }
 }
 
@@ -656,79 +691,12 @@ void RunInitialScanOptimized() {
             return;
         }
         
-        // Get JVM
-        JavaVM* jvm = nullptr;
-        jsize vm_count = 0;
-        if (DynamicGetCreatedJavaVMs(&jvm, 1, &vm_count) != JNI_OK || vm_count == 0) {
-            LogErrorToMinecraft("InitialScanError", "JVM not available");
-            return;
-        }
-        
         // Log version number to Minecraft
         LogToMinecraft("Running LibLogger v" + LIBLOGGER_VERSION + " for verification purposes");
-        
-        // Try to get env first without attaching (in case we're already on a JVM thread)
-        JNIEnv* env = nullptr;
-        jint getEnvResult = jvm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6);
-        bool needsDetach = false;
-        
-        if (getEnvResult == JNI_EDETACHED) {
-            // Not attached yet, attach now
-            if (jvm->AttachCurrentThread(reinterpret_cast<void**>(&env), nullptr) != JNI_OK) {
-                LogErrorToMinecraft("InitialScanError", "Could not attach thread");
-                return;
-            }
-            needsDetach = true;
-        } else if (getEnvResult != JNI_OK) {
-            LogErrorToMinecraft("InitialScanError", "Could not get JNI environment");
-            return;
-        }
-
-        // Get System.out for logging
-        jclass systemClass = env->FindClass("java/lang/System");
-        if (!systemClass) {
-            if (needsDetach) jvm->DetachCurrentThread();
-            return;
-        }
-
-        jfieldID outFieldID = env->GetStaticFieldID(systemClass, "out", "Ljava/io/PrintStream;");
-        if (!outFieldID) {
-            env->DeleteLocalRef(systemClass);
-            if (needsDetach) jvm->DetachCurrentThread();
-            return;
-        }
-
-        jobject printStream = env->GetStaticObjectField(systemClass, outFieldID);
-        if (!printStream) {
-            env->DeleteLocalRef(systemClass);
-            if (needsDetach) jvm->DetachCurrentThread();
-            return;
-        }
-
-        jclass printStreamClass = env->GetObjectClass(printStream);
-        if (!printStreamClass) {
-            env->DeleteLocalRef(printStream);
-            env->DeleteLocalRef(systemClass);
-            if (needsDetach) jvm->DetachCurrentThread();
-            return;
-        }
-
-        jmethodID printlnMethod = env->GetMethodID(printStreamClass, "println", "(Ljava/lang/String;)V");
-        if (!printlnMethod) {
-            env->DeleteLocalRef(printStreamClass);
-            env->DeleteLocalRef(printStream);
-            env->DeleteLocalRef(systemClass);
-            if (needsDetach) jvm->DetachCurrentThread();
-            return;
-        }
 
         // Enumerate all modules
         ScopedHandle hModuleSnap(CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetCurrentProcessId()));
         if (hModuleSnap.get() == INVALID_HANDLE_VALUE) {
-            env->DeleteLocalRef(printStreamClass);
-            env->DeleteLocalRef(printStream);
-            env->DeleteLocalRef(systemClass);
-            if (needsDetach) jvm->DetachCurrentThread();
             LogErrorToMinecraft("InitialScanError", "Could not create module snapshot");
             return;
         }
@@ -756,11 +724,7 @@ void RunInitialScanOptimized() {
                     // Format: moduleLoaded <base64_path> <hash> <base64_signer> <base64_imports>
                     std::string formattedMessage = "moduleLoaded " + encodedPath + " " + hash + " " + encodedSigner + " " + encodedImports;
                     
-                    jstring logMessage = env->NewStringUTF(formattedMessage.c_str());
-                    
-                    // Log to System.out
-                    env->CallVoidMethod(printStream, printlnMethod, logMessage);
-                    env->DeleteLocalRef(logMessage);
+                    LogToMinecraft(formattedMessage);
                 } catch (const std::exception& e) {
                     LogErrorToMinecraft("ModuleAnalysisError", std::string("Initial Scan Module Analysis Error: ") + e.what());
                 } catch (...) {
@@ -772,10 +736,6 @@ void RunInitialScanOptimized() {
             LogErrorToMinecraft("InitialScanError", "Could not enumerate first module");
         }
 
-        env->DeleteLocalRef(printStreamClass);
-        env->DeleteLocalRef(printStream);
-        env->DeleteLocalRef(systemClass);
-        jvm->DetachCurrentThread();
     } catch (const std::exception& e) {
         LogErrorToMinecraft("InitialScanFatalError", std::string("Initial Scan Fatal Error: ") + e.what());
     } catch (...) {
@@ -789,7 +749,6 @@ void HandleLoadedModule(HMODULE hModule) {
     WCHAR loadedPath[MAX_PATH];
     if (GetModuleFileNameW(hModule, loadedPath, MAX_PATH) == 0) {
         std::thread([]() {
-            AttachThreadWithName("LibLogger");
             LogErrorToMinecraft("ModuleAnalysisError", "Could not get module file name");
         }).detach();
         return;
@@ -797,7 +756,6 @@ void HandleLoadedModule(HMODULE hModule) {
     
     // Defer expensive module analysis to background thread
     std::thread([path = std::wstring(loadedPath)]() {
-        AttachThreadWithName("LibLogger");
         try {
             // Calculate hash first (cheap operation) to check if we've seen this module before
             std::wstring hashW = CalculateSHA512(path.c_str());
@@ -857,12 +815,14 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         }
 
         // Run initial scan in a separate thread (don't check in DllMain - can cause deadlock)
+        std::thread(RunJniLogWorker).detach();
         std::thread([]() {
-            AttachThreadWithName("LibLogger");
             RunInitialScanOptimized();
         }).detach();
 
     } else if (ul_reason_for_call == DLL_PROCESS_DETACH) {
+        g_shuttingDown.store(true, std::memory_order_release);
+        g_jniLogCondition.notify_all();
         // Cleanup
         MH_DisableHook(MH_ALL_HOOKS);
         MH_Uninitialize();
