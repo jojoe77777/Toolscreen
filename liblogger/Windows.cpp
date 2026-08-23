@@ -194,6 +194,16 @@ LoadLibraryW_t pOriginalLoadLibraryW = nullptr;
 typedef HMODULE(WINAPI* LoadLibraryA_t)(LPCSTR lpLibFileName);
 LoadLibraryA_t pOriginalLoadLibraryA = nullptr;
 
+typedef HMODULE(WINAPI* LoadLibraryExW_t)(LPCWSTR lpLibFileName, HANDLE hFile, DWORD dwFlags);
+LoadLibraryExW_t pOriginalLoadLibraryExW = nullptr;
+
+typedef HMODULE(WINAPI* LoadLibraryExA_t)(LPCSTR lpLibFileName, HANDLE hFile, DWORD dwFlags);
+LoadLibraryExA_t pOriginalLoadLibraryExA = nullptr;
+
+// Trust verification may load supporting Windows DLLs. Let those nested loads
+// pass through so the LoadLibrary hooks do not recursively verify themselves.
+thread_local bool g_isCheckingLoadSignature = false;
+
 // Structure to hold module information
 struct ModuleInfo {
     std::wstring path;
@@ -289,22 +299,35 @@ std::wstring GetSignerName(LPCWSTR filePath) {
             return isCatalog ? L"[Signed via Catalog, No Signer Info]" : L"[Signed, No Signer Info]";
         }
 
-        CRYPT_PROVIDER_SGNR* pSgnr = WTHelperGetProvSignerFromChain(pProvData, 0, FALSE, 0);
-        if (!pSgnr || !pSgnr->pChainContext || pSgnr->pChainContext->cChain == 0 || 
-            pSgnr->pChainContext->rgpChain[0]->cElement == 0) {
-            return isCatalog ? L"[Signed via Catalog, Signer Not Found]" : L"[Signed, Signer Not Found]";
+        std::wstring signerNames;
+        for (DWORD signerIndex = 0; signerIndex < pProvData->csSigners; ++signerIndex) {
+            CRYPT_PROVIDER_SGNR* pSgnr = WTHelperGetProvSignerFromChain(pProvData, signerIndex, FALSE, 0);
+            if (!pSgnr || !pSgnr->pChainContext || pSgnr->pChainContext->cChain == 0 ||
+                pSgnr->pChainContext->rgpChain[0]->cElement == 0) {
+                continue;
+            }
+
+            PCCERT_CONTEXT pCertContext = pSgnr->pChainContext->rgpChain[0]->rgpElement[0]->pCertContext;
+            if (!pCertContext) {
+                continue;
+            }
+
+            WCHAR szName[256];
+            if (CertGetNameStringW(pCertContext, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, nullptr, szName, 256) > 1) {
+                if (!signerNames.empty()) {
+                    signerNames += L"; ";
+                }
+                signerNames += szName;
+                if (isCatalog) {
+                    signerNames += L" (Catalog)";
+                }
+            }
         }
 
-        PCCERT_CONTEXT pCertContext = pSgnr->pChainContext->rgpChain[0]->rgpElement[0]->pCertContext;
-        if (!pCertContext) {
-            return isCatalog ? L"[Signed via Catalog, Cert Not Found]" : L"[Signed, Cert Not Found]";
+        if (!signerNames.empty()) {
+            return signerNames;
         }
-
-        WCHAR szName[256];
-        if (CertGetNameStringW(pCertContext, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, nullptr, szName, 256) > 1) {
-            return isCatalog ? std::wstring(szName) + L" (Catalog)" : std::wstring(szName);
-        }
-        return isCatalog ? L"[Signed via Catalog, No Subject]" : L"[Signed, No Subject]";
+        return isCatalog ? L"[Signed via Catalog, Signer Not Found]" : L"[Signed, Signer Not Found]";
     };
 
     auto cleanupWinTrust = [&policyGUID](WINTRUST_DATA& wtd) {
@@ -391,6 +414,107 @@ std::wstring GetSignerName(LPCWSTR filePath) {
     CryptCATAdminReleaseContext(hCatAdmin, 0);
 
     return signerName;
+}
+
+bool ContainsOrdinalIgnoreCase(const std::wstring& value, const wchar_t* needle) {
+    const int needleLength = static_cast<int>(wcslen(needle));
+    if (needleLength == 0 || value.size() < static_cast<size_t>(needleLength)) {
+        return false;
+    }
+
+    for (size_t offset = 0; offset + needleLength <= value.size(); ++offset) {
+        if (CompareStringOrdinal(value.data() + offset, needleLength, needle, needleLength, TRUE) == CSTR_EQUAL) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::wstring ResolveLoadLibraryPath(LPCWSTR requestedPath) {
+    if (!requestedPath || requestedPath[0] == L'\0') {
+        return L"";
+    }
+
+    std::vector<wchar_t> resolvedPath(MAX_PATH);
+    while (true) {
+        DWORD length = SearchPathW(
+            nullptr,
+            requestedPath,
+            L".dll",
+            static_cast<DWORD>(resolvedPath.size()),
+            resolvedPath.data(),
+            nullptr);
+        if (length == 0) {
+            return L"";
+        }
+        if (length < resolvedPath.size()) {
+            return std::wstring(resolvedPath.data(), length);
+        }
+        resolvedPath.resize(static_cast<size_t>(length) + 1);
+    }
+}
+
+bool ShouldBlockLoadLibrary(LPCWSTR requestedPath) {
+    std::wstring resolvedPath = ResolveLoadLibraryPath(requestedPath);
+    if (resolvedPath.empty()) {
+        return false;
+    }
+
+    // GetSignerName returns a signer only after WinVerifyTrust accepts the
+    // embedded or catalog signature. Invalid and unsigned files stay allowed.
+    return ContainsOrdinalIgnoreCase(GetSignerName(resolvedPath.c_str()), L"Overwolf");
+}
+
+std::wstring ConvertAnsiToWchar(LPCSTR value) {
+    if (!value) {
+        return L"";
+    }
+
+    int requiredLength = MultiByteToWideChar(CP_ACP, 0, value, -1, nullptr, 0);
+    if (requiredLength <= 1) {
+        return L"";
+    }
+
+    std::wstring converted(static_cast<size_t>(requiredLength), L'\0');
+    if (MultiByteToWideChar(CP_ACP, 0, value, -1, converted.data(), requiredLength) == 0) {
+        return L"";
+    }
+    converted.resize(static_cast<size_t>(requiredLength - 1));
+    return converted;
+}
+
+bool IsBlockedLoadLibraryRequest(LPCWSTR requestedPath) {
+    if (g_isCheckingLoadSignature) {
+        return false;
+    }
+
+    g_isCheckingLoadSignature = true;
+    bool shouldBlock = false;
+    try {
+        shouldBlock = ShouldBlockLoadLibrary(requestedPath);
+    } catch (...) {
+        // Signature inspection is fail-open so unrelated DLL loads are not
+        // broken by path, trust-provider, or allocation failures.
+    }
+    g_isCheckingLoadSignature = false;
+    return shouldBlock;
+}
+
+bool IsBlockedLoadLibraryRequest(LPCSTR requestedPath) {
+    if (g_isCheckingLoadSignature) {
+        return false;
+    }
+
+    g_isCheckingLoadSignature = true;
+    bool shouldBlock = false;
+    try {
+        std::wstring widePath = ConvertAnsiToWchar(requestedPath);
+        shouldBlock = !widePath.empty() && ShouldBlockLoadLibrary(widePath.c_str());
+    } catch (...) {
+        // Keep the same fail-open behavior as the wide-character hook.
+    }
+    g_isCheckingLoadSignature = false;
+    return shouldBlock;
 }
 
 std::vector<char> ReadPeFile(LPCWSTR filePath) {
@@ -783,13 +907,45 @@ void HandleLoadedModule(HMODULE hModule) {
 }
 
 HMODULE WINAPI DetourLoadLibraryW(LPCWSTR lpLibFileName) {
+    if (IsBlockedLoadLibraryRequest(lpLibFileName)) {
+        SetLastError(ERROR_ACCESS_DENIED);
+        return nullptr;
+    }
+
     HMODULE hModule = pOriginalLoadLibraryW(lpLibFileName);
     HandleLoadedModule(hModule);
     return hModule;
 }
 
 HMODULE WINAPI DetourLoadLibraryA(LPCSTR lpLibFileName) {
+    if (IsBlockedLoadLibraryRequest(lpLibFileName)) {
+        SetLastError(ERROR_ACCESS_DENIED);
+        return nullptr;
+    }
+
     HMODULE hModule = pOriginalLoadLibraryA(lpLibFileName);
+    HandleLoadedModule(hModule);
+    return hModule;
+}
+
+HMODULE WINAPI DetourLoadLibraryExW(LPCWSTR lpLibFileName, HANDLE hFile, DWORD dwFlags) {
+    if (IsBlockedLoadLibraryRequest(lpLibFileName)) {
+        SetLastError(ERROR_ACCESS_DENIED);
+        return nullptr;
+    }
+
+    HMODULE hModule = pOriginalLoadLibraryExW(lpLibFileName, hFile, dwFlags);
+    HandleLoadedModule(hModule);
+    return hModule;
+}
+
+HMODULE WINAPI DetourLoadLibraryExA(LPCSTR lpLibFileName, HANDLE hFile, DWORD dwFlags) {
+    if (IsBlockedLoadLibraryRequest(lpLibFileName)) {
+        SetLastError(ERROR_ACCESS_DENIED);
+        return nullptr;
+    }
+
+    HMODULE hModule = pOriginalLoadLibraryExA(lpLibFileName, hFile, dwFlags);
     HandleLoadedModule(hModule);
     return hModule;
 }
@@ -801,9 +957,11 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         // Initialize MinHook
         if (MH_Initialize() != MH_OK) return FALSE;
 
-        // Create hooks for LoadLibraryW and LoadLibraryA
+        // Create hooks for every public LoadLibrary entry point.
         if (MH_CreateHook(&LoadLibraryW, &DetourLoadLibraryW, reinterpret_cast<LPVOID*>(&pOriginalLoadLibraryW)) != MH_OK ||
-            MH_CreateHook(&LoadLibraryA, &DetourLoadLibraryA, reinterpret_cast<LPVOID*>(&pOriginalLoadLibraryA)) != MH_OK) {
+            MH_CreateHook(&LoadLibraryA, &DetourLoadLibraryA, reinterpret_cast<LPVOID*>(&pOriginalLoadLibraryA)) != MH_OK ||
+            MH_CreateHook(&LoadLibraryExW, &DetourLoadLibraryExW, reinterpret_cast<LPVOID*>(&pOriginalLoadLibraryExW)) != MH_OK ||
+            MH_CreateHook(&LoadLibraryExA, &DetourLoadLibraryExA, reinterpret_cast<LPVOID*>(&pOriginalLoadLibraryExA)) != MH_OK) {
             MH_Uninitialize();
             return FALSE;
         }
