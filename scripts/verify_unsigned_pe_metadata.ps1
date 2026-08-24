@@ -122,9 +122,9 @@ $expectedLibloggerVersion = Get-CMakeVersionString -FilePath (Join-Path $repoRoo
 
 $artifactRoot = (Resolve-Path $ArtifactDirectory).Path
 $dll = Get-SingleArtifact -Root $artifactRoot -Pattern 'Toolscreen.dll' -Label 'Toolscreen DLL'
-$loggerDll = Get-SingleArtifact -Root $artifactRoot -Pattern 'liblogger_x64.dll' -Label 'liblogger DLL'
+$loggerDll = Get-SingleArtifact -Root $artifactRoot -Pattern 'liblogger_*.dll' -Label 'liblogger DLL'
 
 Assert-Metadata -File $dll -ExpectedProductName 'Toolscreen' -ExpectedDescription 'Toolscreen hook DLL' -ExpectedOriginalFilename 'Toolscreen.dll' -ExpectedVersion $expectedToolscreenVersion
-Assert-Metadata -File $loggerDll -ExpectedProductName 'liblogger' -ExpectedDescription 'LibLogger' -ExpectedOriginalFilename 'liblogger_x64.dll' -ExpectedVersion $expectedLibloggerVersion
+Assert-Metadata -File $loggerDll -ExpectedProductName 'liblogger' -ExpectedDescription 'LibLogger' -ExpectedOriginalFilename $loggerDll.Name -ExpectedVersion $expectedLibloggerVersion
 
 Write-Host "Verified unsigned PE metadata for Toolscreen artifacts in '$artifactRoot'."

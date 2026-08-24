@@ -22,7 +22,7 @@ jobs:
             sign_with_signpath: false
           - artifact_arch: arm64
             vs_arch: ARM64
-            sign_with_signpath: false
+            sign_with_signpath: true
     env:
       SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
       SIGNPATH_ORGANIZATION_ID: '0126c615-e5f1-4fed-a438-6b8de149c8f4'
@@ -73,7 +73,7 @@ jobs:
         if: ${{ matrix.sign_with_signpath }}
         uses: actions/upload-artifact@v4
         with:
-          name: liblogger-signpath-dll-input
+          name: liblogger-${{ matrix.artifact_arch }}-signpath-dll-input
           if-no-files-found: error
           retention-days: 1
           path: out/build-liblogger/windows-${{ matrix.artifact_arch }}/bin/Release/liblogger_${{ matrix.artifact_arch }}.dll
@@ -98,7 +98,7 @@ jobs:
         shell: pwsh
         run: |
           $artifactDllPath = 'out/build-liblogger/windows-${{ matrix.artifact_arch }}/bin/Release/liblogger_${{ matrix.artifact_arch }}.dll'
-          $signedDllPath = 'out/signpath-liblogger-dll-output/liblogger_x64.dll'
+          $signedDllPath = 'out/signpath-liblogger-dll-output/liblogger_${{ matrix.artifact_arch }}.dll'
 
           if (-not (Test-Path $artifactDllPath)) {
             throw "Expected liblogger DLL not found: $artifactDllPath"
@@ -372,6 +372,8 @@ jobs:
           assets=(
             release/windows/liblogger_x64.dll
             release/windows/liblogger_x64.pdb
+            release/windows/liblogger_arm64.dll
+            release/windows/liblogger_arm64.pdb
           )
 
           for asset in "${assets[@]}"; do
@@ -382,7 +384,7 @@ jobs:
             gh release create "$LIBLOGGER_SIGNED_RELEASE_TAG" \
               --target "$GITHUB_SHA" \
               --title "Latest signed LibLogger" \
-              --notes "Latest signed Windows x64 LibLogger build." \
+              --notes "Latest signed Windows x64 and ARM64 LibLogger builds." \
               --prerelease
           fi
 

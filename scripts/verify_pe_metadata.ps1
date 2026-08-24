@@ -122,12 +122,12 @@ $expectedLibloggerVersion = Get-CMakeVersionString -FilePath (Join-Path $repoRoo
 
 $artifactRoot = (Resolve-Path $ArtifactDirectory).Path
 $dll = Get-SingleArtifact -Root $artifactRoot -Pattern 'Toolscreen.dll' -Label 'Toolscreen DLL'
-$loggerDll = Get-SingleArtifact -Root $artifactRoot -Pattern 'liblogger_x64.dll' -Label 'liblogger DLL'
+$loggerDll = Get-SingleArtifact -Root $artifactRoot -Pattern 'liblogger_*.dll' -Label 'liblogger DLL'
 $installer = Get-SingleArtifact -Root $artifactRoot -Pattern 'Toolscreen-*-double-click-me.exe' -Label 'Toolscreen installer EXE'
 $downloader = Get-SingleArtifact -Root $artifactRoot -Pattern 'toolscreen-downloader.exe' -Label 'Toolscreen downloader EXE'
 
 Assert-Metadata -File $dll -ExpectedProductName 'Toolscreen' -ExpectedDescription 'Toolscreen hook DLL' -ExpectedOriginalFilename 'Toolscreen.dll' -ExpectedVersion $expectedToolscreenVersion
-Assert-Metadata -File $loggerDll -ExpectedProductName 'liblogger' -ExpectedDescription 'LibLogger' -ExpectedOriginalFilename 'liblogger_x64.dll' -ExpectedVersion $expectedLibloggerVersion
+Assert-Metadata -File $loggerDll -ExpectedProductName 'liblogger' -ExpectedDescription 'LibLogger' -ExpectedOriginalFilename $loggerDll.Name -ExpectedVersion $expectedLibloggerVersion
 Assert-Metadata -File $installer -ExpectedProductName 'Toolscreen' -ExpectedDescription 'Toolscreen installer' -ExpectedOriginalFilename $installer.Name -ExpectedVersion $expectedToolscreenVersion
 Assert-Metadata -File $downloader -ExpectedProductName 'Toolscreen' -ExpectedDescription 'Toolscreen downloader' -ExpectedOriginalFilename 'toolscreen-downloader.exe' -ExpectedVersion $expectedToolscreenVersion
 

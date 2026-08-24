@@ -25,14 +25,42 @@ concurrency:
 jobs:
   build_core:
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            vs_arch: x64
+            configure_preset: ci-ninja-x64
+            packaging_preset: ci-ninja-x64-packaging
+            build_preset: ci-release
+            package_build_preset: ci-package
+            logger_name: liblogger_x64
+            build_dir: out/build-ci
+            artifact_dir: out/build-ci/bin/Release
+            packaging_build_dir: out/build-ci-package
+            packaging_artifact_dir: out/build-ci-package/bin/Release
+            can_run: true
+          - arch: arm64
+            vs_arch: amd64_arm64
+            configure_preset: ci-ninja-arm64
+            packaging_preset: ci-ninja-arm64-packaging
+            build_preset: ci-release-arm64
+            package_build_preset: ci-package-arm64
+            logger_name: liblogger_arm64
+            build_dir: out/build-ci-arm64
+            artifact_dir: out/build-ci-arm64/bin/Release
+            packaging_build_dir: out/build-ci-package-arm64
+            packaging_artifact_dir: out/build-ci-package-arm64/bin/Release
+            can_run: false
     permissions:
       actions: read
       contents: read
     env:
-      TOOLSCREEN_BUILD_DIR: 'out/build-ci'
-      TOOLSCREEN_ARTIFACT_DIR: 'out/build-ci/bin/Release'
-      TOOLSCREEN_PACKAGING_BUILD_DIR: 'out/build-ci-package'
-      TOOLSCREEN_PACKAGING_ARTIFACT_DIR: 'out/build-ci-package/bin/Release'
+      TOOLSCREEN_BUILD_DIR: ${{ matrix.build_dir }}
+      TOOLSCREEN_ARTIFACT_DIR: ${{ matrix.artifact_dir }}
+      TOOLSCREEN_PACKAGING_BUILD_DIR: ${{ matrix.packaging_build_dir }}
+      TOOLSCREEN_PACKAGING_ARTIFACT_DIR: ${{ matrix.packaging_artifact_dir }}
       TOOLSCREEN_RELEASE_DIR: 'out/release-unsigned'
       VCPKG_DEFAULT_BINARY_CACHE: '${{ github.workspace }}/.cache/vcpkg/archives'
       VCPKG_BINARY_SOURCES: 'clear;files,${{ github.workspace }}/.cache/vcpkg/archives,readwrite'
@@ -46,7 +74,7 @@ jobs:
       - name: Set up MSVC developer command prompt
         uses: ilammy/msvc-dev-cmd@v1
         with:
-          arch: x64
+          arch: ${{ matrix.vs_arch }}
 
       - name: Set up sccache
         uses: mozilla-actions/sccache-action@v0.0.9
@@ -57,26 +85,26 @@ jobs:
           path: |
             ${{ env.TOOLSCREEN_BUILD_DIR }}/_deps
             ${{ env.TOOLSCREEN_BUILD_DIR }}/downloads
-          key: windows-build-deps-v3-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'src/vcpkg.json') }}
+          key: windows-${{ matrix.arch }}-build-deps-v4-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'src/vcpkg.json') }}
           restore-keys: |
-            windows-build-deps-v3-
+            windows-${{ matrix.arch }}-build-deps-v4-
 
       - name: Restore vcpkg binary cache
         uses: actions/cache@v4
         with:
           path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
-          key: windows-vcpkg-binary-v1-${{ hashFiles('src/vcpkg.json') }}
+          key: windows-${{ matrix.arch }}-vcpkg-binary-v2-${{ hashFiles('src/vcpkg.json') }}
           restore-keys: |
-            windows-vcpkg-binary-v1-
+            windows-${{ matrix.arch }}-vcpkg-binary-v2-
 
       - name: Restore prebuilt liblogger cache
         id: prebuilt_liblogger_cache
         uses: actions/cache@v4
         with:
           path: out/prebuilt-liblogger
-          key: windows-prebuilt-liblogger-v1-${{ hashFiles('liblogger/LibLoggerVersion.cmake', 'scripts/fetch_signed_liblogger.ps1') }}
+          key: windows-${{ matrix.arch }}-prebuilt-liblogger-v2-${{ hashFiles('liblogger/LibLoggerVersion.cmake', 'scripts/fetch_signed_liblogger.ps1') }}
           restore-keys: |
-            windows-prebuilt-liblogger-v1-
+            windows-${{ matrix.arch }}-prebuilt-liblogger-v2-
 
       - name: Fetch latest signed liblogger artifacts
         if: ${{ steps.prebuilt_liblogger_cache.outputs.cache-hit != 'true' }}
@@ -85,24 +113,26 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           $destination = Join-Path (Get-Location) 'out/prebuilt-liblogger'
-          & .\scripts\fetch_signed_liblogger.ps1 -DestinationDirectory $destination
+          & .\scripts\fetch_signed_liblogger.ps1 -DestinationDirectory $destination -Architecture '${{ matrix.arch }}'
 
       - name: Configure core build preset
         shell: pwsh
         run: |
-          $prebuiltLoggerDllPath = (Resolve-Path 'out/prebuilt-liblogger/liblogger_x64.dll').Path
+          $prebuiltLoggerDllPath = (Resolve-Path 'out/prebuilt-liblogger/${{ matrix.logger_name }}.dll').Path
 
-          cmake --preset ci-ninja-x64 -DTOOLSCREEN_ENABLE_JAR_PACKAGING=OFF -DTOOLSCREEN_ENABLE_EXE_PACKAGING=OFF -DTOOLSCREEN_BUILD_DOWNLOADER_ARTIFACTS=OFF -DTOOLSCREEN_STAGE_LIBLOGGER_PDB=OFF -DTOOLSCREEN_PREBUILT_LIBLOGGER_DLL_PATH="$prebuiltLoggerDllPath"
+          cmake --preset ${{ matrix.configure_preset }} -DTOOLSCREEN_ENABLE_JAR_PACKAGING=OFF -DTOOLSCREEN_ENABLE_EXE_PACKAGING=OFF -DTOOLSCREEN_BUILD_DOWNLOADER_ARTIFACTS=OFF -DTOOLSCREEN_STAGE_LIBLOGGER_PDB=OFF -DTOOLSCREEN_PREBUILT_LIBLOGGER_DLL_PATH="$prebuiltLoggerDllPath"
 
       - name: Build DLLs and test runners
         shell: pwsh
-        run: cmake --build --preset ci-release --parallel --target Toolscreen toolscreen_gui_integration_tests toolscreen_interactive_create_tests toolscreen_game_state_source_tests toolscreen_path_sanitize_tests toolscreen_background_fit_layout_tests toolscreen_startup_lifecycle_tests
+        run: cmake --build --preset ${{ matrix.build_preset }} --parallel --target Toolscreen toolscreen_gui_integration_tests toolscreen_interactive_create_tests toolscreen_game_state_source_tests toolscreen_path_sanitize_tests toolscreen_background_fit_layout_tests toolscreen_startup_lifecycle_tests
 
       - name: Run fast CTest smoke tests
+        if: ${{ matrix.can_run }}
         shell: pwsh
-        run: ctest --preset ci-release --exclude-regex "^toolscreen_integration_"
+        run: ctest --preset ${{ matrix.build_preset }} --exclude-regex "^toolscreen_integration_"
 
       - name: Run GUI integration tests in parallel
+        if: ${{ matrix.can_run }}
         shell: pwsh
         run: |
           & "$env:GITHUB_WORKSPACE\$env:TOOLSCREEN_ARTIFACT_DIR\toolscreen_gui_integration_tests.exe" --run-groups-parallel
@@ -128,14 +158,14 @@ jobs:
         shell: pwsh
         run: |
           $toolscreenDllPath = (Resolve-Path "$env:TOOLSCREEN_ARTIFACT_DIR/Toolscreen.dll").Path
-          $libloggerDllPath = (Resolve-Path "$env:TOOLSCREEN_ARTIFACT_DIR/liblogger_x64.dll").Path
+          $libloggerDllPath = (Resolve-Path "$env:TOOLSCREEN_ARTIFACT_DIR/${{ matrix.logger_name }}.dll").Path
 
-          cmake --preset ci-ninja-x64-packaging -DTOOLSCREEN_ENABLE_EXE_PACKAGING=OFF -DTOOLSCREEN_BUILD_DOWNLOADER_ARTIFACTS=OFF -DTOOLSCREEN_STAGE_LIBLOGGER_PDB=OFF -DTOOLSCREEN_PACKAGING_DLL_PATH="$toolscreenDllPath" -DTOOLSCREEN_PACKAGING_LIBLOGGER_PATH="$libloggerDllPath"
+          cmake --preset ${{ matrix.packaging_preset }} -DTOOLSCREEN_ENABLE_EXE_PACKAGING=OFF -DTOOLSCREEN_BUILD_DOWNLOADER_ARTIFACTS=OFF -DTOOLSCREEN_STAGE_LIBLOGGER_PDB=OFF -DTOOLSCREEN_PACKAGING_DLL_PATH="$toolscreenDllPath" -DTOOLSCREEN_PACKAGING_LIBLOGGER_PATH="$libloggerDllPath"
 
       - name: Build JAR package
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         shell: pwsh
-        run: cmake --build --preset ci-package --parallel --target jar
+        run: cmake --build --preset ${{ matrix.package_build_preset }} --parallel --target jar
 
       - name: Assemble unsigned release inputs
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
@@ -149,7 +179,7 @@ jobs:
 
           Copy-Item -Path (Join-Path $coreDir 'Toolscreen.dll') -Destination (Join-Path $releaseDir 'Toolscreen.dll') -Force
           Copy-Item -Path (Join-Path $coreDir 'Toolscreen.pdb') -Destination (Join-Path $releaseDir 'Toolscreen.pdb') -Force
-          Copy-Item -Path (Join-Path $coreDir 'liblogger_x64.dll') -Destination (Join-Path $releaseDir 'liblogger_x64.dll') -Force
+          Copy-Item -Path (Join-Path $coreDir '${{ matrix.logger_name }}.dll') -Destination (Join-Path $releaseDir '${{ matrix.logger_name }}.dll') -Force
 
           $jarPath = Get-ChildItem -Path $jarDir -File -Filter 'Toolscreen-*-double-click-me.jar' | Select-Object -First 1 -ExpandProperty FullName
           if (-not $jarPath) {
@@ -233,7 +263,7 @@ jobs:
           $filesToRename = @(
             Join-Path $outputDir 'Toolscreen.dll'
             Join-Path $outputDir 'Toolscreen.pdb'
-            Join-Path $outputDir 'liblogger_x64.dll'
+            Join-Path $outputDir '${{ matrix.logger_name }}.dll'
             Get-SingleArtifactPath 'Toolscreen-*-double-click-me.jar' 'main installer jar'
           )
 
@@ -251,14 +281,14 @@ jobs:
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         uses: actions/upload-artifact@v4
         with:
-          name: toolscreen-unsigned-artifacts
+          name: toolscreen-${{ matrix.arch }}-unsigned-artifacts
           compression-level: 6
           if-no-files-found: error
           retention-days: 7
           path: |
             ${{ env.TOOLSCREEN_RELEASE_DIR }}/Toolscreen-not-legal-for-speedruns.dll
             ${{ env.TOOLSCREEN_RELEASE_DIR }}/Toolscreen-not-legal-for-speedruns.pdb
-            ${{ env.TOOLSCREEN_RELEASE_DIR }}/liblogger_x64-not-legal-for-speedruns.dll
+            ${{ env.TOOLSCREEN_RELEASE_DIR }}/${{ matrix.logger_name }}-not-legal-for-speedruns.dll
             ${{ env.TOOLSCREEN_RELEASE_DIR }}/Toolscreen-*-double-click-me-not-legal-for-speedruns.jar
 
       - name: Show sccache stats

@@ -23,7 +23,7 @@ A screen mirroring and overlay tool for Minecraft Java Edition speedrunning. Res
 
 ## Requirements
 
-- **Windows 10 or 11** (x64 only — ARM64 not supported, macOS/Linux not supported)
+- **Windows 10 or 11** (x64 or ARM64; macOS/Linux are not supported)
 - **Java 17+** (needed to run the installer)
 - **Minecraft Java Edition**
 - **Supported launchers:** Prism Launcher, MultiMC, MCSRLauncher
@@ -79,7 +79,7 @@ Double-click the Toolscreen installer (`.jar` or `.exe`) and select **Uninstall*
 
 Free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by [SignPath Foundation](https://signpath.org/).
 
-The Windows release binaries built in this repository, including `Toolscreen.dll`, `liblogger_x64.dll`, and the packaged installers, are signed through the GitHub Actions + SignPath trusted-build flow.
+The Windows x64 and ARM64 release binaries built in this repository, including `Toolscreen.dll`, the matching architecture's `liblogger_*.dll`, and the packaged installers, are signed through the GitHub Actions + SignPath trusted-build flow.
 
 - Repository owner: [jojoe77777](https://github.com/jojoe77777)
 - Authors: [jojoe77777](https://github.com/jojoe77777)
@@ -97,9 +97,9 @@ Need help or want to share your setup? Join the [Discord server](https://discord
 
 ## Building
 
-Run the manual `Build Liblogger` GitHub Actions workflow once to publish the reusable logger assets. That workflow builds Linux `x64`/`x86`/`arm64`/`arm32`, Windows `x64`/`x86`/`arm64`, and a macOS universal `liblogger.dylib` containing both `x64` and `arm64`. Only the Windows `liblogger_x64.dll` is code-signed.
+Run the manual `Build Liblogger` GitHub Actions workflow once to publish the reusable logger assets. That workflow builds Linux `x64`/`x86`/`arm64`/`arm32`, Windows `x64`/`x86`/`arm64`, and a macOS universal `liblogger.dylib` containing both `x64` and `arm64`. The Windows x64 and ARM64 logger DLLs are code-signed.
 
-After that, run `build.bat` to build Toolscreen. The script downloads the latest signed `liblogger_x64.dll` and `liblogger_x64.pdb` from that workflow release, then stages them into `out/build/bin/Release/` alongside the Toolscreen artifacts.
+After that, run `build.bat` for x64 or `build.bat arm64` for ARM64. The script downloads the matching signed logger DLL and PDB, then stages them alongside the Toolscreen artifacts in `out/build/` or `out/build-arm64/` respectively.
 
 Run `build.bat --test` to execute the regular local and GitHub test flow.
 Run `build.bat --manual-ninjabrain-tests` to build and run the opt-in Ninjabrain integration suite in its separate manual test tree.

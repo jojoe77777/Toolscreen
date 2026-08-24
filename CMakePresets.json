@@ -47,6 +47,50 @@
         "TOOLSCREEN_ENABLE_JAR_PACKAGING": "OFF",
         "TOOLSCREEN_ENABLE_NINJABRAIN_API_MANUAL_TESTS": "ON"
       }
+    },
+    {
+      "name": "vs2022-arm64",
+      "displayName": "Visual Studio 2022 ARM64",
+      "generator": "Visual Studio 17 2022",
+      "architecture": {
+        "value": "ARM64",
+        "strategy": "set"
+      },
+      "binaryDir": "${sourceDir}/out/build-arm64",
+      "cacheVariables": {
+        "TOOLSCREEN_ENABLE_JAR_PACKAGING": "ON",
+        "TOOLSCREEN_TARGET_ARCH": "arm64"
+      }
+    },
+    {
+      "name": "ci-ninja-arm64",
+      "displayName": "CI Ninja ARM64",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/build-ci-arm64",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_COMPILER_LAUNCHER": "sccache",
+        "CMAKE_CXX_COMPILER_LAUNCHER": "sccache",
+        "TOOLSCREEN_ENABLE_JAR_PACKAGING": "ON",
+        "TOOLSCREEN_TARGET_ARCH": "arm64",
+        "TOOLSCREEN_USE_SCCACHE_FRIENDLY_DEBUG_INFO": "ON"
+      }
+    },
+    {
+      "name": "ci-ninja-arm64-packaging",
+      "displayName": "CI Ninja ARM64 Packaging",
+      "inherits": "ci-ninja-arm64",
+      "binaryDir": "${sourceDir}/out/build-ci-package-arm64"
+    },
+    {
+      "name": "vs2022-arm64-ninjabrain-manual-tests",
+      "displayName": "Visual Studio 2022 ARM64 (Manual Ninjabrain Tests)",
+      "inherits": "vs2022-arm64",
+      "binaryDir": "${sourceDir}/out/build-ninjabrain-manual-arm64",
+      "cacheVariables": {
+        "TOOLSCREEN_ENABLE_JAR_PACKAGING": "OFF",
+        "TOOLSCREEN_ENABLE_NINJABRAIN_API_MANUAL_TESTS": "ON"
+      }
     }
   ],
   "buildPresets": [
@@ -82,6 +126,40 @@
       "name": "debug-ninjabrain-manual-tests",
       "displayName": "Debug Manual Ninjabrain Tests",
       "configurePreset": "vs2022-x64-ninjabrain-manual-tests",
+      "configuration": "Debug"
+    },
+    {
+      "name": "release-arm64",
+      "displayName": "ARM64 Release",
+      "configurePreset": "vs2022-arm64",
+      "configuration": "Release"
+    },
+    {
+      "name": "debug-arm64",
+      "displayName": "ARM64 Debug",
+      "configurePreset": "vs2022-arm64",
+      "configuration": "Debug"
+    },
+    {
+      "name": "ci-release-arm64",
+      "displayName": "CI ARM64 Release",
+      "configurePreset": "ci-ninja-arm64"
+    },
+    {
+      "name": "ci-package-arm64",
+      "displayName": "CI ARM64 Packaging",
+      "configurePreset": "ci-ninja-arm64-packaging"
+    },
+    {
+      "name": "release-arm64-ninjabrain-manual-tests",
+      "displayName": "ARM64 Release Manual Ninjabrain Tests",
+      "configurePreset": "vs2022-arm64-ninjabrain-manual-tests",
+      "configuration": "Release"
+    },
+    {
+      "name": "debug-arm64-ninjabrain-manual-tests",
+      "displayName": "ARM64 Debug Manual Ninjabrain Tests",
+      "configurePreset": "vs2022-arm64-ninjabrain-manual-tests",
       "configuration": "Debug"
     }
   ],
@@ -130,6 +208,60 @@
       "name": "debug-ninjabrain-manual-tests",
       "displayName": "Debug Manual Ninjabrain Tests",
       "configurePreset": "vs2022-x64-ninjabrain-manual-tests",
+      "configuration": "Debug",
+      "filter": {
+        "include": {
+          "name": "^toolscreen_ninjabrain_"
+        }
+      },
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "release-arm64",
+      "displayName": "ARM64 Release Tests",
+      "configurePreset": "vs2022-arm64",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "debug-arm64",
+      "displayName": "ARM64 Debug Tests",
+      "configurePreset": "vs2022-arm64",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "ci-release-arm64",
+      "displayName": "CI ARM64 Release Tests",
+      "configurePreset": "ci-ninja-arm64",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "release-arm64-ninjabrain-manual-tests",
+      "displayName": "ARM64 Release Manual Ninjabrain Tests",
+      "configurePreset": "vs2022-arm64-ninjabrain-manual-tests",
+      "configuration": "Release",
+      "filter": {
+        "include": {
+          "name": "^toolscreen_ninjabrain_"
+        }
+      },
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "debug-arm64-ninjabrain-manual-tests",
+      "displayName": "ARM64 Debug Manual Ninjabrain Tests",
+      "configurePreset": "vs2022-arm64-ninjabrain-manual-tests",
       "configuration": "Debug",
       "filter": {
         "include": {

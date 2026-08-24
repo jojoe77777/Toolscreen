@@ -10,9 +10,29 @@ permissions:
 jobs:
   build-signed-release:
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            vs_arch: x64
+            configure_preset: ci-ninja-x64
+            build_preset: ci-release
+            logger_name: liblogger_x64
+            build_dir: out/build-ci
+            artifact_dir: out/build-ci/bin/Release
+            can_run: true
+          - arch: arm64
+            vs_arch: amd64_arm64
+            configure_preset: ci-ninja-arm64
+            build_preset: ci-release-arm64
+            logger_name: liblogger_arm64
+            build_dir: out/build-ci-arm64
+            artifact_dir: out/build-ci-arm64/bin/Release
+            can_run: false
     env:
-      TOOLSCREEN_BUILD_DIR: 'out/build-ci'
-      TOOLSCREEN_ARTIFACT_DIR: 'out/build-ci/bin/Release'
+      TOOLSCREEN_BUILD_DIR: ${{ matrix.build_dir }}
+      TOOLSCREEN_ARTIFACT_DIR: ${{ matrix.artifact_dir }}
       SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
       SIGNPATH_ORGANIZATION_ID: '0126c615-e5f1-4fed-a438-6b8de149c8f4'
       SIGNPATH_PROJECT_SLUG: 'Toolscreen'
@@ -33,7 +53,7 @@ jobs:
       - name: Set up MSVC developer command prompt
         uses: ilammy/msvc-dev-cmd@v1
         with:
-          arch: x64
+          arch: ${{ matrix.vs_arch }}
 
       - name: Set up sccache
         uses: mozilla-actions/sccache-action@v0.0.9
@@ -75,17 +95,17 @@ jobs:
           path: |
             ${{ env.TOOLSCREEN_BUILD_DIR }}/_deps
             ${{ env.TOOLSCREEN_BUILD_DIR }}/downloads
-          key: windows-build-deps-v2-full-${{ hashFiles('CMakeLists.txt', 'src/vcpkg.json') }}
+          key: windows-${{ matrix.arch }}-build-deps-v3-full-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'src/vcpkg.json') }}
           restore-keys: |
-            windows-build-deps-v2-full-
+            windows-${{ matrix.arch }}-build-deps-v3-full-
 
       - name: Restore vcpkg binary cache
         uses: actions/cache@v4
         with:
           path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
-          key: windows-vcpkg-binary-v1-${{ hashFiles('src/vcpkg.json') }}
+          key: windows-${{ matrix.arch }}-vcpkg-binary-v2-${{ hashFiles('src/vcpkg.json') }}
           restore-keys: |
-            windows-vcpkg-binary-v1-
+            windows-${{ matrix.arch }}-vcpkg-binary-v2-
 
       - name: Restore Maven repository cache
         uses: actions/cache@v4
@@ -100,9 +120,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: out/prebuilt-liblogger
-          key: windows-prebuilt-liblogger-v1-${{ hashFiles('liblogger/LibLoggerVersion.cmake', 'scripts/fetch_signed_liblogger.ps1') }}
+          key: windows-${{ matrix.arch }}-prebuilt-liblogger-v2-${{ hashFiles('liblogger/LibLoggerVersion.cmake', 'scripts/fetch_signed_liblogger.ps1') }}
           restore-keys: |
-            windows-prebuilt-liblogger-v1-
+            windows-${{ matrix.arch }}-prebuilt-liblogger-v2-
 
       - name: Fetch latest signed liblogger artifacts
         if: ${{ steps.prebuilt_liblogger_cache.outputs.cache-hit != 'true' }}
@@ -111,23 +131,24 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           $destination = Join-Path (Get-Location) 'out/prebuilt-liblogger'
-          & .\scripts\fetch_signed_liblogger.ps1 -DestinationDirectory $destination
+          & .\scripts\fetch_signed_liblogger.ps1 -DestinationDirectory $destination -Architecture '${{ matrix.arch }}'
 
       - name: Configure build preset
         shell: pwsh
         run: |
-          $prebuiltLoggerDllPath = (Resolve-Path 'out/prebuilt-liblogger/liblogger_x64.dll').Path
-          $prebuiltLoggerPdbPath = (Resolve-Path 'out/prebuilt-liblogger/liblogger_x64.pdb').Path
+          $prebuiltLoggerDllPath = (Resolve-Path 'out/prebuilt-liblogger/${{ matrix.logger_name }}.dll').Path
+          $prebuiltLoggerPdbPath = (Resolve-Path 'out/prebuilt-liblogger/${{ matrix.logger_name }}.pdb').Path
           $artifactDir = Join-Path $env:GITHUB_WORKSPACE $env:TOOLSCREEN_ARTIFACT_DIR
           $signedDllPath = Join-Path $artifactDir 'Toolscreen.signed-package-input.dll'
 
-          cmake --preset ci-ninja-x64 -DTOOLSCREEN_PACKAGING_DLL_PATH="$signedDllPath" -DTOOLSCREEN_PREBUILT_LIBLOGGER_DLL_PATH="$prebuiltLoggerDllPath" -DTOOLSCREEN_PREBUILT_LIBLOGGER_PDB_PATH="$prebuiltLoggerPdbPath"
+          cmake --preset ${{ matrix.configure_preset }} -DTOOLSCREEN_PACKAGING_DLL_PATH="$signedDllPath" -DTOOLSCREEN_PREBUILT_LIBLOGGER_DLL_PATH="$prebuiltLoggerDllPath" -DTOOLSCREEN_PREBUILT_LIBLOGGER_PDB_PATH="$prebuiltLoggerPdbPath"
 
       - name: Build unsigned DLLs and test runners
         shell: pwsh
-        run: cmake --build --preset ci-release --parallel --target Toolscreen toolscreen_gui_integration_tests toolscreen_interactive_create_tests toolscreen_game_state_source_tests toolscreen_path_sanitize_tests toolscreen_background_fit_layout_tests toolscreen_startup_lifecycle_tests
+        run: cmake --build --preset ${{ matrix.build_preset }} --parallel --target Toolscreen toolscreen_gui_integration_tests toolscreen_interactive_create_tests toolscreen_game_state_source_tests toolscreen_path_sanitize_tests toolscreen_background_fit_layout_tests toolscreen_startup_lifecycle_tests
 
       - name: Run CLI integration tests
+        if: ${{ matrix.can_run }}
         shell: pwsh
         run: |
           & "$env:GITHUB_WORKSPACE\$env:TOOLSCREEN_ARTIFACT_DIR\toolscreen_gui_integration_tests.exe" --run-all
@@ -136,7 +157,7 @@ jobs:
         id: signpath_dll_upload
         uses: actions/upload-artifact@v4
         with:
-          name: toolscreen-signpath-dll-input
+          name: toolscreen-${{ matrix.arch }}-signpath-dll-input
           compression-level: 6
           if-no-files-found: error
           retention-days: 1
@@ -181,17 +202,17 @@ jobs:
 
       - name: Prepare EXE packaging inputs
         shell: pwsh
-        run: cmake --build --preset ci-release --parallel --target toolscreen_prepare_easyinject_exe_inputs
+        run: cmake --build --preset ${{ matrix.build_preset }} --parallel --target toolscreen_prepare_easyinject_exe_inputs
 
       - name: Reconfigure packaging preset
         shell: pwsh
         run: |
-          $prebuiltLoggerDllPath = (Resolve-Path 'out/prebuilt-liblogger/liblogger_x64.dll').Path
-          $prebuiltLoggerPdbPath = (Resolve-Path 'out/prebuilt-liblogger/liblogger_x64.pdb').Path
+          $prebuiltLoggerDllPath = (Resolve-Path 'out/prebuilt-liblogger/${{ matrix.logger_name }}.dll').Path
+          $prebuiltLoggerPdbPath = (Resolve-Path 'out/prebuilt-liblogger/${{ matrix.logger_name }}.pdb').Path
           $artifactDir = Join-Path $env:GITHUB_WORKSPACE $env:TOOLSCREEN_ARTIFACT_DIR
           $signedDllPath = (Resolve-Path (Join-Path $artifactDir 'Toolscreen.signed-package-input.dll')).Path
 
-          cmake --preset ci-ninja-x64 -DTOOLSCREEN_PACKAGING_DLL_PATH="$signedDllPath" -DTOOLSCREEN_PREBUILT_LIBLOGGER_DLL_PATH="$prebuiltLoggerDllPath" -DTOOLSCREEN_PREBUILT_LIBLOGGER_PDB_PATH="$prebuiltLoggerPdbPath"
+          cmake --preset ${{ matrix.configure_preset }} -DTOOLSCREEN_PACKAGING_DLL_PATH="$signedDllPath" -DTOOLSCREEN_PREBUILT_LIBLOGGER_DLL_PATH="$prebuiltLoggerDllPath" -DTOOLSCREEN_PREBUILT_LIBLOGGER_PDB_PATH="$prebuiltLoggerPdbPath"
 
       - name: Remove stale packaged artifacts
         shell: pwsh
@@ -212,15 +233,15 @@ jobs:
 
       - name: Build installer EXE package
         shell: pwsh
-        run: cmake --build --preset ci-release --parallel --target installer_exe
+        run: cmake --build --preset ${{ matrix.build_preset }} --parallel --target installer_exe
 
       - name: Build downloader EXE package
         shell: pwsh
-        run: cmake --build --preset ci-release --parallel --target downloader_exe
+        run: cmake --build --preset ${{ matrix.build_preset }} --parallel --target downloader_exe
 
       - name: Build JAR package
         shell: pwsh
-        run: cmake --build --preset ci-release --parallel --target jar
+        run: cmake --build --preset ${{ matrix.build_preset }} --parallel --target jar
 
       - name: Validate PE metadata for SignPath
         shell: pwsh
@@ -230,14 +251,15 @@ jobs:
           & $scriptPath -ArtifactDirectory $artifactDirectory
 
       - name: Run CTest packaging smoke tests
+        if: ${{ matrix.can_run }}
         shell: pwsh
-        run: ctest --preset ci-release --exclude-regex "^toolscreen_integration_"
+        run: ctest --preset ${{ matrix.build_preset }} --exclude-regex "^toolscreen_integration_"
 
       - name: Upload main installer JAR for SignPath
         id: signpath_jar_upload
         uses: actions/upload-artifact@v4
         with:
-          name: toolscreen-signpath-main-installer-jar-input
+          name: toolscreen-${{ matrix.arch }}-signpath-main-installer-jar-input
           compression-level: 6
           if-no-files-found: error
           retention-days: 1
@@ -278,7 +300,7 @@ jobs:
         id: signpath_installer_upload
         uses: actions/upload-artifact@v4
         with:
-          name: toolscreen-signpath-installer-exe-input
+          name: toolscreen-${{ matrix.arch }}-signpath-installer-exe-input
           compression-level: 6
           if-no-files-found: error
           retention-days: 1
@@ -319,7 +341,7 @@ jobs:
         id: signpath_downloader_upload
         uses: actions/upload-artifact@v4
         with:
-          name: toolscreen-signpath-downloader-exe-input
+          name: toolscreen-${{ matrix.arch }}-signpath-downloader-exe-input
           compression-level: 6
           if-no-files-found: error
           retention-days: 1
@@ -393,8 +415,8 @@ jobs:
           $filesToRename = @(
             Join-Path $outputDir 'Toolscreen.dll'
             Join-Path $outputDir 'Toolscreen.pdb'
-            Join-Path $outputDir 'liblogger_x64.dll'
-            Join-Path $outputDir 'liblogger_x64.pdb'
+            Join-Path $outputDir '${{ matrix.logger_name }}.dll'
+            Join-Path $outputDir '${{ matrix.logger_name }}.pdb'
             Get-SingleArtifactPath 'Toolscreen-*-double-click-me.jar' 'main installer jar'
             Get-SingleArtifactPath 'Toolscreen-*-double-click-me.exe' 'main installer exe'
             Join-Path $outputDir 'toolscreen-downloader.jar'
@@ -435,8 +457,8 @@ jobs:
           $artifactPaths = @(
             (Join-Path $artifactDir 'Toolscreen-not-legal-for-speedruns.dll')
             (Join-Path $artifactDir 'Toolscreen-not-legal-for-speedruns.pdb')
-            (Join-Path $artifactDir 'liblogger_x64-not-legal-for-speedruns.dll')
-            (Join-Path $artifactDir 'liblogger_x64-not-legal-for-speedruns.pdb')
+            (Join-Path $artifactDir '${{ matrix.logger_name }}-not-legal-for-speedruns.dll')
+            (Join-Path $artifactDir '${{ matrix.logger_name }}-not-legal-for-speedruns.pdb')
             (Get-SingleArtifactPath 'Toolscreen-*-double-click-me-not-legal-for-speedruns.jar' 'main installer jar')
             (Get-SingleArtifactPath 'Toolscreen-*-double-click-me-not-legal-for-speedruns.exe' 'main installer exe')
             (Join-Path $artifactDir 'toolscreen-downloader-not-legal-for-speedruns.jar')
@@ -459,15 +481,15 @@ jobs:
       - name: Upload signed release artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: toolscreen-signed-release-artifacts
+          name: toolscreen-${{ matrix.arch }}-signed-release-artifacts
           compression-level: 6
           if-no-files-found: error
           retention-days: 14
           path: |
             ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/Toolscreen-not-legal-for-speedruns.dll
             ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/Toolscreen-not-legal-for-speedruns.pdb
-            ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/liblogger_x64-not-legal-for-speedruns.dll
-            ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/liblogger_x64-not-legal-for-speedruns.pdb
+            ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/${{ matrix.logger_name }}-not-legal-for-speedruns.dll
+            ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/${{ matrix.logger_name }}-not-legal-for-speedruns.pdb
             ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/Toolscreen-*-double-click-me-not-legal-for-speedruns.jar
             ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/Toolscreen-*-double-click-me-not-legal-for-speedruns.exe
             ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/toolscreen-downloader-not-legal-for-speedruns.jar
@@ -477,7 +499,7 @@ jobs:
       - name: Upload final signed JAR artifact
         uses: actions/upload-artifact@v4
         with:
-          name: toolscreen-final-signed-jar
+          name: toolscreen-${{ matrix.arch }}-final-signed-jar
           compression-level: 6
           if-no-files-found: error
           retention-days: 14

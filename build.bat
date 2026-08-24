@@ -2,6 +2,7 @@
 setlocal
 
 set "SCRIPT_DIR=%~dp0"
+set "TARGET_ARCH=x64"
 set "CONFIGURE_PRESET=vs2022-x64"
 set "BUILD_PRESET=release"
 set "TEST_PRESET=release"
@@ -28,6 +29,8 @@ for %%A in (%*) do (
         set "RUN_TESTS=1"
     ) else if /I "%%~A"=="--manual-ninjabrain-tests" (
         set "RUN_NINJABRAIN_MANUAL_TESTS=1"
+    ) else if /I "%%~A"=="arm64" (
+        set "TARGET_ARCH=arm64"
     ) else (
         goto :usage
     )
@@ -35,24 +38,51 @@ for %%A in (%*) do (
 
 if "%RUN_TESTS%"=="1" if "%RUN_NINJABRAIN_MANUAL_TESTS%"=="1" goto :usage
 
-if "%RUN_NINJABRAIN_MANUAL_TESTS%"=="1" (
-    set "CONFIGURE_PRESET=vs2022-x64-ninjabrain-manual-tests"
+if /I "%TARGET_ARCH%"=="arm64" (
+    set "CONFIGURE_PRESET=vs2022-arm64"
+    set "PREBUILT_LIBLOGGER_DLL=%PREBUILT_LIBLOGGER_DIR%\liblogger_arm64.dll"
+    set "PREBUILT_LIBLOGGER_PDB=%PREBUILT_LIBLOGGER_DIR%\liblogger_arm64.pdb"
     if /I "%ARTIFACT_CONFIG_DIR%"=="Debug" (
-        set "BUILD_PRESET=debug-ninjabrain-manual-tests"
-        set "TEST_PRESET=debug-ninjabrain-manual-tests"
+        set "BUILD_PRESET=debug-arm64"
+        set "TEST_PRESET=debug-arm64"
     ) else (
-        set "BUILD_PRESET=release-ninjabrain-manual-tests"
-        set "TEST_PRESET=release-ninjabrain-manual-tests"
+        set "BUILD_PRESET=release-arm64"
+        set "TEST_PRESET=release-arm64"
     )
 )
 
-set "ARTIFACT_DIR=%SCRIPT_DIR%out\build\bin\%ARTIFACT_CONFIG_DIR%"
+if "%RUN_NINJABRAIN_MANUAL_TESTS%"=="1" (
+    set "CONFIGURE_PRESET=vs2022-%TARGET_ARCH%-ninjabrain-manual-tests"
+    if /I "%ARTIFACT_CONFIG_DIR%"=="Debug" (
+        if /I "%TARGET_ARCH%"=="arm64" (
+            set "BUILD_PRESET=debug-arm64-ninjabrain-manual-tests"
+            set "TEST_PRESET=debug-arm64-ninjabrain-manual-tests"
+        ) else (
+            set "BUILD_PRESET=debug-ninjabrain-manual-tests"
+            set "TEST_PRESET=debug-ninjabrain-manual-tests"
+        )
+    ) else (
+        if /I "%TARGET_ARCH%"=="arm64" (
+            set "BUILD_PRESET=release-arm64-ninjabrain-manual-tests"
+            set "TEST_PRESET=release-arm64-ninjabrain-manual-tests"
+        ) else (
+            set "BUILD_PRESET=release-ninjabrain-manual-tests"
+            set "TEST_PRESET=release-ninjabrain-manual-tests"
+        )
+    )
+)
+
+if /I "%TARGET_ARCH%"=="arm64" (
+    set "ARTIFACT_DIR=%SCRIPT_DIR%out\build-arm64\bin\%ARTIFACT_CONFIG_DIR%"
+) else (
+    set "ARTIFACT_DIR=%SCRIPT_DIR%out\build\bin\%ARTIFACT_CONFIG_DIR%"
+)
 set "CLI_TEST_RUNNER=%ARTIFACT_DIR%\toolscreen_gui_integration_tests.exe"
 
 pushd "%SCRIPT_DIR%" >nul || exit /b 1
 
 echo Downloading the latest signed liblogger artifacts...
-powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%scripts\fetch_signed_liblogger.ps1" -DestinationDirectory "%PREBUILT_LIBLOGGER_DIR%"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%scripts\fetch_signed_liblogger.ps1" -DestinationDirectory "%PREBUILT_LIBLOGGER_DIR%" -Architecture "%TARGET_ARCH%"
 if errorlevel 1 (
     set "FAILURE_STEP=Download signed liblogger artifacts"
     set "FAILURE_CODE=12"
@@ -119,10 +149,10 @@ if errorlevel 1 (
     goto :fail
 )
 
-echo Reconfiguring with preset vs2022-x64 so the EXE packaging step sees the copied DLL...
-cmake --preset vs2022-x64 -DTOOLSCREEN_PREBUILT_LIBLOGGER_DLL_PATH="%PREBUILT_LIBLOGGER_DLL%" -DTOOLSCREEN_PREBUILT_LIBLOGGER_PDB_PATH="%PREBUILT_LIBLOGGER_PDB%"
+echo Reconfiguring with preset %CONFIGURE_PRESET% so the EXE packaging step sees the copied DLL...
+cmake --preset %CONFIGURE_PRESET% -DTOOLSCREEN_PREBUILT_LIBLOGGER_DLL_PATH="%PREBUILT_LIBLOGGER_DLL%" -DTOOLSCREEN_PREBUILT_LIBLOGGER_PDB_PATH="%PREBUILT_LIBLOGGER_PDB%"
 if errorlevel 1 (
-    set "FAILURE_STEP=Reconfigure preset vs2022-x64 for EXE packaging"
+    set "FAILURE_STEP=Reconfigure preset %CONFIGURE_PRESET% for EXE packaging"
     set "FAILURE_CODE=40"
     goto :fail
 )
@@ -202,7 +232,7 @@ popd >nul
 exit /b 0
 
 :usage
-echo Usage: build.bat [release^|debug] [--test^|--manual-ninjabrain-tests]
+echo Usage: build.bat [release^|debug] [arm64] [--test^|--manual-ninjabrain-tests]
 popd >nul 2>nul
 exit /b 2
 
