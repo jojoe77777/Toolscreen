@@ -44,11 +44,19 @@ namespace macaron {
 
             size_t in_len = data.size();
             if (in_len > (std::numeric_limits<size_t>::max)() - 2) {
+#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
                 throw std::length_error("Base64 input is too large");
+#else
+                return {};
+#endif
             }
             const size_t encodedGroups = (in_len + 2) / 3;
             if (encodedGroups > (std::numeric_limits<size_t>::max)() / 4) {
+#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
                 throw std::length_error("Base64 output is too large");
+#else
+                return {};
+#endif
             }
             size_t out_len = 4 * encodedGroups;
             std::string ret(out_len, '\0');
