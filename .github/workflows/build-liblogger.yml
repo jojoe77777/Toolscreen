@@ -59,10 +59,11 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Configure liblogger build preset
+      - name: Configure standalone liblogger build
         shell: pwsh
         run: |
-          cmake -S . -B "out/build-liblogger/windows-${{ matrix.artifact_arch }}" -A "${{ matrix.vs_arch }}" -DTOOLSCREEN_ENABLE_JAR_PACKAGING=OFF -DTOOLSCREEN_BUILD_LIBLOGGER_FROM_SOURCE=ON
+          $outputDir = Join-Path $env:GITHUB_WORKSPACE 'out/build-liblogger/windows-${{ matrix.artifact_arch }}/bin/Release'
+          cmake -S liblogger -B "out/build-liblogger/windows-${{ matrix.artifact_arch }}" -A "${{ matrix.vs_arch }}" -DLIBLOGGER_OUTPUT_DIR="$outputDir"
 
       - name: Build liblogger DLL
         shell: cmd

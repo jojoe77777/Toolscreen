@@ -6711,6 +6711,12 @@ bool RecordAfterFinalBlit(const FinalBlitContext& context, PFN_vkCmdBlitImage or
             ? static_cast<int>(
                   context.sourceMetadata->extent.height)
             : presented.height;
+        if (context.sourceMetadata) {
+            // Mouse translation consumes the latest logical game-source size.
+            // The OpenGL backend publishes this from glViewport; Vulkan's
+            // authoritative equivalent is the final blit's source extent.
+            PublishLatestGameViewportSize(gameWidth, gameHeight);
+        }
         PublishNativeFrameGeometry(
             gameWidth, gameHeight, presented.x, presented.y,
             presented.width, presented.height);

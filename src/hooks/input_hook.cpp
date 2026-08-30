@@ -1111,6 +1111,11 @@ static void SyncWindowMetricsFromMessage(HWND hWnd, UINT uMsg, WPARAM wParam, LP
     if (clientSizeChanged) { shouldRecenterGui = true; }
 
     if (clientSizeChanged) {
+        // The previously observed game viewport belongs to the old client size.
+        // OpenGL normally republishes it on the next frame; Vulkan publishes its
+        // source extent independently. Until then, fall back to the recalculated
+        // mode instead of translating input through stale windowed dimensions.
+        InvalidateLatestGameViewportSize();
         ResendCurrentModeWmSize(hWnd, "input_hook:external_resize");
     }
     if (shouldRecenterGui) { g_guiNeedsRecenter = true; }

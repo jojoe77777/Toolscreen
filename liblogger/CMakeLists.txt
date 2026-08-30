@@ -56,6 +56,7 @@ else()
 endif()
 
 set(LIBLOGGER_OUTPUT_BASENAME "liblogger_${LIBLOGGER_OUTPUT_ARCH}")
+set(LIBLOGGER_OUTPUT_DIR "" CACHE PATH "Optional directory for standalone Windows DLL and PDB outputs")
 set(LIBLOGGER_COMPANY_NAME "jojoe77777")
 set(LIBLOGGER_PRODUCT_NAME "LibLogger")
 set(LIBLOGGER_COPYRIGHT "Copyright (c) 2026 jojoe77777")
@@ -208,7 +209,16 @@ set_target_properties(liblogger_windows PROPERTIES
   INTERPROCEDURAL_OPTIMIZATION_RELEASE ON
 )
 
-if(COMMAND toolscreen_configure_target_outputs)
+if(LIBLOGGER_OUTPUT_DIR)
+  set_target_properties(liblogger_windows PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${LIBLOGGER_OUTPUT_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE "${LIBLOGGER_OUTPUT_DIR}"
+    LIBRARY_OUTPUT_DIRECTORY "${LIBLOGGER_OUTPUT_DIR}"
+    LIBRARY_OUTPUT_DIRECTORY_RELEASE "${LIBLOGGER_OUTPUT_DIR}"
+    PDB_OUTPUT_DIRECTORY "${LIBLOGGER_OUTPUT_DIR}"
+    PDB_OUTPUT_DIRECTORY_RELEASE "${LIBLOGGER_OUTPUT_DIR}"
+  )
+elseif(COMMAND toolscreen_configure_target_outputs)
   toolscreen_configure_target_outputs(liblogger_windows)
 else()
   set_target_properties(liblogger_windows PROPERTIES

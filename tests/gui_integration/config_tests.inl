@@ -1511,6 +1511,17 @@ void RunConfigLoadFullscreenStretchRepairedTest(TestRunMode runMode = TestRunMod
                 "Expected the Fullscreen external-resize regression test to stage a stale cached client size.");
             UpdateCachedWindowMetricsFromSize(staleCachedW, staleCachedH);
 
+            // Minecraft 26.2's Vulkan startup can leave the windowed WGL
+            // bootstrap viewport here. Native Vulkan will not issue a later
+            // glViewport call to replace it after the client becomes fullscreen.
+            g_showGui.store(false, std::memory_order_release);
+            SetLatestGameViewportSizeForTests(854, 480);
+            int stagedViewportW = 0;
+            int stagedViewportH = 0;
+            Expect(GetLatestGameViewportSize(stagedViewportW, stagedViewportH) &&
+                       stagedViewportW == 854 && stagedViewportH == 480,
+                "Expected the Fullscreen external-resize regression test to stage a stale windowed game viewport.");
+
             WINDOWPOS pos{};
             pos.hwnd = window.hwnd();
             pos.cx = initialClientW;
@@ -1532,6 +1543,35 @@ void RunConfigLoadFullscreenStretchRepairedTest(TestRunMode runMode = TestRunMod
 
             g_originalWndProc = previousOriginalWndProc;
             g_subclassedHwnd.store(previousSubclassedHwnd, std::memory_order_release);
+
+            int viewportAfterResizeW = 0;
+            int viewportAfterResizeH = 0;
+            Expect(!GetLatestGameViewportSize(viewportAfterResizeW, viewportAfterResizeH),
+                "Expected a confirmed client resize to invalidate stale windowed viewport dimensions before translating fullscreen mouse input.");
+
+            struct ScopedCursorOverrideReset {
+                ~ScopedCursorOverrideReset() { SetCursorVisibilityOverrideForTests(false, false); }
+            } cursorOverrideReset;
+            SetCursorVisibilityOverrideForTests(true, true);
+
+            const int mouseClientX = initialClientW / 2;
+            const int mouseClientY = initialClientH / 2;
+            LPARAM translatedMouse = MAKELPARAM(mouseClientX, mouseClientY);
+            const InputHandlerResult mouseResult =
+                HandleMouseCoordinateTranslationPhase(window.hwnd(), WM_MOUSEMOVE, 0, translatedMouse);
+            const int translatedMouseX = static_cast<int>(static_cast<short>(LOWORD(translatedMouse)));
+            const int translatedMouseY = static_cast<int>(static_cast<short>(HIWORD(translatedMouse)));
+            const int expectedMouseX = static_cast<int>(static_cast<float>(mouseClientX) *
+                (static_cast<float>(fullscreenMode.width) / static_cast<float>(initialClientW)));
+            const int expectedMouseY = static_cast<int>(static_cast<float>(mouseClientY) *
+                (static_cast<float>(fullscreenMode.height) / static_cast<float>(initialClientH)));
+
+            Expect(!mouseResult.consumed,
+                "Expected fullscreen mouse translation to rewrite the client coordinates without consuming the message.");
+            Expect(translatedMouseX == expectedMouseX && translatedMouseY == expectedMouseY,
+                "Expected fullscreen mouse translation to use the current mode after invalidating the stale windowed viewport.");
+            Expect(translatedMouseX != 427 || translatedMouseY != 240,
+                "Expected fullscreen mouse translation to stop mapping through the stale 854x480 Vulkan bootstrap viewport.");
 
             int requestedW = 0;
             int requestedH = 0;

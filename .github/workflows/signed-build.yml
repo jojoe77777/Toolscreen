@@ -8,7 +8,8 @@ permissions:
   contents: read
 
 jobs:
-  build-signed-release:
+  build_signed_native:
+    name: Build and sign native ${{ matrix.arch }} payload
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -33,11 +34,214 @@ jobs:
     env:
       TOOLSCREEN_BUILD_DIR: ${{ matrix.build_dir }}
       TOOLSCREEN_ARTIFACT_DIR: ${{ matrix.artifact_dir }}
+      TOOLSCREEN_SIGNED_NATIVE_DIR: out/signed-native-payload
       SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
       SIGNPATH_ORGANIZATION_ID: '0126c615-e5f1-4fed-a438-6b8de149c8f4'
       SIGNPATH_PROJECT_SLUG: 'Toolscreen'
       SIGNPATH_SIGNING_POLICY_SLUG: 'release-signing'
       SIGNPATH_DLL_ARTIFACT_CONFIGURATION_SLUG: 'dll'
+      VCPKG_DEFAULT_BINARY_CACHE: '${{ github.workspace }}/.cache/vcpkg/archives'
+      VCPKG_BINARY_SOURCES: 'clear;files,${{ github.workspace }}/.cache/vcpkg/archives,readwrite'
+      VCPKG_DISABLE_METRICS: '1'
+      SCCACHE_GHA_ENABLED: 'true'
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up MSVC developer command prompt
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.vs_arch }}
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Validate signing configuration
+        shell: pwsh
+        run: |
+          if (-not $env:SIGNPATH_API_TOKEN) {
+            throw 'Missing SIGNPATH_API_TOKEN secret for the signed release workflow.'
+          }
+
+      - name: Resolve SignPath artifact version
+        id: signpath_version
+        shell: pwsh
+        run: |
+          $versionFile = Join-Path $env:GITHUB_WORKSPACE 'ToolscreenVersion.cmake'
+          $versionContent = Get-Content $versionFile -Raw
+
+          $majorMatch = [regex]::Match($versionContent, 'set\(TOOLSCREEN_VERSION_MAJOR\s+(\d+)\)')
+          $minorMatch = [regex]::Match($versionContent, 'set\(TOOLSCREEN_VERSION_MINOR\s+(\d+)\)')
+          $patchMatch = [regex]::Match($versionContent, 'set\(TOOLSCREEN_VERSION_PATCH\s+(\d+)\)')
+
+          if (-not $majorMatch.Success -or -not $minorMatch.Success -or -not $patchMatch.Success) {
+            throw "Failed to parse version from $versionFile"
+          }
+
+          $version = '{0}.{1}.{2}' -f $majorMatch.Groups[1].Value, $minorMatch.Groups[1].Value, $patchMatch.Groups[1].Value
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Restore CMake dependency cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.TOOLSCREEN_BUILD_DIR }}/_deps
+            ${{ env.TOOLSCREEN_BUILD_DIR }}/downloads
+          key: windows-${{ matrix.arch }}-signed-native-deps-v1-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'src/vcpkg.json') }}
+          restore-keys: |
+            windows-${{ matrix.arch }}-signed-native-deps-v1-
+
+      - name: Restore vcpkg binary cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: windows-${{ matrix.arch }}-vcpkg-binary-v2-${{ hashFiles('src/vcpkg.json') }}
+          restore-keys: |
+            windows-${{ matrix.arch }}-vcpkg-binary-v2-
+
+      - name: Restore prebuilt liblogger cache
+        id: prebuilt_liblogger_cache
+        uses: actions/cache@v4
+        with:
+          path: out/prebuilt-liblogger
+          key: windows-${{ matrix.arch }}-prebuilt-liblogger-v2-${{ hashFiles('liblogger/LibLoggerVersion.cmake', 'scripts/fetch_signed_liblogger.ps1') }}
+          restore-keys: |
+            windows-${{ matrix.arch }}-prebuilt-liblogger-v2-
+
+      - name: Fetch latest signed liblogger artifacts
+        if: ${{ steps.prebuilt_liblogger_cache.outputs.cache-hit != 'true' }}
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          $destination = Join-Path (Get-Location) 'out/prebuilt-liblogger'
+          & .\scripts\fetch_signed_liblogger.ps1 -DestinationDirectory $destination -Architecture '${{ matrix.arch }}'
+
+      - name: Configure native build preset
+        shell: pwsh
+        run: |
+          $prebuiltLoggerDllPath = (Resolve-Path 'out/prebuilt-liblogger/${{ matrix.logger_name }}.dll').Path
+          $prebuiltLoggerPdbPath = (Resolve-Path 'out/prebuilt-liblogger/${{ matrix.logger_name }}.pdb').Path
+
+          cmake --preset ${{ matrix.configure_preset }} -DTOOLSCREEN_ENABLE_JAR_PACKAGING=OFF -DTOOLSCREEN_ENABLE_EXE_PACKAGING=OFF -DTOOLSCREEN_BUILD_DOWNLOADER_ARTIFACTS=OFF -DTOOLSCREEN_STAGE_LIBLOGGER_PDB=ON -DTOOLSCREEN_PREBUILT_LIBLOGGER_DLL_PATH="$prebuiltLoggerDllPath" -DTOOLSCREEN_PREBUILT_LIBLOGGER_PDB_PATH="$prebuiltLoggerPdbPath"
+
+      - name: Build native DLLs and all test runners
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: cmake --build --preset ${{ matrix.build_preset }} --parallel --target Toolscreen toolscreen_gui_integration_tests toolscreen_interactive_create_tests toolscreen_game_state_source_tests toolscreen_path_sanitize_tests toolscreen_background_fit_layout_tests toolscreen_startup_lifecycle_tests toolscreen_expression_parser_tests toolscreen_base64_tests
+
+      - name: Run non-GUI native tests
+        if: ${{ matrix.can_run }}
+        shell: pwsh
+        run: ctest --preset ${{ matrix.build_preset }} --exclude-regex "^toolscreen_integration_"
+
+      - name: Run GUI integration tests in parallel
+        if: ${{ matrix.can_run }}
+        shell: pwsh
+        run: |
+          & "$env:GITHUB_WORKSPACE\$env:TOOLSCREEN_ARTIFACT_DIR\toolscreen_gui_integration_tests.exe" --run-groups-parallel
+
+      - name: Validate ARM64 native artifacts
+        if: ${{ matrix.can_run == false }}
+        shell: pwsh
+        run: ctest --preset ${{ matrix.build_preset }} --tests-regex "^(toolscreen_artifact_exists|liblogger_artifact_exists)$"
+
+      - name: Upload native DLL for SignPath
+        id: signpath_dll_upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: toolscreen-${{ matrix.arch }}-signpath-dll-input
+          compression-level: 6
+          if-no-files-found: error
+          retention-days: 1
+          path: ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/Toolscreen.dll
+
+      - name: Submit native DLL to SignPath with origin verification
+        uses: signpath/github-action-submit-signing-request@v2
+        with:
+          api-token: ${{ env.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ env.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ env.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ env.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: ${{ env.SIGNPATH_DLL_ARTIFACT_CONFIGURATION_SLUG }}
+          github-artifact-id: ${{ steps.signpath_dll_upload.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: out/signpath-dll-output
+          parameters: |
+            version: ${{ toJSON(steps.signpath_version.outputs.version) }}
+
+      - name: Assemble signed native payload
+        shell: pwsh
+        run: |
+          $artifactDir = Join-Path $env:GITHUB_WORKSPACE $env:TOOLSCREEN_ARTIFACT_DIR
+          $payloadDir = Join-Path $env:GITHUB_WORKSPACE $env:TOOLSCREEN_SIGNED_NATIVE_DIR
+          $signedDllPath = Join-Path $env:GITHUB_WORKSPACE 'out/signpath-dll-output/Toolscreen.dll'
+          $sourceFiles = @(
+            $signedDllPath
+            (Join-Path $artifactDir 'Toolscreen.pdb')
+            (Join-Path $artifactDir '${{ matrix.logger_name }}.dll')
+            (Join-Path $artifactDir '${{ matrix.logger_name }}.pdb')
+          )
+
+          New-Item -ItemType Directory -Force -Path $payloadDir | Out-Null
+
+          foreach ($sourceFile in $sourceFiles) {
+            if (-not (Test-Path -LiteralPath $sourceFile)) {
+              throw "Expected signed native payload input not found: $sourceFile"
+            }
+
+            Copy-Item -LiteralPath $sourceFile -Destination $payloadDir -Force
+          }
+
+      - name: Upload signed native payload
+        uses: actions/upload-artifact@v4
+        with:
+          name: toolscreen-${{ matrix.arch }}-signed-native-payload
+          compression-level: 6
+          if-no-files-found: error
+          retention-days: 2
+          path: |
+            ${{ env.TOOLSCREEN_SIGNED_NATIVE_DIR }}/Toolscreen.dll
+            ${{ env.TOOLSCREEN_SIGNED_NATIVE_DIR }}/Toolscreen.pdb
+            ${{ env.TOOLSCREEN_SIGNED_NATIVE_DIR }}/${{ matrix.logger_name }}.dll
+            ${{ env.TOOLSCREEN_SIGNED_NATIVE_DIR }}/${{ matrix.logger_name }}.pdb
+
+      - name: Show sccache stats
+        if: ${{ always() }}
+        shell: pwsh
+        run: sccache --show-stats
+
+  package_signed_release:
+    name: Package and sign ${{ matrix.arch }} release
+    needs: build_signed_native
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            vs_arch: x64
+            packaging_preset: ci-ninja-x64-packaging
+            package_build_preset: ci-package
+            logger_name: liblogger_x64
+            packaging_build_dir: out/build-ci-package
+            packaging_artifact_dir: out/build-ci-package/bin/Release
+          - arch: arm64
+            vs_arch: amd64_arm64
+            packaging_preset: ci-ninja-arm64-packaging
+            package_build_preset: ci-package-arm64
+            logger_name: liblogger_arm64
+            packaging_build_dir: out/build-ci-package-arm64
+            packaging_artifact_dir: out/build-ci-package-arm64/bin/Release
+    env:
+      TOOLSCREEN_PACKAGING_BUILD_DIR: ${{ matrix.packaging_build_dir }}
+      TOOLSCREEN_ARTIFACT_DIR: ${{ matrix.packaging_artifact_dir }}
+      SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+      SIGNPATH_ORGANIZATION_ID: '0126c615-e5f1-4fed-a438-6b8de149c8f4'
+      SIGNPATH_PROJECT_SLUG: 'Toolscreen'
+      SIGNPATH_SIGNING_POLICY_SLUG: 'release-signing'
       SIGNPATH_JAR_ARTIFACT_CONFIGURATION_SLUG: 'jar'
       SIGNPATH_INSTALLER_ARTIFACT_CONFIGURATION_SLUG: 'installer'
       SIGNPATH_DOWNLOADER_ARTIFACT_CONFIGURATION_SLUG: 'downloader'
@@ -89,15 +293,15 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Restore CMake dependency cache
+      - name: Restore packaging dependency cache
         uses: actions/cache@v4
         with:
           path: |
-            ${{ env.TOOLSCREEN_BUILD_DIR }}/_deps
-            ${{ env.TOOLSCREEN_BUILD_DIR }}/downloads
-          key: windows-${{ matrix.arch }}-build-deps-v3-full-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'src/vcpkg.json') }}
+            ${{ env.TOOLSCREEN_PACKAGING_BUILD_DIR }}/_deps
+            ${{ env.TOOLSCREEN_PACKAGING_BUILD_DIR }}/downloads
+          key: windows-${{ matrix.arch }}-signed-package-deps-v1-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'src/vcpkg.json') }}
           restore-keys: |
-            windows-${{ matrix.arch }}-build-deps-v3-full-
+            windows-${{ matrix.arch }}-signed-package-deps-v1-
 
       - name: Restore vcpkg binary cache
         uses: actions/cache@v4
@@ -115,104 +319,57 @@ jobs:
           restore-keys: |
             windows-maven-v2-
 
-      - name: Restore prebuilt liblogger cache
-        id: prebuilt_liblogger_cache
-        uses: actions/cache@v4
+      - name: Download signed x64 native payload
+        uses: actions/download-artifact@v4
         with:
-          path: out/prebuilt-liblogger
-          key: windows-${{ matrix.arch }}-prebuilt-liblogger-v2-${{ hashFiles('liblogger/LibLoggerVersion.cmake', 'scripts/fetch_signed_liblogger.ps1') }}
-          restore-keys: |
-            windows-${{ matrix.arch }}-prebuilt-liblogger-v2-
+          name: toolscreen-x64-signed-native-payload
+          path: out/signed-native/x64
 
-      - name: Fetch latest signed liblogger artifacts
-        if: ${{ steps.prebuilt_liblogger_cache.outputs.cache-hit != 'true' }}
-        shell: pwsh
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          $destination = Join-Path (Get-Location) 'out/prebuilt-liblogger'
-          & .\scripts\fetch_signed_liblogger.ps1 -DestinationDirectory $destination -Architecture '${{ matrix.arch }}'
-
-      - name: Configure build preset
-        shell: pwsh
-        run: |
-          $prebuiltLoggerDllPath = (Resolve-Path 'out/prebuilt-liblogger/${{ matrix.logger_name }}.dll').Path
-          $prebuiltLoggerPdbPath = (Resolve-Path 'out/prebuilt-liblogger/${{ matrix.logger_name }}.pdb').Path
-          $artifactDir = Join-Path $env:GITHUB_WORKSPACE $env:TOOLSCREEN_ARTIFACT_DIR
-          $signedDllPath = Join-Path $artifactDir 'Toolscreen.signed-package-input.dll'
-
-          cmake --preset ${{ matrix.configure_preset }} -DTOOLSCREEN_PACKAGING_DLL_PATH="$signedDllPath" -DTOOLSCREEN_PREBUILT_LIBLOGGER_DLL_PATH="$prebuiltLoggerDllPath" -DTOOLSCREEN_PREBUILT_LIBLOGGER_PDB_PATH="$prebuiltLoggerPdbPath"
-
-      - name: Build unsigned DLLs and test runners
-        shell: pwsh
-        run: cmake --build --preset ${{ matrix.build_preset }} --parallel --target Toolscreen toolscreen_gui_integration_tests toolscreen_interactive_create_tests toolscreen_game_state_source_tests toolscreen_path_sanitize_tests toolscreen_background_fit_layout_tests toolscreen_startup_lifecycle_tests
-
-      - name: Run CLI integration tests
-        if: ${{ matrix.can_run }}
-        shell: pwsh
-        run: |
-          & "$env:GITHUB_WORKSPACE\$env:TOOLSCREEN_ARTIFACT_DIR\toolscreen_gui_integration_tests.exe" --run-all
-
-      - name: Upload DLL for SignPath
-        id: signpath_dll_upload
-        uses: actions/upload-artifact@v4
+      - name: Download signed ARM64 native payload
+        uses: actions/download-artifact@v4
         with:
-          name: toolscreen-${{ matrix.arch }}-signpath-dll-input
-          compression-level: 6
-          if-no-files-found: error
-          retention-days: 1
-          path: ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/Toolscreen.dll
+          name: toolscreen-arm64-signed-native-payload
+          path: out/signed-native/arm64
 
-      - name: Submit DLL to SignPath with origin verification
-        uses: signpath/github-action-submit-signing-request@v2
-        with:
-          api-token: ${{ env.SIGNPATH_API_TOKEN }}
-          organization-id: ${{ env.SIGNPATH_ORGANIZATION_ID }}
-          project-slug: ${{ env.SIGNPATH_PROJECT_SLUG }}
-          signing-policy-slug: ${{ env.SIGNPATH_SIGNING_POLICY_SLUG }}
-          artifact-configuration-slug: ${{ env.SIGNPATH_DLL_ARTIFACT_CONFIGURATION_SLUG }}
-          github-artifact-id: ${{ steps.signpath_dll_upload.outputs.artifact-id }}
-          wait-for-completion: true
-          output-artifact-directory: out/signpath-dll-output
-          parameters: |
-            version: ${{ toJSON(steps.signpath_version.outputs.version) }}
-
-      - name: Preserve signed DLL for packaging
+      - name: Validate signed native payloads
         shell: pwsh
         run: |
-          $artifactDir = Join-Path $env:GITHUB_WORKSPACE $env:TOOLSCREEN_ARTIFACT_DIR
-          $artifactDllPath = Join-Path $artifactDir 'Toolscreen.dll'
-          $signedDllPath = Join-Path $artifactDir 'Toolscreen.signed-package-input.dll'
-          $downloadedSignedDllPath = 'out/signpath-dll-output/Toolscreen.dll'
+          $requiredPayloads = @(
+            'out/signed-native/x64/Toolscreen.dll'
+            'out/signed-native/x64/Toolscreen.pdb'
+            'out/signed-native/x64/liblogger_x64.dll'
+            'out/signed-native/x64/liblogger_x64.pdb'
+            'out/signed-native/arm64/Toolscreen.dll'
+            'out/signed-native/arm64/Toolscreen.pdb'
+            'out/signed-native/arm64/liblogger_arm64.dll'
+            'out/signed-native/arm64/liblogger_arm64.pdb'
+          )
 
-          if (-not (Test-Path $artifactDllPath)) {
-            throw "Expected unsigned DLL not found: $artifactDllPath"
+          foreach ($payloadPath in $requiredPayloads) {
+            if (-not (Test-Path -LiteralPath $payloadPath)) {
+              throw "Expected signed native payload not found: $payloadPath"
+            }
           }
 
-          if (-not (Test-Path $downloadedSignedDllPath)) {
-            throw "Expected signed DLL download not found: $downloadedSignedDllPath"
-          }
-
-          if (Test-Path $signedDllPath) {
-            Remove-Item -Path $signedDllPath -Force
-          }
-
-          Copy-Item -Path $downloadedSignedDllPath -Destination $signedDllPath -Force
-          Copy-Item -Path $downloadedSignedDllPath -Destination $artifactDllPath -Force
-
-      - name: Prepare EXE packaging inputs
-        shell: pwsh
-        run: cmake --build --preset ${{ matrix.build_preset }} --parallel --target toolscreen_prepare_easyinject_exe_inputs
-
-      - name: Reconfigure packaging preset
+      - name: Configure universal packaging build
         shell: pwsh
         run: |
-          $prebuiltLoggerDllPath = (Resolve-Path 'out/prebuilt-liblogger/${{ matrix.logger_name }}.dll').Path
-          $prebuiltLoggerPdbPath = (Resolve-Path 'out/prebuilt-liblogger/${{ matrix.logger_name }}.pdb').Path
-          $artifactDir = Join-Path $env:GITHUB_WORKSPACE $env:TOOLSCREEN_ARTIFACT_DIR
-          $signedDllPath = (Resolve-Path (Join-Path $artifactDir 'Toolscreen.signed-package-input.dll')).Path
+          $x64DllPath = (Resolve-Path 'out/signed-native/x64/Toolscreen.dll').Path
+          $arm64DllPath = (Resolve-Path 'out/signed-native/arm64/Toolscreen.dll').Path
+          $x64LoggerDllPath = (Resolve-Path 'out/signed-native/x64/liblogger_x64.dll').Path
+          $arm64LoggerDllPath = (Resolve-Path 'out/signed-native/arm64/liblogger_arm64.dll').Path
 
-          cmake --preset ${{ matrix.configure_preset }} -DTOOLSCREEN_PACKAGING_DLL_PATH="$signedDllPath" -DTOOLSCREEN_PREBUILT_LIBLOGGER_DLL_PATH="$prebuiltLoggerDllPath" -DTOOLSCREEN_PREBUILT_LIBLOGGER_PDB_PATH="$prebuiltLoggerPdbPath"
+          if ('${{ matrix.arch }}' -eq 'x64') {
+            $currentDllPath = $x64DllPath
+            $currentLoggerDllPath = $x64LoggerDllPath
+            $currentLoggerPdbPath = (Resolve-Path 'out/signed-native/x64/liblogger_x64.pdb').Path
+          } else {
+            $currentDllPath = $arm64DllPath
+            $currentLoggerDllPath = $arm64LoggerDllPath
+            $currentLoggerPdbPath = (Resolve-Path 'out/signed-native/arm64/liblogger_arm64.pdb').Path
+          }
+
+          cmake --preset ${{ matrix.packaging_preset }} -DTOOLSCREEN_ENABLE_JAR_PACKAGING=ON -DTOOLSCREEN_ENABLE_EXE_PACKAGING=ON -DTOOLSCREEN_BUILD_DOWNLOADER_ARTIFACTS=ON -DTOOLSCREEN_PACKAGING_DLL_PATH="$currentDllPath" -DTOOLSCREEN_PACKAGING_LIBLOGGER_PATH="$currentLoggerDllPath" -DTOOLSCREEN_PACKAGING_X64_DLL_PATH="$x64DllPath" -DTOOLSCREEN_PACKAGING_ARM64_DLL_PATH="$arm64DllPath" -DTOOLSCREEN_PACKAGING_X64_LIBLOGGER_PATH="$x64LoggerDllPath" -DTOOLSCREEN_PACKAGING_ARM64_LIBLOGGER_PATH="$arm64LoggerDllPath" -DTOOLSCREEN_PREBUILT_LIBLOGGER_DLL_PATH="$currentLoggerDllPath" -DTOOLSCREEN_PREBUILT_LIBLOGGER_PDB_PATH="$currentLoggerPdbPath"
 
       - name: Remove stale packaged artifacts
         shell: pwsh
@@ -233,15 +390,38 @@ jobs:
 
       - name: Build installer EXE package
         shell: pwsh
-        run: cmake --build --preset ${{ matrix.build_preset }} --parallel --target installer_exe
+        run: cmake --build --preset ${{ matrix.package_build_preset }} --parallel --target installer_exe
 
       - name: Build downloader EXE package
         shell: pwsh
-        run: cmake --build --preset ${{ matrix.build_preset }} --parallel --target downloader_exe
+        run: cmake --build --preset ${{ matrix.package_build_preset }} --parallel --target downloader_exe
 
-      - name: Build JAR package
+      - name: Build universal JAR packages
         shell: pwsh
-        run: cmake --build --preset ${{ matrix.build_preset }} --parallel --target jar
+        run: cmake --build --preset ${{ matrix.package_build_preset }} --parallel --target jar
+
+      - name: Stage signed native release artifacts
+        shell: pwsh
+        run: |
+          $artifactDir = Join-Path $env:GITHUB_WORKSPACE $env:TOOLSCREEN_ARTIFACT_DIR
+          $nativeDir = Join-Path $env:GITHUB_WORKSPACE 'out/signed-native/${{ matrix.arch }}'
+          $nativeFiles = @(
+            'Toolscreen.dll'
+            'Toolscreen.pdb'
+            '${{ matrix.logger_name }}.dll'
+            '${{ matrix.logger_name }}.pdb'
+          )
+
+          New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
+
+          foreach ($nativeFile in $nativeFiles) {
+            $sourcePath = Join-Path $nativeDir $nativeFile
+            if (-not (Test-Path -LiteralPath $sourcePath)) {
+              throw "Expected signed native release artifact not found: $sourcePath"
+            }
+
+            Copy-Item -LiteralPath $sourcePath -Destination (Join-Path $artifactDir $nativeFile) -Force
+          }
 
       - name: Validate PE metadata for SignPath
         shell: pwsh
@@ -250,10 +430,9 @@ jobs:
           $artifactDirectory = Join-Path $env:GITHUB_WORKSPACE $env:TOOLSCREEN_ARTIFACT_DIR
           & $scriptPath -ArtifactDirectory $artifactDirectory
 
-      - name: Run CTest packaging smoke tests
-        if: ${{ matrix.can_run }}
+      - name: Run universal packaging smoke tests
         shell: pwsh
-        run: ctest --preset ${{ matrix.build_preset }} --exclude-regex "^toolscreen_integration_"
+        run: ctest --test-dir ${{ env.TOOLSCREEN_PACKAGING_BUILD_DIR }} --output-on-failure --tests-regex "^(toolscreen_exe_exists|toolscreen_exe_embeds_dll|toolscreen_exe_resources_readable|toolscreen_downloader_exe_exists|toolscreen_jar_exists|toolscreen_downloader_jar_exists)$"
 
       - name: Upload main installer JAR for SignPath
         id: signpath_jar_upload
@@ -377,19 +556,6 @@ jobs:
           }
 
           Copy-Item -Path $signedDownloaderPath -Destination $downloaderPath -Force
-
-      - name: Restore signed DLL to release output
-        shell: pwsh
-        run: |
-          $artifactDir = Join-Path $env:GITHUB_WORKSPACE $env:TOOLSCREEN_ARTIFACT_DIR
-          $signedDllPath = Join-Path $artifactDir 'Toolscreen.signed-package-input.dll'
-          $artifactDllPath = Join-Path $artifactDir 'Toolscreen.dll'
-
-          if (-not (Test-Path $signedDllPath)) {
-            throw "Expected preserved signed DLL not found: $signedDllPath"
-          }
-
-          Copy-Item -Path $signedDllPath -Destination $artifactDllPath -Force
 
       - name: Rename release artifacts
         shell: pwsh

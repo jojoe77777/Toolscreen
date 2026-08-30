@@ -50,6 +50,10 @@ option(TOOLSCREEN_STAGE_LIBLOGGER_PDB "Stage the liblogger PDB into the build ou
 set(TOOLSCREEN_TARGET_ARCH "" CACHE STRING "Target architecture (x64 or arm64); normally detected from the compiler")
 set(TOOLSCREEN_PACKAGING_DLL_PATH "" CACHE FILEPATH "Optional override DLL path used for jar and EXE packaging inputs")
 set(TOOLSCREEN_PACKAGING_LIBLOGGER_PATH "" CACHE FILEPATH "Optional override liblogger DLL path used for jar and EXE packaging inputs")
+set(TOOLSCREEN_PACKAGING_X64_DLL_PATH "" CACHE FILEPATH "x64 Toolscreen DLL to embed in universal installers")
+set(TOOLSCREEN_PACKAGING_ARM64_DLL_PATH "" CACHE FILEPATH "ARM64 Toolscreen DLL to embed in universal installers")
+set(TOOLSCREEN_PACKAGING_X64_LIBLOGGER_PATH "" CACHE FILEPATH "x64 liblogger DLL to embed in universal installers")
+set(TOOLSCREEN_PACKAGING_ARM64_LIBLOGGER_PATH "" CACHE FILEPATH "ARM64 liblogger DLL to embed in universal installers")
 set(TOOLSCREEN_PREBUILT_LIBLOGGER_DLL_PATH "" CACHE FILEPATH "Path to the signed prebuilt liblogger DLL to stage into build outputs")
 set(TOOLSCREEN_PREBUILT_LIBLOGGER_PDB_PATH "" CACHE FILEPATH "Path to the matching prebuilt liblogger PDB to stage into build outputs")
 option(TOOLSCREEN_BUILD_LIBLOGGER_FROM_SOURCE "Build liblogger locally instead of using a prebuilt signed artifact" OFF)
@@ -90,7 +94,7 @@ function(toolscreen_configure_target_outputs target_name)
             LIBRARY_OUTPUT_DIRECTORY_${config_upper} "${TOOLSCREEN_ARTIFACT_ROOT}/${config}"
             ARCHIVE_OUTPUT_DIRECTORY_${config_upper} "${CMAKE_BINARY_DIR}/lib/${config}"
             PDB_OUTPUT_DIRECTORY_${config_upper} "${TOOLSCREEN_ARTIFACT_ROOT}/${config}"
-            COMPILE_PDB_OUTPUT_DIRECTORY_${config_upper} "${CMAKE_BINARY_DIR}/obj/${config}"
+            COMPILE_PDB_OUTPUT_DIRECTORY_${config_upper} "${CMAKE_BINARY_DIR}/obj/${config}/${target_name}"
         )
     endforeach()
 endfunction()
@@ -142,49 +146,6 @@ function(toolscreen_write_text_file_if_different file_path content)
 
     if(toolscreen_should_write)
         file(WRITE "${file_path}" "${content}")
-    endif()
-endfunction()
-
-function(toolscreen_configure_easyinject_architecture source_dir)
-    set(logger_name "liblogger_${TOOLSCREEN_TARGET_ARCH}.dll")
-    if(TOOLSCREEN_TARGET_ARCH STREQUAL "arm64")
-        set(other_logger_name "liblogger_x64.dll")
-    else()
-        set(other_logger_name "liblogger_arm64.dll")
-    endif()
-    file(REMOVE "${source_dir}/src/main/resources/dlls/${other_logger_name}")
-    foreach(relative_path
-            "src/main/java/com/easyinject/Main.java"
-            "exe/CMakeLists.txt"
-            "exe/src/main.cpp")
-        set(file_path "${source_dir}/${relative_path}")
-        if(EXISTS "${file_path}")
-            file(READ "${file_path}" file_content)
-            string(REGEX REPLACE "liblogger_(x64|arm64)[.]dll" "${logger_name}" file_content "${file_content}")
-            file(WRITE "${file_path}" "${file_content}")
-        endif()
-    endforeach()
-
-    if(TOOLSCREEN_TARGET_ARCH STREQUAL "arm64")
-        set(pom_path "${source_dir}/pom.xml")
-        if(EXISTS "${pom_path}")
-            file(READ "${pom_path}" pom_content)
-            string(REPLACE
-                "<exclude>org/sqlite/native/Windows/aarch64/**</exclude>"
-                "<exclude>org/sqlite/native/Windows/x86_64/**</exclude>"
-                pom_content "${pom_content}")
-            file(WRITE "${pom_path}" "${pom_content}")
-        endif()
-    else()
-        set(pom_path "${source_dir}/pom.xml")
-        if(EXISTS "${pom_path}")
-            file(READ "${pom_path}" pom_content)
-            string(REPLACE
-                "<exclude>org/sqlite/native/Windows/x86_64/**</exclude>"
-                "<exclude>org/sqlite/native/Windows/aarch64/**</exclude>"
-                pom_content "${pom_content}")
-            file(WRITE "${pom_path}" "${pom_content}")
-        endif()
     endif()
 endfunction()
 
@@ -496,11 +457,6 @@ toolscreen_configure_target_outputs(${PROJECT_NAME})
 toolscreen_enable_release_symbols(${PROJECT_NAME})
 
 set(TOOLSCREEN_LIBLOGGER_BASENAME "liblogger_${TOOLSCREEN_TARGET_ARCH}")
-if(TOOLSCREEN_TARGET_ARCH STREQUAL "arm64")
-    set(TOOLSCREEN_OTHER_LIBLOGGER_NAME "liblogger_x64.dll")
-else()
-    set(TOOLSCREEN_OTHER_LIBLOGGER_NAME "liblogger_arm64.dll")
-endif()
 set(TOOLSCREEN_LIBLOGGER_ARTIFACT_DLL_PATH "${TOOLSCREEN_ARTIFACT_ROOT}/$<CONFIG>/${TOOLSCREEN_LIBLOGGER_BASENAME}.dll")
 set(TOOLSCREEN_LIBLOGGER_ARTIFACT_PDB_PATH "${TOOLSCREEN_ARTIFACT_ROOT}/$<CONFIG>/${TOOLSCREEN_LIBLOGGER_BASENAME}.pdb")
 set(TOOLSCREEN_LIBLOGGER_BUILD_DEPENDENCY "")
@@ -711,7 +667,7 @@ if(TOOLSCREEN_ENABLE_JAR_PACKAGING OR TOOLSCREEN_ENABLE_EXE_PACKAGING)
     FetchContent_Declare(
         easyinjectbundled
         GIT_REPOSITORY https://github.com/jojoe77777/EasyInjectBundled.git
-        GIT_TAG e6ec8f84748548602ebdcdbf8313593f071ae4c2
+        GIT_TAG 7a388c0af56760118f74083ea175f66d3463cdbb
     )
 
     FetchContent_GetProperties(easyinjectbundled)
@@ -719,43 +675,7 @@ if(TOOLSCREEN_ENABLE_JAR_PACKAGING OR TOOLSCREEN_ENABLE_EXE_PACKAGING)
         FetchContent_Populate(easyinjectbundled)
     endif()
 
-    toolscreen_configure_easyinject_architecture("${easyinjectbundled_SOURCE_DIR}")
-
     file(REMOVE "${easyinjectbundled_SOURCE_DIR}/custom-dlls/WebView2Loader.dll")
-
-    # Package the private Vulkan layer manifest alongside Toolscreen.dll. The
-    # Vulkan layer entry points live in Toolscreen.dll itself.
-    set(TOOLSCREEN_EASYINJECT_MAIN_JAVA
-        "${easyinjectbundled_SOURCE_DIR}/src/main/java/com/easyinject/Main.java")
-    set(TOOLSCREEN_EASYINJECT_POM "${easyinjectbundled_SOURCE_DIR}/pom.xml")
-    file(READ "${TOOLSCREEN_EASYINJECT_POM}" TOOLSCREEN_EASYINJECT_POM_CONTENT)
-    if(NOT TOOLSCREEN_EASYINJECT_POM_CONTENT MATCHES "<include>\\*\\.json</include>")
-        string(REPLACE
-            "                    <include>*.dll</include>"
-            "                    <include>*.dll</include>\n                    <include>*.json</include>"
-            TOOLSCREEN_EASYINJECT_POM_CONTENT
-            "${TOOLSCREEN_EASYINJECT_POM_CONTENT}")
-        file(WRITE "${TOOLSCREEN_EASYINJECT_POM}" "${TOOLSCREEN_EASYINJECT_POM_CONTENT}")
-    endif()
-
-    file(READ "${TOOLSCREEN_EASYINJECT_MAIN_JAVA}" TOOLSCREEN_EASYINJECT_SUPPORT_CONTENT)
-    if(NOT TOOLSCREEN_EASYINJECT_SUPPORT_CONTENT MATCHES "endsWith\\(\\\"[.]json\\\"\\)")
-        string(REPLACE
-            "if (name.startsWith(DLL_RESOURCE_PATH) && name.toLowerCase().endsWith(\".dll\")) {"
-            "if (name.startsWith(DLL_RESOURCE_PATH) && (name.toLowerCase().endsWith(\".dll\") || name.toLowerCase().endsWith(\".json\"))) {"
-            TOOLSCREEN_EASYINJECT_SUPPORT_CONTENT
-            "${TOOLSCREEN_EASYINJECT_SUPPORT_CONTENT}")
-        string(REPLACE
-            "                        extractedDlls.add(outFile.toPath());"
-            "                        if (dllName.toLowerCase().endsWith(\".dll\")) extractedDlls.add(outFile.toPath());"
-            TOOLSCREEN_EASYINJECT_SUPPORT_CONTENT
-            "${TOOLSCREEN_EASYINJECT_SUPPORT_CONTENT}")
-        if(NOT TOOLSCREEN_EASYINJECT_SUPPORT_CONTENT MATCHES "endsWith\\(\\\"[.]json\\\"\\)")
-            message(FATAL_ERROR
-                "EasyInjectBundled extraction layout changed; could not add Vulkan layer support files.")
-        endif()
-        file(WRITE "${TOOLSCREEN_EASYINJECT_MAIN_JAVA}" "${TOOLSCREEN_EASYINJECT_SUPPORT_CONTENT}")
-    endif()
 
     set(TOOLSCREEN_EASYINJECT_BRANDING_PROPERTIES "${easyinjectbundled_SOURCE_DIR}/branding.properties")
     toolscreen_set_brand_version("${TOOLSCREEN_EASYINJECT_BRANDING_PROPERTIES}" "${PROJECT_VERSION}")
@@ -779,6 +699,38 @@ if(TOOLSCREEN_ENABLE_JAR_PACKAGING OR TOOLSCREEN_ENABLE_EXE_PACKAGING)
         set(TOOLSCREEN_PACKAGING_LOGGER_SOURCE "${TOOLSCREEN_PACKAGING_LIBLOGGER_PATH}")
     endif()
 
+    # Universal installers aggregate the products of both native builds. The
+    # current architecture may come from this build target; the other one is
+    # normally supplied by CI or found in the sibling local preset output.
+    if(NOT TOOLSCREEN_PACKAGING_X64_DLL_PATH)
+        if(TOOLSCREEN_TARGET_ARCH STREQUAL "x64")
+            set(TOOLSCREEN_PACKAGING_X64_DLL_PATH "${TOOLSCREEN_PACKAGING_DLL_SOURCE}")
+        else()
+            set(TOOLSCREEN_PACKAGING_X64_DLL_PATH "${CMAKE_CURRENT_SOURCE_DIR}/out/build/bin/Release/Toolscreen.dll")
+        endif()
+    endif()
+    if(NOT TOOLSCREEN_PACKAGING_ARM64_DLL_PATH)
+        if(TOOLSCREEN_TARGET_ARCH STREQUAL "arm64")
+            set(TOOLSCREEN_PACKAGING_ARM64_DLL_PATH "${TOOLSCREEN_PACKAGING_DLL_SOURCE}")
+        else()
+            set(TOOLSCREEN_PACKAGING_ARM64_DLL_PATH "${CMAKE_CURRENT_SOURCE_DIR}/out/build-arm64/bin/Release/Toolscreen.dll")
+        endif()
+    endif()
+    if(NOT TOOLSCREEN_PACKAGING_X64_LIBLOGGER_PATH)
+        if(TOOLSCREEN_TARGET_ARCH STREQUAL "x64")
+            set(TOOLSCREEN_PACKAGING_X64_LIBLOGGER_PATH "${TOOLSCREEN_PACKAGING_LOGGER_SOURCE}")
+        else()
+            set(TOOLSCREEN_PACKAGING_X64_LIBLOGGER_PATH "${CMAKE_CURRENT_SOURCE_DIR}/out/build/bin/Release/liblogger_x64.dll")
+        endif()
+    endif()
+    if(NOT TOOLSCREEN_PACKAGING_ARM64_LIBLOGGER_PATH)
+        if(TOOLSCREEN_TARGET_ARCH STREQUAL "arm64")
+            set(TOOLSCREEN_PACKAGING_ARM64_LIBLOGGER_PATH "${TOOLSCREEN_PACKAGING_LOGGER_SOURCE}")
+        else()
+            set(TOOLSCREEN_PACKAGING_ARM64_LIBLOGGER_PATH "${CMAKE_CURRENT_SOURCE_DIR}/out/build-arm64/bin/Release/liblogger_arm64.dll")
+        endif()
+    endif()
+
     set(TOOLSCREEN_PACKAGING_DEPENDENCIES)
     if(NOT TOOLSCREEN_PACKAGING_DLL_PATH)
         list(APPEND TOOLSCREEN_PACKAGING_DEPENDENCIES ${PROJECT_NAME})
@@ -792,10 +744,13 @@ if(TOOLSCREEN_ENABLE_JAR_PACKAGING OR TOOLSCREEN_ENABLE_EXE_PACKAGING)
             COMMAND ${CMAKE_COMMAND} -E make_directory "${easyinjectbundled_SOURCE_DIR}/custom-dlls"
             COMMAND ${CMAKE_COMMAND} -E make_directory "${easyinjectbundled_SOURCE_DIR}/src/main/resources/dlls"
             COMMAND ${CMAKE_COMMAND} -E make_directory "${TOOLSCREEN_ARTIFACT_ROOT}/$<CONFIG>"
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${TOOLSCREEN_PACKAGING_DLL_SOURCE}" "${easyinjectbundled_SOURCE_DIR}/custom-dlls/Toolscreen.dll"
+            COMMAND ${CMAKE_COMMAND} -E rm -f "${easyinjectbundled_SOURCE_DIR}/custom-dlls/Toolscreen.dll"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${TOOLSCREEN_PACKAGING_X64_DLL_PATH}" "${easyinjectbundled_SOURCE_DIR}/custom-dlls/Toolscreen_x64.dll"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${TOOLSCREEN_PACKAGING_ARM64_DLL_PATH}" "${easyinjectbundled_SOURCE_DIR}/custom-dlls/Toolscreen_arm64.dll"
             COMMAND ${CMAKE_COMMAND} -E rm -f "${easyinjectbundled_SOURCE_DIR}/custom-dlls/ToolscreenVulkanLayer.dll"
             COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/src/render/vulkan/layer/VK_LAYER_TOOLSCREEN_obs_redirect.json" "${easyinjectbundled_SOURCE_DIR}/custom-dlls/VK_LAYER_TOOLSCREEN_obs_redirect.json"
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${TOOLSCREEN_PACKAGING_LOGGER_SOURCE}" "${easyinjectbundled_SOURCE_DIR}/src/main/resources/dlls/${TOOLSCREEN_LIBLOGGER_BASENAME}.dll"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${TOOLSCREEN_PACKAGING_X64_LIBLOGGER_PATH}" "${easyinjectbundled_SOURCE_DIR}/src/main/resources/dlls/liblogger_x64.dll"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${TOOLSCREEN_PACKAGING_ARM64_LIBLOGGER_PATH}" "${easyinjectbundled_SOURCE_DIR}/src/main/resources/dlls/liblogger_arm64.dll"
             COMMAND ${CMAKE_COMMAND} -E rm -f "${easyinjectbundled_SOURCE_DIR}/custom-dlls/WebView2Loader.dll"
             COMMAND ${TOOLSCREEN_MAVEN_EXECUTABLE} -f "${easyinjectbundled_SOURCE_DIR}/pom.xml" -q --batch-mode --no-transfer-progress clean package
                     -Dbrand.name=Toolscreen
@@ -827,7 +782,7 @@ if(TOOLSCREEN_ENABLE_JAR_PACKAGING OR TOOLSCREEN_ENABLE_EXE_PACKAGING)
         FetchContent_Declare(
             easyinjectbundled_exe
             GIT_REPOSITORY https://github.com/jojoe77777/EasyInjectBundled.git
-            GIT_TAG e6ec8f84748548602ebdcdbf8313593f071ae4c2
+            GIT_TAG 7a388c0af56760118f74083ea175f66d3463cdbb
         )
 
         FetchContent_GetProperties(easyinjectbundled_exe)
@@ -835,20 +790,8 @@ if(TOOLSCREEN_ENABLE_JAR_PACKAGING OR TOOLSCREEN_ENABLE_EXE_PACKAGING)
             FetchContent_Populate(easyinjectbundled_exe)
         endif()
 
-        toolscreen_configure_easyinject_architecture("${easyinjectbundled_exe_SOURCE_DIR}")
-
-        set(TOOLSCREEN_EASYINJECT_EXE_LOGGER_RESOURCE
-            "${easyinjectbundled_exe_SOURCE_DIR}/src/main/resources/dlls/${TOOLSCREEN_LIBLOGGER_BASENAME}.dll")
-        if(EXISTS "${TOOLSCREEN_PREBUILT_LIBLOGGER_DLL_PATH}")
-            file(COPY_FILE "${TOOLSCREEN_PREBUILT_LIBLOGGER_DLL_PATH}"
-                "${TOOLSCREEN_EASYINJECT_EXE_LOGGER_RESOURCE}" ONLY_IF_DIFFERENT)
-        elseif(NOT EXISTS "${TOOLSCREEN_EASYINJECT_EXE_LOGGER_RESOURCE}")
-            message(FATAL_ERROR
-                "EasyInject EXE packaging requires ${TOOLSCREEN_LIBLOGGER_BASENAME}.dll at configure time. "
-                "Set TOOLSCREEN_PREBUILT_LIBLOGGER_DLL_PATH or disable TOOLSCREEN_ENABLE_EXE_PACKAGING.")
-        endif()
-
         file(REMOVE "${easyinjectbundled_exe_SOURCE_DIR}/custom-dlls/WebView2Loader.dll")
+        file(REMOVE "${easyinjectbundled_exe_SOURCE_DIR}/custom-dlls/Toolscreen.dll")
 
         set(TOOLSCREEN_EASYINJECT_EXE_BRANDING_PROPERTIES "${easyinjectbundled_exe_SOURCE_DIR}/branding.properties")
         toolscreen_set_brand_version("${TOOLSCREEN_EASYINJECT_EXE_BRANDING_PROPERTIES}" "${PROJECT_VERSION}")
@@ -898,14 +841,25 @@ END
         )
 
         file(MAKE_DIRECTORY "${easyinjectbundled_exe_SOURCE_DIR}/custom-dlls")
+        # EasyInject enumerates optional support resources while configuring its
+        # native resource table, so seed the manifest before add_subdirectory.
+        # The preparation target below refreshes it again before compilation.
+        file(COPY_FILE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/render/vulkan/layer/VK_LAYER_TOOLSCREEN_obs_redirect.json"
+            "${easyinjectbundled_exe_SOURCE_DIR}/custom-dlls/VK_LAYER_TOOLSCREEN_obs_redirect.json"
+            ONLY_IF_DIFFERENT)
         add_subdirectory("${easyinjectbundled_exe_SOURCE_DIR}/exe" "${CMAKE_CURRENT_BINARY_DIR}/easyinjectbundled-exe")
         toolscreen_configure_target_outputs(EasyInjectExe)
 
         add_custom_target(toolscreen_prepare_easyinject_exe_inputs
             COMMAND ${CMAKE_COMMAND} -E make_directory "${easyinjectbundled_exe_SOURCE_DIR}/custom-dlls"
             COMMAND ${CMAKE_COMMAND} -E make_directory "${easyinjectbundled_exe_SOURCE_DIR}/src/main/resources/dlls"
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${TOOLSCREEN_PACKAGING_DLL_SOURCE}" "${easyinjectbundled_exe_SOURCE_DIR}/custom-dlls/Toolscreen.dll"
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${TOOLSCREEN_PACKAGING_LOGGER_SOURCE}" "${easyinjectbundled_exe_SOURCE_DIR}/src/main/resources/dlls/${TOOLSCREEN_LIBLOGGER_BASENAME}.dll"
+            COMMAND ${CMAKE_COMMAND} -E rm -f "${easyinjectbundled_exe_SOURCE_DIR}/custom-dlls/Toolscreen.dll"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${TOOLSCREEN_PACKAGING_X64_DLL_PATH}" "${easyinjectbundled_exe_SOURCE_DIR}/custom-dlls/Toolscreen_x64.dll"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${TOOLSCREEN_PACKAGING_ARM64_DLL_PATH}" "${easyinjectbundled_exe_SOURCE_DIR}/custom-dlls/Toolscreen_arm64.dll"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/src/render/vulkan/layer/VK_LAYER_TOOLSCREEN_obs_redirect.json" "${easyinjectbundled_exe_SOURCE_DIR}/custom-dlls/VK_LAYER_TOOLSCREEN_obs_redirect.json"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${TOOLSCREEN_PACKAGING_X64_LIBLOGGER_PATH}" "${easyinjectbundled_exe_SOURCE_DIR}/src/main/resources/dlls/liblogger_x64.dll"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${TOOLSCREEN_PACKAGING_ARM64_LIBLOGGER_PATH}" "${easyinjectbundled_exe_SOURCE_DIR}/src/main/resources/dlls/liblogger_arm64.dll"
             COMMAND ${CMAKE_COMMAND} -E rm -f "${easyinjectbundled_exe_SOURCE_DIR}/custom-dlls/WebView2Loader.dll"
             DEPENDS ${TOOLSCREEN_PACKAGING_DEPENDENCIES}
             COMMENT "Preparing EasyInject exe packaging inputs"
@@ -926,8 +880,20 @@ END
 
         file(GENERATE
             OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/cmake/check_toolscreen_exe_embeds_dll_$<CONFIG>.cmake"
-            CONTENT "set(EMBED_DLL_INDEX_FILE \"${CMAKE_CURRENT_BINARY_DIR}/easyinjectbundled-exe/embedded_dll_index.txt\")\nif(NOT EXISTS \"${CMAKE_CURRENT_BINARY_DIR}/easyinjectbundled-exe/embedded_dll_index.txt\")\n  message(FATAL_ERROR \"Expected EasyInject embedded DLL index at '${CMAKE_CURRENT_BINARY_DIR}/easyinjectbundled-exe/embedded_dll_index.txt'\")\nendif()\nfile(READ \"${CMAKE_CURRENT_BINARY_DIR}/easyinjectbundled-exe/embedded_dll_index.txt\" EMBED_DLL_INDEX_CONTENT)\nif(NOT EMBED_DLL_INDEX_CONTENT MATCHES \"Toolscreen[.]dll\")\n  message(FATAL_ERROR \"Expected EasyInject EXE packaging metadata to embed Toolscreen.dll\")\nendif()\n"
+            CONTENT "set(EMBED_DLL_INDEX_FILE \"${CMAKE_CURRENT_BINARY_DIR}/easyinjectbundled-exe/embedded_dll_index.txt\")\nif(NOT EXISTS \"${CMAKE_CURRENT_BINARY_DIR}/easyinjectbundled-exe/embedded_dll_index.txt\")\n  message(FATAL_ERROR \"Expected EasyInject embedded resource index at '${CMAKE_CURRENT_BINARY_DIR}/easyinjectbundled-exe/embedded_dll_index.txt'\")\nendif()\nfile(READ \"${CMAKE_CURRENT_BINARY_DIR}/easyinjectbundled-exe/embedded_dll_index.txt\" EMBED_DLL_INDEX_CONTENT)\nforeach(REQUIRED_RESOURCE liblogger_x64.dll liblogger_arm64.dll Toolscreen_x64.dll Toolscreen_arm64.dll VK_LAYER_TOOLSCREEN_obs_redirect.json)\n  if(NOT EMBED_DLL_INDEX_CONTENT MATCHES \"\${REQUIRED_RESOURCE}\")\n    message(FATAL_ERROR \"Expected universal EasyInject EXE to embed \${REQUIRED_RESOURCE}\")\n  endif()\nendforeach()\n"
         )
+
+        if(TOOLSCREEN_TARGET_ARCH STREQUAL "x64")
+            file(SHA512
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/render/vulkan/layer/VK_LAYER_TOOLSCREEN_obs_redirect.json"
+                TOOLSCREEN_VULKAN_LAYER_MANIFEST_SHA512)
+            string(TOLOWER "${TOOLSCREEN_VULKAN_LAYER_MANIFEST_SHA512}"
+                TOOLSCREEN_VULKAN_LAYER_MANIFEST_SHA512)
+            file(GENERATE
+                OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/cmake/check_toolscreen_exe_resources_$<CONFIG>.cmake"
+                CONTENT "execute_process(COMMAND \"${EXE_OUTPUT}\" --info RESULT_VARIABLE INFO_RESULT OUTPUT_VARIABLE INFO_OUTPUT ERROR_VARIABLE INFO_ERROR)\nif(NOT INFO_RESULT EQUAL 0)\n  message(FATAL_ERROR \"EasyInject --info failed (\${INFO_RESULT}): \${INFO_ERROR}\")\nendif()\nstring(FIND \"\${INFO_OUTPUT}\" \"Name:   VK_LAYER_TOOLSCREEN_obs_redirect.json\" MANIFEST_NAME_INDEX)\nif(MANIFEST_NAME_INDEX LESS 0)\n  message(FATAL_ERROR \"EasyInject EXE did not report the Vulkan manifest:\\n\${INFO_OUTPUT}\")\nendif()\nstring(SUBSTRING \"\${INFO_OUTPUT}\" \${MANIFEST_NAME_INDEX} -1 MANIFEST_OUTPUT)\nstring(FIND \"\${MANIFEST_OUTPUT}\" \"Type:   support resource\" MANIFEST_TYPE_INDEX)\nstring(TOLOWER \"\${MANIFEST_OUTPUT}\" MANIFEST_OUTPUT_LOWER)\nstring(FIND \"\${MANIFEST_OUTPUT_LOWER}\" \"${TOOLSCREEN_VULKAN_LAYER_MANIFEST_SHA512}\" MANIFEST_HASH_INDEX)\nif(MANIFEST_TYPE_INDEX LESS 0 OR MANIFEST_HASH_INDEX LESS MANIFEST_TYPE_INDEX)\n  message(FATAL_ERROR \"EasyInject EXE did not report the Vulkan manifest as a readable, byte-exact support resource:\\n\${INFO_OUTPUT}\")\nendif()\n"
+            )
+        endif()
 
         add_test(
             NAME toolscreen_exe_exists
@@ -938,6 +904,13 @@ END
             NAME toolscreen_exe_embeds_dll
             COMMAND ${CMAKE_COMMAND} -P "${CMAKE_CURRENT_BINARY_DIR}/cmake/check_toolscreen_exe_embeds_dll_$<CONFIG>.cmake"
         )
+
+        if(TOOLSCREEN_TARGET_ARCH STREQUAL "x64")
+            add_test(
+                NAME toolscreen_exe_resources_readable
+                COMMAND ${CMAKE_COMMAND} -P "${CMAKE_CURRENT_BINARY_DIR}/cmake/check_toolscreen_exe_resources_$<CONFIG>.cmake"
+            )
+        endif()
 
         if(TOOLSCREEN_BUILD_DOWNLOADER_ARTIFACTS)
             set(TOOLSCREEN_DOWNLOADER_SOURCE_DIR "${easyinjectbundled_SOURCE_DIR}/toolscreen-installer-exe")
@@ -1023,22 +996,23 @@ END
     if(TOOLSCREEN_ENABLE_JAR_PACKAGING)
         string(CONCAT TOOLSCREEN_JAR_CHECK_SCRIPT
                 "set(TOOLSCREEN_JAR \"${JAR_OUTPUT}\")\n"
-                "set(TOOLSCREEN_JAR_CHECK_DIR \"${CMAKE_CURRENT_BINARY_DIR}/jar-single-dll-check-$<CONFIG>\")\n"
+                "set(TOOLSCREEN_JAR_CHECK_DIR \"${CMAKE_CURRENT_BINARY_DIR}/jar-universal-dll-check-$<CONFIG>\")\n"
                 "if(NOT EXISTS \"\${TOOLSCREEN_JAR}\")\n"
                 "  message(FATAL_ERROR \"Expected Toolscreen jar at '\${TOOLSCREEN_JAR}'\")\n"
                 "endif()\n"
                 "file(REMOVE_RECURSE \"\${TOOLSCREEN_JAR_CHECK_DIR}\")\n"
                 "file(MAKE_DIRECTORY \"\${TOOLSCREEN_JAR_CHECK_DIR}\")\n"
                 "file(ARCHIVE_EXTRACT INPUT \"\${TOOLSCREEN_JAR}\" DESTINATION \"\${TOOLSCREEN_JAR_CHECK_DIR}\")\n"
-                "if(NOT EXISTS \"\${TOOLSCREEN_JAR_CHECK_DIR}/dlls/Toolscreen.dll\")\n"
-                "  message(FATAL_ERROR \"Toolscreen jar does not contain dlls/Toolscreen.dll\")\n"
-                "endif()\n"
-                "if(NOT EXISTS \"\${TOOLSCREEN_JAR_CHECK_DIR}/dlls/${TOOLSCREEN_LIBLOGGER_BASENAME}.dll\")\n"
-                "  message(FATAL_ERROR \"Toolscreen jar does not contain dlls/${TOOLSCREEN_LIBLOGGER_BASENAME}.dll\")\n"
-                "endif()\n"
-                "if(EXISTS \"\${TOOLSCREEN_JAR_CHECK_DIR}/dlls/${TOOLSCREEN_OTHER_LIBLOGGER_NAME}\")\n"
-                "  message(FATAL_ERROR \"Toolscreen jar contains a logger DLL for the wrong architecture: ${TOOLSCREEN_OTHER_LIBLOGGER_NAME}\")\n"
-                "endif()\n"
+                "foreach(REQUIRED_DLL Toolscreen_x64.dll Toolscreen_arm64.dll liblogger_x64.dll liblogger_arm64.dll)\n"
+                "  if(NOT EXISTS \"\${TOOLSCREEN_JAR_CHECK_DIR}/dlls/\${REQUIRED_DLL}\")\n"
+                "    message(FATAL_ERROR \"Universal Toolscreen jar does not contain dlls/\${REQUIRED_DLL}\")\n"
+                "  endif()\n"
+                "endforeach()\n"
+                "foreach(SQLITE_ARCH x86_64 aarch64)\n"
+                "  if(NOT EXISTS \"\${TOOLSCREEN_JAR_CHECK_DIR}/org/sqlite/native/Windows/\${SQLITE_ARCH}/sqlitejdbc.dll\")\n"
+                "    message(FATAL_ERROR \"Universal Toolscreen jar does not contain Windows SQLite JNI for \${SQLITE_ARCH}\")\n"
+                "  endif()\n"
+                "endforeach()\n"
                 "if(EXISTS \"\${TOOLSCREEN_JAR_CHECK_DIR}/dlls/ToolscreenVulkanLayer.dll\")\n"
                 "  message(FATAL_ERROR \"Vulkan layer must be integrated into Toolscreen.dll, not packaged as ToolscreenVulkanLayer.dll\")\n"
                 "endif()\n"

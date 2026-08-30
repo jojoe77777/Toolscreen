@@ -504,6 +504,9 @@ bool SubclassGameWindow(HWND hwnd) {
 
     WNDPROC oldProc = (WNDPROC)SetWindowLongPtr(hwnd, GWLP_WNDPROC, (LONG_PTR)SubclassedWndProc);
     if (oldProc) {
+        // A recreated fullscreen HWND cannot reuse source dimensions observed
+        // for its predecessor. The active renderer will publish fresh geometry.
+        InvalidateLatestGameViewportSize();
         g_originalWndProc = oldProc;
         g_subclassedHwnd.store(hwnd);
         if (IsWindowInForegroundTree(hwnd)) {
@@ -1446,6 +1449,9 @@ static std::mutex g_sdlWindowStateMutex;
 static std::mutex g_sdlHookInstallMutex;
 static std::atomic<bool> g_sdlHooksInstalled{ false };
 
+static bool IsTrackedGlfwNoApiWindow();
+static bool IsTrackedSdlNoApiWindow();
+
 typedef UINT(WINAPI* GETRAWINPUTDATAPROC)(HRAWINPUT hRawInput, UINT uiCommand, LPVOID pData, PUINT pcbSize, UINT cbSizeHeader);
 GETRAWINPUTDATAPROC oGetRawInputData = NULL;
 GETRAWINPUTDATAPROC g_oGetRawInputDataThirdParty = NULL;
@@ -1564,8 +1570,17 @@ HCURSOR WINAPI hkSetCursor_ThirdParty(HCURSOR hCursor) {
 }
 // OBS redirect now plugs into the main glBlitFramebuffer hook below.
 
-static std::atomic<int> lastViewportW{ 0 };
-static std::atomic<int> lastViewportH{ 0 };
+static std::atomic<uint64_t> lastViewportSize{ 0 };
+
+static uint64_t PackViewportSize(int width, int height) {
+    return (static_cast<uint64_t>(static_cast<uint32_t>(width)) << 32) |
+           static_cast<uint32_t>(height);
+}
+
+static void UnpackViewportSize(uint64_t packed, int& width, int& height) {
+    width = static_cast<int>(static_cast<uint32_t>(packed >> 32));
+    height = static_cast<int>(static_cast<uint32_t>(packed));
+}
 
 static constexpr int kViewportHookRecentModeHistory = 6;
 
@@ -1724,6 +1739,16 @@ static inline void ViewportHook_Impl(GLVIEWPORTPROC next, GLint x, GLint y, GLsi
         return next(x, y, width, height);
     }
 
+    // Minecraft 26.2+ creates a short-lived WGL surface before rendering through
+    // its real no-API Vulkan window. It is not a game viewport and must not seed
+    // the live source dimensions later used to translate mouse coordinates.
+    const RenderBackend backend = GetRenderBackend();
+    if (backend == RenderBackend::Vulkan ||
+        (backend == RenderBackend::Unknown &&
+         (IsTrackedGlfwNoApiWindow() || IsTrackedSdlNoApiWindow()))) {
+        return next(x, y, width, height);
+    }
+
     const uint64_t hookSequence = NextGlStateHookSequence();
     g_pendingViewportRestore.active = false;
 
@@ -1767,8 +1792,10 @@ static inline void ViewportHook_Impl(GLVIEWPORTPROC next, GLint x, GLint y, GLsi
     }
 
     const ViewportHookCache& hookCache = GetViewportHookCache();
-    const int lastViewportWValue = lastViewportW.load(std::memory_order_relaxed);
-    const int lastViewportHValue = lastViewportH.load(std::memory_order_relaxed);
+    int lastViewportWValue = 0;
+    int lastViewportHValue = 0;
+    UnpackViewportSize(lastViewportSize.load(std::memory_order_acquire),
+                       lastViewportWValue, lastViewportHValue);
     int requestedViewportW = 0;
     int requestedViewportH = 0;
     int previousRequestedViewportW = 0;
@@ -1836,8 +1863,7 @@ static inline void ViewportHook_Impl(GLVIEWPORTPROC next, GLint x, GLint y, GLsi
         // Track the latest verified in-game viewport only while the settings GUI is closed.
         // GUI rendering can issue its own viewport calls, and carrying those sizes into
         // post-close mouse translation can desync cursor mapping from the game surface.
-        lastViewportW.store(static_cast<int>(width), std::memory_order_relaxed);
-        lastViewportH.store(static_cast<int>(height), std::memory_order_relaxed);
+        PublishLatestGameViewportSize(static_cast<int>(width), static_cast<int>(height));
     }
 
     const int screenW = GetCachedWindowWidth();
@@ -3194,8 +3220,9 @@ bool GetLatestGameViewportSize(int& outWidth, int& outHeight) {
         return false;
     }
 
-    const int width = lastViewportW.load(std::memory_order_relaxed);
-    const int height = lastViewportH.load(std::memory_order_relaxed);
+    int width = 0;
+    int height = 0;
+    UnpackViewportSize(lastViewportSize.load(std::memory_order_acquire), width, height);
     if (width <= 0 || height <= 0) {
         outWidth = 0;
         outHeight = 0;
@@ -3207,15 +3234,20 @@ bool GetLatestGameViewportSize(int& outWidth, int& outHeight) {
     return true;
 }
 
+void PublishLatestGameViewportSize(int width, int height) {
+    if (width <= 0 || height <= 0) return;
+    lastViewportSize.store(PackViewportSize(width, height), std::memory_order_release);
+}
+
 void InvalidateLatestGameViewportSize() {
-    lastViewportW.store(0, std::memory_order_relaxed);
-    lastViewportH.store(0, std::memory_order_relaxed);
+    lastViewportSize.store(0, std::memory_order_release);
 }
 
 #ifdef TOOLSCREEN_GUI_INTEGRATION_TESTS
 void SetLatestGameViewportSizeForTests(int width, int height) {
-    lastViewportW.store((std::max)(0, width), std::memory_order_relaxed);
-    lastViewportH.store((std::max)(0, height), std::memory_order_relaxed);
+    const int safeWidth = (std::max)(0, width);
+    const int safeHeight = (std::max)(0, height);
+    lastViewportSize.store(PackViewportSize(safeWidth, safeHeight), std::memory_order_release);
 }
 #endif
 
