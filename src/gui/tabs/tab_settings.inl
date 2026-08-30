@@ -281,7 +281,7 @@ if (BeginSelectableSettingsTopTabItem(trc("tabs.other"))) {
         ImGui::SeparatorText(trc("label.font"));
         RecordConfigSearchSectionInteractionRect("config.section.settings.font");
 
-        const std::vector<FontPickerOption> mainGuiFontOptions = BuildFontPickerOptions();
+        const std::vector<FontPickerOption>& mainGuiFontOptions = GetFontPickerOptions();
         auto applyMainGuiFontChange = []() {
             g_configIsDirty = true;
             RequestDynamicGuiFontRefresh(true);

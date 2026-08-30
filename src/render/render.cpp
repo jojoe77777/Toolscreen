@@ -24,8 +24,9 @@
 #include "imgui_impl_opengl3.h"
 #include "imgui_impl_win32.h"
 #include <Shlwapi.h>
-#include <cctype>
 #include <algorithm>
+#include <array>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -34,6 +35,7 @@
 #include <limits>
 #include <set>
 #include <shared_mutex>
+#include <span>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -851,7 +853,7 @@ static void ComputeMirrorGroupAnchorScreen(const MirrorGroupConfig& group, const
         if (fullH > 0) groupY = static_cast<int>(group.output.relativeY * static_cast<float>(fullH));
     }
     const std::string& anchor = group.output.relativeTo;
-    const bool isScreen = anchor.length() > 6 && anchor.substr(anchor.length() - 6) == "Screen";
+    const bool isScreen = anchor.size() > 6 && anchor.ends_with("Screen");
     if (isScreen) {
         GetRelativeCoords(anchor, groupX, groupY, 0, 0, fullW, fullH, outX, outY);
     } else {
@@ -1387,7 +1389,7 @@ void RenderGameBorder(int x, int y, int w, int h, int borderWidth, int radius, c
         glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(allBorders), allBorders);
         glDrawArrays(GL_TRIANGLES, 0, 24);
     } else {
-        int segments = 8;
+        constexpr int segments = 8;
 
         float straightBorders[] = {
             toNdcX(x + effectiveRadius),     toNdcY(y_gl + h), 0, 0, toNdcX(x + w - effectiveRadius), toNdcY(y_gl + h), 0, 0,
@@ -1408,8 +1410,7 @@ void RenderGameBorder(int x, int y, int w, int h, int borderWidth, int radius, c
 
         auto renderCornerArc = [&](float centerX, float centerY, float innerR, float outerR, float startAngle, float endAngle) {
             float angleStep = (endAngle - startAngle) / segments;
-            std::vector<float> arcVerts;
-            arcVerts.reserve(segments * 6 * 4);
+            std::array<float, segments * 6 * 4> arcVerts{};
             for (int s = 0; s < segments; s++) {
                 float a1 = startAngle + s * angleStep;
                 float a2 = startAngle + (s + 1) * angleStep;
@@ -1425,10 +1426,11 @@ void RenderGameBorder(int x, int y, int w, int h, int borderWidth, int radius, c
                     toNdcX((int)(centerX + outerR * c2)), toNdcY((int)(centerY + outerR * s2)), 0, 0,
                     toNdcX((int)(centerX + innerR * c2)), toNdcY((int)(centerY + innerR * s2)), 0, 0
                 };
-                arcVerts.insert(arcVerts.end(), std::begin(tri), std::end(tri));
+                std::copy(std::begin(tri), std::end(tri), arcVerts.begin() + static_cast<size_t>(s) * 6 * 4);
             }
-            EnsureSharedVertexBufferCapacity(static_cast<GLsizeiptr>(arcVerts.size() * sizeof(float)));
-            glBufferSubData(GL_ARRAY_BUFFER, 0, arcVerts.size() * sizeof(float), arcVerts.data());
+            const GLsizeiptr arcBytes = static_cast<GLsizeiptr>(arcVerts.size() * sizeof(float));
+            EnsureSharedVertexBufferCapacity(arcBytes);
+            glBufferSubData(GL_ARRAY_BUFFER, 0, arcBytes, arcVerts.data());
             glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(arcVerts.size() / 4));
         };
 
@@ -3739,11 +3741,11 @@ static void RenderMirrorsDirect(const std::vector<MirrorConfig>& activeMirrors, 
     auto splitRelativeAnchor = [](const std::string& relativeTo, std::string& anchorOut, bool& isScreenRelativeOut) {
         anchorOut = relativeTo;
         isScreenRelativeOut = false;
-        if (anchorOut.length() > 6 && anchorOut.substr(anchorOut.length() - 6) == "Screen") {
-            anchorOut = anchorOut.substr(0, anchorOut.length() - 6);
+        if (anchorOut.size() > 6 && anchorOut.ends_with("Screen")) {
+            anchorOut.resize(anchorOut.size() - 6);
             isScreenRelativeOut = true;
-        } else if (anchorOut.length() > 8 && anchorOut.substr(anchorOut.length() - 8) == "Viewport") {
-            anchorOut = anchorOut.substr(0, anchorOut.length() - 8);
+        } else if (anchorOut.size() > 8 && anchorOut.ends_with("Viewport")) {
+            anchorOut.resize(anchorOut.size() - 8);
         }
     };
 
@@ -4266,7 +4268,7 @@ static void RenderMirrorsDirect(const std::vector<MirrorConfig>& activeMirrors, 
     glDisable(GL_BLEND);
 }
 
-static void RenderImagesDirect(const std::vector<ImageConfig>& activeImages, int fullW, int fullH, int gameX, int gameY, int gameW,
+static void RenderImagesDirect(std::span<const ImageConfig> activeImages, int fullW, int fullH, int gameX, int gameY, int gameW,
                                int gameH, int gameResW, int gameResH, bool relativeStretching, float transitionProgress, int fromX,
                                int fromY, int fromW, int fromH, float modeOpacity, bool excludeOnlyOnMyScreen) {
     if (activeImages.empty()) return;
@@ -4325,7 +4327,7 @@ static void RenderImagesDirect(const std::vector<ImageConfig>& activeImages, int
         int displayH = 0;
         ResolveConfiguredImageDimensions(conf, texWidth, texHeight, displayW, displayH);
 
-        bool isViewportRelative = conf.relativeTo.length() > 8 && conf.relativeTo.substr(conf.relativeTo.length() - 8) == "Viewport";
+        bool isViewportRelative = conf.relativeTo.size() > 8 && conf.relativeTo.ends_with("Viewport");
         int finalScreenX = 0;
         int finalScreenY = 0;
         int finalDisplayW = displayW;
@@ -4423,7 +4425,7 @@ static void RenderImagesDirect(const std::vector<ImageConfig>& activeImages, int
     glDisable(GL_BLEND);
 }
 
-static void RenderWindowOverlaysDirect(const std::vector<WindowOverlayConfig>& overlays, int fullW, int fullH, int gameX,
+static void RenderWindowOverlaysDirect(std::span<const WindowOverlayConfig> overlays, int fullW, int fullH, int gameX,
                                        int gameY, int gameW, int gameH, int gameResW, int gameResH, bool relativeStretching,
                                        float transitionProgress, int fromX, int fromY, int fromW, int fromH, float modeOpacity,
                                        bool excludeOnlyOnMyScreen) {
@@ -4498,7 +4500,7 @@ static void RenderWindowOverlaysDirect(const std::vector<WindowOverlayConfig>& o
         int displayW = (std::max)(1, static_cast<int>(croppedW * (conf.separateScale ? conf.scaleX : conf.scale)));
         int displayH = (std::max)(1, static_cast<int>(croppedH * (conf.separateScale ? conf.scaleY : conf.scale)));
 
-        bool isViewportRelative = conf.relativeTo.length() > 8 && conf.relativeTo.substr(conf.relativeTo.length() - 8) == "Viewport";
+        bool isViewportRelative = conf.relativeTo.size() > 8 && conf.relativeTo.ends_with("Viewport");
         int screenX = 0;
         int screenY = 0;
         if (isViewportRelative) {
@@ -4578,7 +4580,7 @@ static void RenderWindowOverlaysDirect(const std::vector<WindowOverlayConfig>& o
     glDisable(GL_BLEND);
 }
 
-static void RenderBrowserOverlaysDirect(const std::vector<BrowserOverlayConfig>& overlays, int fullW, int fullH, int gameX,
+static void RenderBrowserOverlaysDirect(std::span<const BrowserOverlayConfig> overlays, int fullW, int fullH, int gameX,
                                         int gameY, int gameW, int gameH, int gameResW, int gameResH, bool relativeStretching,
                                         float transitionProgress, int fromX, int fromY, int fromW, int fromH, float modeOpacity,
                                         bool excludeOnlyOnMyScreen) {
@@ -4613,7 +4615,7 @@ static void RenderBrowserOverlaysDirect(const std::vector<BrowserOverlayConfig>&
         int displayW = (std::max)(1, static_cast<int>(croppedW * conf.scale));
         int displayH = (std::max)(1, static_cast<int>(croppedH * conf.scale));
 
-        bool isViewportRelative = conf.relativeTo.length() > 8 && conf.relativeTo.substr(conf.relativeTo.length() - 8) == "Viewport";
+        bool isViewportRelative = conf.relativeTo.size() > 8 && conf.relativeTo.ends_with("Viewport");
         int screenX = 0;
         int screenY = 0;
         if (isViewportRelative) {
@@ -5237,12 +5239,6 @@ static bool RenderSameThreadOverlayPass(const SameThreadOverlayState& request, c
         if (beginIndex >= endIndex || endIndex > activeOrderedSources.size()) { return; }
 
         std::vector<MirrorConfig> mirrorBatch;
-        std::vector<ImageConfig> singleImage;
-        std::vector<WindowOverlayConfig> singleWindowOverlay;
-        std::vector<BrowserOverlayConfig> singleBrowserOverlay;
-        singleImage.reserve(1);
-        singleWindowOverlay.reserve(1);
-        singleBrowserOverlay.reserve(1);
 
         auto flushMirrorBatch = [&]() {
             if (mirrorBatch.empty()) { return; }
@@ -5269,9 +5265,8 @@ static bool RenderSameThreadOverlayPass(const SameThreadOverlayState& request, c
 
             case ActiveModeSourceType::Image:
                 if (request.isRawWindowedMode || !source.image) { break; }
-                singleImage.clear();
-                singleImage.push_back(*source.image);
-                RenderImagesDirect(singleImage, request.fullW, request.fullH, request.toX, request.toY, request.toW,
+                RenderImagesDirect(std::span<const ImageConfig>(source.image, 1), request.fullW, request.fullH, request.toX,
+                                   request.toY, request.toW,
                                    request.toH, request.gameW, request.gameH, request.relativeStretching,
                                    request.transitionProgress, request.fromX, request.fromY, request.fromW, request.fromH,
                                    request.overlayOpacity, request.excludeOnlyOnMyScreen);
@@ -5279,9 +5274,8 @@ static bool RenderSameThreadOverlayPass(const SameThreadOverlayState& request, c
 
             case ActiveModeSourceType::WindowOverlay:
                 if (!source.windowOverlay) { break; }
-                singleWindowOverlay.clear();
-                singleWindowOverlay.push_back(*source.windowOverlay);
-                RenderWindowOverlaysDirect(singleWindowOverlay, request.fullW, request.fullH, request.toX, request.toY,
+                RenderWindowOverlaysDirect(std::span<const WindowOverlayConfig>(source.windowOverlay, 1), request.fullW,
+                                           request.fullH, request.toX, request.toY,
                                            request.toW, request.toH, request.gameW, request.gameH,
                                            request.relativeStretching, request.transitionProgress, request.fromX,
                                            request.fromY, request.fromW, request.fromH, request.overlayOpacity,
@@ -5290,9 +5284,8 @@ static bool RenderSameThreadOverlayPass(const SameThreadOverlayState& request, c
 
             case ActiveModeSourceType::BrowserOverlay:
                 if (!source.browserOverlay) { break; }
-                singleBrowserOverlay.clear();
-                singleBrowserOverlay.push_back(*source.browserOverlay);
-                RenderBrowserOverlaysDirect(singleBrowserOverlay, request.fullW, request.fullH, request.toX, request.toY,
+                RenderBrowserOverlaysDirect(std::span<const BrowserOverlayConfig>(source.browserOverlay, 1), request.fullW,
+                                            request.fullH, request.toX, request.toY,
                                             request.toW, request.toH, request.gameW, request.gameH,
                                             request.relativeStretching, request.transitionProgress, request.fromX,
                                             request.fromY, request.fromW, request.fromH, request.overlayOpacity,
@@ -5706,9 +5699,12 @@ void CaptureSameThreadVirtualCameraFrame() {
     if (readTexture == 0) { return; }
 
     LARGE_INTEGER counter;
-    LARGE_INTEGER frequency;
     QueryPerformanceCounter(&counter);
-    QueryPerformanceFrequency(&frequency);
+    static const LARGE_INTEGER frequency = [] {
+        LARGE_INTEGER value{};
+        QueryPerformanceFrequency(&value);
+        return value;
+    }();
     const uint64_t timestamp = (counter.QuadPart * 10000000ULL) / frequency.QuadPart;
 
     if (g_sameThreadVirtualCameraSynchronousRecoveryFrames > 0) {
@@ -7635,7 +7631,8 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
 
                 std::string hoveredImage = "";
                 {
-                    const auto& dragImages = configSnap ? configSnap->images : std::vector<ImageConfig>{};
+                    static const std::vector<ImageConfig> kEmptyImages;
+                    const auto& dragImages = configSnap ? configSnap->images : kEmptyImages;
 
                     // Drag mode is rare, but this is on the game thread, so keep it cheap.
                     std::unordered_map<std::string, const ImageConfig*> imageByName;
@@ -7677,7 +7674,7 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
                         ResolveConfiguredImageDimensions(conf, texWidth, texHeight, displayW, displayH);
 
                         const bool isViewportRelative =
-                            conf.relativeTo.length() > 8 && conf.relativeTo.substr(conf.relativeTo.length() - 8) == "Viewport";
+                            conf.relativeTo.size() > 8 && conf.relativeTo.ends_with("Viewport");
                         if (isViewportRelative) {
                             const float viewportScaleX =
                                 (currentGeo.finalW > 0 && currentGeo.gameW > 0) ? static_cast<float>(currentGeo.finalW) / currentGeo.gameW : 1.0f;
@@ -8562,7 +8559,7 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
                         int displayH = (std::max)(1, static_cast<int>(croppedH * conf.scale));
 
                         const bool isViewportRelative =
-                            conf.relativeTo.length() > 8 && conf.relativeTo.substr(conf.relativeTo.length() - 8) == "Viewport";
+                            conf.relativeTo.size() > 8 && conf.relativeTo.ends_with("Viewport");
                         if (isViewportRelative) {
                             const float viewportScaleX =
                                 (currentGeo.finalW > 0 && currentGeo.gameW > 0) ? static_cast<float>(currentGeo.finalW) / currentGeo.gameW : 1.0f;

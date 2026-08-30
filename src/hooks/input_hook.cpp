@@ -4065,10 +4065,7 @@ static void UpdateLowLevelKeyboardHookInstalledState() {
     const bool shuttingDown = g_isShuttingDown.load(std::memory_order_acquire);
     const bool hookRequested = !shuttingDown &&
         (needsDeepSuppression || needsExactModifierTracking || needsCapsLockSuppression || needsVulkanModeHotkeyFastPath);
-    const bool ownsForeground = DoesSubclassedWindowOwnForegroundInput();
-    const bool gameWindowActive = g_gameWindowActive.load(std::memory_order_acquire);
-    if (shuttingDown ||
-        (!needsDeepSuppression && !needsExactModifierTracking && !needsCapsLockSuppression && !needsVulkanModeHotkeyFastPath)) {
+    if (!hookRequested) {
         const HWND targetHwnd = g_subclassedHwnd.load(std::memory_order_acquire);
         ReleaseSuppressedLowLevelRebindKeys(targetHwnd);
         ReleaseVulkanFastPathKeys(targetHwnd);

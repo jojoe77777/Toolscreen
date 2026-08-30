@@ -29,7 +29,8 @@ std::optional<std::string> DeriveStateFromHermesJson(const std::string& text) {
     nlohmann::json j = nlohmann::json::parse(text, nullptr, /*allow_exceptions=*/false);
     if (j.is_discarded() || !j.is_object()) { return std::nullopt; }
 
-    const bool inWorld = j.contains("world") && !j["world"].is_null();
+    const auto world = j.find("world");
+    const bool inWorld = world != j.end() && !world->is_null();
 
     std::string screenClass;
     if (auto s = j.find("screen"); s != j.end() && s->is_object()) {

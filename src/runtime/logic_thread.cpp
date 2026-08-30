@@ -156,7 +156,6 @@ void RequestScreenMetricsRecalculation() {
     s_screenMetricsRecalcRequested.store(true, std::memory_order_relaxed);
 }
 
-static std::vector<std::string> s_lastActiveMirrorIds;
 static std::string s_lastMirrorConfigModeId;
 static uint64_t s_lastMirrorConfigSnapshotVersion = 0;
 static int s_lastViewportScreenW = 0;
@@ -261,7 +260,6 @@ void UpdateActiveMirrorConfigs() {
         activeMirrorsForCapture.push_back(activeMirror);
     }
     UpdateMirrorCaptureConfigs(activeMirrorsForCapture);
-    s_lastActiveMirrorIds = currentMirrorIds;
 
     s_lastMirrorConfigModeId = currentModeId;
     s_lastMirrorConfigSnapshotVersion = snapVer;

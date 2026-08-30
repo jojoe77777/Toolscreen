@@ -6286,9 +6286,12 @@ bool RecordVirtualCameraFrame(
     }
 
     LARGE_INTEGER counter{};
-    LARGE_INTEGER frequency{};
     QueryPerformanceCounter(&counter);
-    QueryPerformanceFrequency(&frequency);
+    static const LARGE_INTEGER frequency = [] {
+        LARGE_INTEGER value{};
+        QueryPerformanceFrequency(&value);
+        return value;
+    }();
     const uint64_t timestamp100ns =
         frequency.QuadPart > 0
             ? static_cast<uint64_t>(

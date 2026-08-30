@@ -277,34 +277,15 @@ void SetNextSettingsModalCentered(ImGuiCond condition = ImGuiCond_Always) {
         return value;
     }
 
-    std::vector<std::string_view> TokenizeSearchQuery(std::string_view value) {
-        std::vector<std::string_view> tokens;
-        value = TrimSearchQuery(value);
-        while (!value.empty()) {
+    bool MatchesSearchTerms(std::string_view query, std::initializer_list<std::string_view> searchTerms) {
+        query = TrimSearchQuery(query);
+        while (!query.empty()) {
             size_t separator = 0;
-            while (separator < value.size() && std::isspace(static_cast<unsigned char>(value[separator])) == 0) {
+            while (separator < query.size() && std::isspace(static_cast<unsigned char>(query[separator])) == 0) {
                 ++separator;
             }
 
-            if (separator > 0) {
-                tokens.push_back(value.substr(0, separator));
-            }
-
-            value.remove_prefix((std::min)(separator, value.size()));
-            while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front())) != 0) {
-                value.remove_prefix(1);
-            }
-        }
-        return tokens;
-    }
-
-    bool MatchesSearchTerms(std::string_view query, std::initializer_list<std::string_view> searchTerms) {
-        const std::vector<std::string_view> tokens = TokenizeSearchQuery(query);
-        if (tokens.empty()) {
-            return true;
-        }
-
-        for (const std::string_view token : tokens) {
+            const std::string_view token = query.substr(0, separator);
             bool tokenMatched = false;
             for (const std::string_view searchTerm : searchTerms) {
                 if (searchTerm.empty()) {
@@ -318,6 +299,11 @@ void SetNextSettingsModalCentered(ImGuiCond condition = ImGuiCond_Always) {
 
             if (!tokenMatched) {
                 return false;
+            }
+
+            query.remove_prefix(separator);
+            while (!query.empty() && std::isspace(static_cast<unsigned char>(query.front())) != 0) {
+                query.remove_prefix(1);
             }
         }
 
@@ -1043,6 +1029,45 @@ std::vector<FontPickerOption> BuildFontPickerOptions(std::initializer_list<FontP
     }
 
     return options;
+}
+
+const std::vector<FontPickerOption>& GetFontPickerOptions() {
+    static const std::vector<FontPickerOption> options = BuildFontPickerOptions();
+    return options;
+}
+
+const std::vector<FontPickerOption>& GetUseMainGuiFontPickerOptions() {
+    static const std::vector<FontPickerOption> options =
+        BuildFontPickerOptions({ { "", "font.preset.use_main_gui" } });
+    return options;
+}
+
+const std::vector<NinjabrainPresetDefinition>& GetSortedEmbeddedNinjabrainPresets() {
+    static const std::vector<NinjabrainPresetDefinition> presets = []() {
+        std::vector<NinjabrainPresetDefinition> sortedPresets = GetEmbeddedNinjabrainPresets();
+        std::stable_sort(sortedPresets.begin(), sortedPresets.end(),
+                         [](const NinjabrainPresetDefinition& left, const NinjabrainPresetDefinition& right) {
+                             auto presetRank = [](const std::string& presetId) {
+                                 if (presetId == "compact") return 0;
+                                 if (presetId == "ninjabrainbot") return 1;
+                                 return 100;
+                             };
+
+                             const int leftRank = presetRank(left.id);
+                             const int rightRank = presetRank(right.id);
+                             if (leftRank != rightRank) {
+                                 return leftRank < rightRank;
+                             }
+
+                             if (left.translationKey != right.translationKey) {
+                                 return left.translationKey < right.translationKey;
+                             }
+
+                             return left.id < right.id;
+                         });
+        return sortedPresets;
+    }();
+    return presets;
 }
 
 std::string GetFontPickerOptionLabel(const FontPickerOption& option) {

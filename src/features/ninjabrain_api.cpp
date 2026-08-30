@@ -230,7 +230,6 @@ void ApplyNinjabrainStrongholdEvent(
     try {
         const json parsedJson = json::parse(payload);
 
-        const NinjabrainData previous = data;
         const std::string resultType = parsedJson.value("resultType", "NONE");
         if (resultType == "NONE") {
             ClearNinjabrainStrongholdData(data);
@@ -273,12 +272,12 @@ void ApplyNinjabrainStrongholdEvent(
         }
 
         if (next.eyeCount > 0 && !next.throws[next.eyeCount - 1].hasCorrectionIncrements) {
-            next.correctionIncrements151 = previous.correctionIncrements151;
+            next.correctionIncrements151 = data.correctionIncrements151;
 
-            if (next.eyeCount != previous.eyeCount) {
+            if (next.eyeCount != data.eyeCount) {
                 next.correctionIncrements151 = 0;
             } else {
-                const double previousCorrection = previous.throws[previous.eyeCount - 1].correction;
+                const double previousCorrection = data.throws[data.eyeCount - 1].correction;
                 const double delta = next.throws[next.eyeCount - 1].correction - previousCorrection;
                 if (delta > 1e-9) {
                     ++next.correctionIncrements151;

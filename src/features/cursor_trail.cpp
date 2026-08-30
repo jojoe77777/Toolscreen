@@ -73,9 +73,12 @@ void PushVertex(std::vector<float>& buf, float x, float y, float u, float v, flo
 
 uint64_t NowMs() {
     LARGE_INTEGER counter{};
-    LARGE_INTEGER freq{};
     QueryPerformanceCounter(&counter);
-    QueryPerformanceFrequency(&freq);
+    static const LARGE_INTEGER freq = [] {
+        LARGE_INTEGER value{};
+        QueryPerformanceFrequency(&value);
+        return value;
+    }();
     if (freq.QuadPart == 0) { return 0; }
     return static_cast<uint64_t>((counter.QuadPart * 1000LL) / freq.QuadPart);
 }

@@ -1756,8 +1756,11 @@ static inline void ViewportHook_Impl(GLVIEWPORTPROC next, GLint x, GLint y, GLsi
     const ViewportTransitionSnapshot& transitionSnap =
         g_viewportTransitionSnapshots[g_viewportTransitionSnapshotIndex.load(std::memory_order_acquire)];
     bool isTransitionActive = transitionSnap.active;
-    auto hookConfigSnap = GetConfigSnapshot();
-    const bool hideAnimationsInGame = hookConfigSnap ? hookConfigSnap->hideAnimationsInGame : g_config.hideAnimationsInGame;
+    bool hideAnimationsInGame = false;
+    if (isTransitionActive) {
+        auto hookConfigSnap = GetConfigSnapshot();
+        hideAnimationsInGame = hookConfigSnap ? hookConfigSnap->hideAnimationsInGame : g_config.hideAnimationsInGame;
+    }
     const bool cutGameViewportTransition = isTransitionActive && hideAnimationsInGame;
 
     // Lock-free read of cached mode viewport data (updated by logic_thread)
@@ -3118,8 +3121,11 @@ static bool ResolvePresentedGameViewportGeometry(int& outModeWidth,
                                                  int& outStretchHeight) {
     const ViewportTransitionSnapshot& transitionSnap =
         g_viewportTransitionSnapshots[g_viewportTransitionSnapshotIndex.load(std::memory_order_acquire)];
-    auto hookConfigSnap = GetConfigSnapshot();
-    const bool hideAnimationsInGame = hookConfigSnap ? hookConfigSnap->hideAnimationsInGame : g_config.hideAnimationsInGame;
+    bool hideAnimationsInGame = false;
+    if (transitionSnap.active) {
+        auto hookConfigSnap = GetConfigSnapshot();
+        hideAnimationsInGame = hookConfigSnap ? hookConfigSnap->hideAnimationsInGame : g_config.hideAnimationsInGame;
+    }
     const bool cutGameViewportTransition = transitionSnap.active && hideAnimationsInGame;
     const CachedModeViewport& cachedMode = g_viewportModeCache[g_viewportModeCacheIndex.load(std::memory_order_acquire)];
     int modeWidth = 0;
@@ -3659,12 +3665,13 @@ static BOOL SwapBuffersHook_Impl(WGLSWAPBUFFERS next, HDC hDc) {
             const bool needCaptureForObsOrVc = g_graphicsHookDetected.load(std::memory_order_acquire) || IsVirtualCameraActive();
 
             const long long pickerRequestMs = g_mirrorColorPickerCaptureRequestMs.load(std::memory_order_acquire);
-            const long long nowMs =
-                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-            const bool needCaptureForColorPicker =
-                pickerRequestMs != 0 && (nowMs - pickerRequestMs) < kMirrorColorPickerCaptureRequestTimeoutMs;
+            bool needCaptureForColorPicker = false;
+            if (pickerRequestMs != 0) {
+                const long long nowMs =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+                needCaptureForColorPicker = (nowMs - pickerRequestMs) < kMirrorColorPickerCaptureRequestTimeoutMs;
+            }
 
-            const bool needCapture = needCaptureForMirrors || needCaptureForObsOrVc;
             const bool needAsyncCaptureCopy = needCaptureForObsOrVc || needCaptureForColorPicker;
             if (needAsyncCaptureCopy) {
                 static auto s_lastMirrorOnlyCaptureSubmit = std::chrono::steady_clock::time_point{};
@@ -3834,8 +3841,6 @@ static BOOL SwapBuffersHook_Impl(WGLSWAPBUFFERS next, HDC hDc) {
         }
 
         // Note: Video player update is now done in render_thread
-
-        std::string localGameState = g_gameStateBuffers[g_currentGameStateIndex.load(std::memory_order_acquire)];
 
         bool showPerformanceOverlay = frameCfg.debug.showPerformanceOverlay;
         bool showProfiler = frameCfg.debug.showProfiler;

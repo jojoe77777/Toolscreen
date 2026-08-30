@@ -1148,6 +1148,7 @@ std::vector<std::string> GetAvailableCursorNames() {
 
     std::lock_guard<std::mutex> lock(g_cursorDefsMutex);
     std::vector<std::string> names;
+    names.reserve(AVAILABLE_CURSORS.size());
     for (const auto& cursor : AVAILABLE_CURSORS) { names.push_back(cursor.name); }
     return names;
 }

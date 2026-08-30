@@ -1095,7 +1095,7 @@ if (BeginSelectableSettingsTopTabItem(trc("tabs.modes"))) {
                     }
                 }
 
-                const std::vector<FontPickerOption> eyeZoomFontOptions = BuildFontPickerOptions({ { "", "font.preset.use_main_gui" } });
+                const std::vector<FontPickerOption>& eyeZoomFontOptions = GetUseMainGuiFontPickerOptions();
                 auto applyEyeZoomFontChange = []() {
                     g_configIsDirty = true;
                     g_eyeZoomFontNeedsReload.store(true);

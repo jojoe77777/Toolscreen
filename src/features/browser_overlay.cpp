@@ -1413,7 +1413,9 @@ void BrowserOverlayThreadFunc() {
     LogBrowserOverlayMessage("[BrowserOverlay] Thread started");
 
     uint64_t lastConfigVersion = UINT64_MAX;
+    std::vector<std::string> overlayIds;
     while (!g_stopBrowserOverlayThread.load(std::memory_order_acquire)) {
+        overlayIds.clear();
         PumpBrowserOverlayMessages();
 
         const uint64_t currentVersion = g_configSnapshotVersion.load(std::memory_order_acquire);
@@ -1423,7 +1425,6 @@ void BrowserOverlayThreadFunc() {
         }
 
         if (g_browserOverlaysVisible.load(std::memory_order_acquire)) {
-            std::vector<std::string> overlayIds;
             {
                 std::lock_guard<std::mutex> lock(g_browserOverlayCacheMutex);
                 overlayIds.reserve(g_browserOverlayCache.size());

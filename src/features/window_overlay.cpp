@@ -1172,7 +1172,9 @@ void WindowCaptureThreadFunc() {
         const auto windowListUpdateIntervalGuiOpen = std::chrono::milliseconds(500);
         const auto windowListUpdateIntervalGuiClosed = std::chrono::seconds(5);
 
+        std::vector<std::pair<std::string, WindowOverlayConfig>> overlaysToCapture;
         while (!g_stopWindowCaptureThread) {
+            overlaysToCapture.clear();
             try {
                 auto now = std::chrono::steady_clock::now();
 
@@ -1226,7 +1228,6 @@ void WindowCaptureThreadFunc() {
                     }
                 }
 
-                std::vector<std::pair<std::string, WindowOverlayConfig>> overlaysToCapture;
                 {
                     // Use snapshot for thread-safe config access + cache lock for cache access
                     auto captureSnap = GetConfigSnapshot();
