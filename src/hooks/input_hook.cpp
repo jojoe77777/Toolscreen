@@ -17,6 +17,7 @@
 
 #include "gui/imgui_input_queue.h"
 
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <deque>
@@ -218,6 +219,17 @@ static InputHandlerResult HandleLocalKeyRepeat(HWND hWnd, UINT uMsg, WPARAM wPar
 bool GetEffectiveKeyRepeatTimings(int& outStartDelayMs, int& outRepeatDelayMs);
 static void ReleaseSuppressedLowLevelRebindKeys(HWND hWnd);
 
+static std::shared_ptr<const Config> GetInputConfigSnapshotCachedForThread() {
+    static thread_local uint64_t cachedVersion = ~uint64_t{ 0 };
+    static thread_local std::shared_ptr<const Config> cachedSnapshot;
+    const uint64_t version = g_configSnapshotVersion.load(std::memory_order_acquire);
+    if (cachedVersion != version) {
+        cachedSnapshot = GetConfigSnapshot();
+        cachedVersion = version;
+    }
+    return cachedSnapshot;
+}
+
 static bool MatchesConfiguredGameStateCondition(const std::vector<std::string>& configuredStates, const std::string& gameState) {
     if (configuredStates.empty()) {
         return true;
@@ -275,6 +287,8 @@ static KeyRebindCursorStateMatchPriority GetKeyRebindCursorStateMatchPriority(co
     return KeyRebindCursorStateMatchPriority::Any;
 }
 
+static bool MatchesRebindSourceKey(DWORD incomingVk, DWORD incomingRawVk, DWORD fromKey);
+
 template <typename Predicate>
 static const KeyRebind* FindPreferredEnabledKeyRebind(const std::vector<KeyRebind>& rebinds,
                                                       bool cursorVisible,
@@ -302,6 +316,42 @@ static const KeyRebind* FindPreferredEnabledKeyRebind(const std::vector<KeyRebin
     }
 
     return anyMatch;
+}
+
+static const KeyRebind* FindPreferredEnabledKeyRebindForInput(const Config& cfg,
+                                                              bool cursorVisible,
+                                                              DWORD incomingVk,
+                                                              DWORD incomingRawVk) {
+    struct CachedLookup {
+        uint64_t configVersion = ~uint64_t{ 0 };
+        DWORD incomingVk = 0;
+        DWORD incomingRawVk = 0;
+        bool cursorVisible = false;
+        bool valid = false;
+        size_t matchedIndex = static_cast<size_t>(-1);
+    };
+    static thread_local CachedLookup cache;
+
+    const uint64_t version = g_configSnapshotVersion.load(std::memory_order_acquire);
+    if (cache.valid && cache.configVersion == version && cache.incomingVk == incomingVk &&
+        cache.incomingRawVk == incomingRawVk && cache.cursorVisible == cursorVisible) {
+        return cache.matchedIndex < cfg.keyRebinds.rebinds.size()
+                   ? &cfg.keyRebinds.rebinds[cache.matchedIndex]
+                   : nullptr;
+    }
+
+    const KeyRebind* match = FindPreferredEnabledKeyRebind(
+        cfg.keyRebinds.rebinds,
+        cursorVisible,
+        [&](const KeyRebind& rebind) { return MatchesRebindSourceKey(incomingVk, incomingRawVk, rebind.fromKey); });
+
+    cache.configVersion = version;
+    cache.incomingVk = incomingVk;
+    cache.incomingRawVk = incomingRawVk;
+    cache.cursorVisible = cursorVisible;
+    cache.valid = true;
+    cache.matchedIndex = match ? static_cast<size_t>(match - cfg.keyRebinds.rebinds.data()) : static_cast<size_t>(-1);
+    return match;
 }
 
 static UINT GetScanCodeWithExtendedFlagFromLParam(LPARAM lParam) {
@@ -784,6 +834,99 @@ static bool TryHandleBrokenHoldHotkey(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
 static bool IsModifierVk(DWORD vk) {
     return vk == VK_CONTROL || vk == VK_LCONTROL || vk == VK_RCONTROL || vk == VK_SHIFT || vk == VK_LSHIFT || vk == VK_RSHIFT ||
            vk == VK_MENU || vk == VK_LMENU || vk == VK_RMENU || vk == VK_LWIN || vk == VK_RWIN;
+}
+
+static bool MatchesHotkeyMainKeyEvent(const std::vector<DWORD>& keys, DWORD vk) {
+    if (keys.empty()) return false;
+    const DWORD mainKey = keys.back();
+    if (mainKey == vk) return true;
+    if (mainKey == VK_CONTROL || mainKey == VK_LCONTROL || mainKey == VK_RCONTROL) {
+        return vk == VK_CONTROL || vk == VK_LCONTROL || vk == VK_RCONTROL;
+    }
+    if (mainKey == VK_SHIFT || mainKey == VK_LSHIFT || mainKey == VK_RSHIFT) {
+        return vk == VK_SHIFT || vk == VK_LSHIFT || vk == VK_RSHIFT;
+    }
+    if (mainKey == VK_MENU || mainKey == VK_LMENU || mainKey == VK_RMENU) {
+        return vk == VK_MENU || vk == VK_LMENU || vk == VK_RMENU;
+    }
+    return false;
+}
+
+static bool IsToolscreenRoutingKey(DWORD vk) {
+    if (vk > 0xFF) {
+        std::lock_guard<std::mutex> lock(g_hotkeyMainKeysMutex);
+        return g_hotkeyMainKeys.contains(vk);
+    }
+
+    struct CachedRoutingKeys {
+        uint64_t configVersion = ~uint64_t{ 0 };
+        std::array<uint8_t, 256> keys{};
+    };
+    static thread_local CachedRoutingKeys cache;
+
+    const uint64_t version = g_configSnapshotVersion.load(std::memory_order_acquire);
+    if (cache.configVersion != version) {
+        cache.keys.fill(0);
+        if (const auto cfg = GetInputConfigSnapshotCachedForThread()) {
+            const auto addKey = [&](DWORD key) {
+                if (key <= 0xFF) cache.keys[key] = 1;
+            };
+            const auto addMainKey = [&](const std::vector<DWORD>& keys) {
+                if (keys.empty()) return;
+                const DWORD mainKey = keys.back();
+                addKey(mainKey);
+                if (mainKey == VK_CONTROL || mainKey == VK_LCONTROL || mainKey == VK_RCONTROL) {
+                    addKey(VK_CONTROL);
+                    addKey(VK_LCONTROL);
+                    addKey(VK_RCONTROL);
+                } else if (mainKey == VK_SHIFT || mainKey == VK_LSHIFT || mainKey == VK_RSHIFT) {
+                    addKey(VK_SHIFT);
+                    addKey(VK_LSHIFT);
+                    addKey(VK_RSHIFT);
+                } else if (mainKey == VK_MENU || mainKey == VK_LMENU || mainKey == VK_RMENU) {
+                    addKey(VK_MENU);
+                    addKey(VK_LMENU);
+                    addKey(VK_RMENU);
+                }
+            };
+
+            for (const auto& hotkey : cfg->hotkeys) {
+                addMainKey(hotkey.keys);
+                for (const auto& alt : hotkey.altSecondaryModes) addMainKey(alt.keys);
+            }
+            for (const auto& hotkey : cfg->sensitivityHotkeys) addMainKey(hotkey.keys);
+            addMainKey(cfg->guiHotkey);
+            addMainKey(cfg->borderlessHotkey);
+            addMainKey(cfg->imageOverlaysHotkey);
+            addMainKey(cfg->windowOverlaysHotkey);
+            addMainKey(cfg->ninjabrainOverlayHotkey);
+            addMainKey(cfg->keyRebinds.toggleHotkey);
+            addKey(VK_ESCAPE);
+
+            if (cfg->keyRebinds.enabled) {
+                for (const auto& rebind : cfg->keyRebinds.rebinds) {
+                    if (!rebind.enabled || rebind.fromKey == 0) continue;
+                    addKey(rebind.fromKey);
+                    if (rebind.fromKey == VK_CONTROL || rebind.fromKey == VK_LCONTROL || rebind.fromKey == VK_RCONTROL) {
+                        addKey(VK_CONTROL);
+                        addKey(VK_LCONTROL);
+                        addKey(VK_RCONTROL);
+                    } else if (rebind.fromKey == VK_SHIFT || rebind.fromKey == VK_LSHIFT || rebind.fromKey == VK_RSHIFT) {
+                        addKey(VK_SHIFT);
+                        addKey(VK_LSHIFT);
+                        addKey(VK_RSHIFT);
+                    } else if (rebind.fromKey == VK_MENU || rebind.fromKey == VK_LMENU || rebind.fromKey == VK_RMENU) {
+                        addKey(VK_MENU);
+                        addKey(VK_LMENU);
+                        addKey(VK_RMENU);
+                    }
+                }
+            }
+        }
+        cache.configVersion = version;
+    }
+
+    return cache.keys[vk] != 0;
 }
 
 static bool IsAltVk(DWORD vk) {
@@ -1459,6 +1602,7 @@ InputHandlerResult HandleGuiToggle(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
         return { false, 0 };
     }
 
+    if (!isEscape && !MatchesHotkeyMainKeyEvent(g_config.guiHotkey, vkCode)) { return { false, 0 }; }
     const bool hotkeyMatched = isEscape || CheckHotkeyMatch(g_config.guiHotkey, vkCode, {}, false, s_bestMatchKeyCount);
     if (!hotkeyMatched) { return { false, 0 }; }
 
@@ -1530,7 +1674,8 @@ InputHandlerResult HandleBorderlessToggle(HWND hWnd, UINT uMsg, WPARAM wParam, L
         return { false, 0 };
     }
 
-    if (!CheckHotkeyMatch(g_config.borderlessHotkey, vkCode, {}, false, s_bestMatchKeyCount)) { return { false, 0 }; }
+    if (!MatchesHotkeyMainKeyEvent(g_config.borderlessHotkey, vkCode) ||
+        !CheckHotkeyMatch(g_config.borderlessHotkey, vkCode, {}, false, s_bestMatchKeyCount)) { return { false, 0 }; }
 
     if (ShouldMaskWindowsKeyForHotkey(g_config.borderlessHotkey, true, isAutoRepeatKeyDown)) {
         (void)SendMenuMaskKeyTap();
@@ -1594,7 +1739,8 @@ InputHandlerResult HandleImageOverlaysToggle(HWND hWnd, UINT uMsg, WPARAM wParam
         return { false, 0 };
     }
 
-    if (!CheckHotkeyMatch(g_config.imageOverlaysHotkey, vkCode, {}, false, s_bestMatchKeyCount)) { return { false, 0 }; }
+    if (!MatchesHotkeyMainKeyEvent(g_config.imageOverlaysHotkey, vkCode) ||
+        !CheckHotkeyMatch(g_config.imageOverlaysHotkey, vkCode, {}, false, s_bestMatchKeyCount)) { return { false, 0 }; }
 
     if (ShouldMaskWindowsKeyForHotkey(g_config.imageOverlaysHotkey, true, isAutoRepeatKeyDown)) {
         (void)SendMenuMaskKeyTap();
@@ -1660,7 +1806,8 @@ InputHandlerResult HandleWindowOverlaysToggle(HWND hWnd, UINT uMsg, WPARAM wPara
         return { false, 0 };
     }
 
-    if (!CheckHotkeyMatch(g_config.windowOverlaysHotkey, vkCode, {}, false, s_bestMatchKeyCount)) { return { false, 0 }; }
+    if (!MatchesHotkeyMainKeyEvent(g_config.windowOverlaysHotkey, vkCode) ||
+        !CheckHotkeyMatch(g_config.windowOverlaysHotkey, vkCode, {}, false, s_bestMatchKeyCount)) { return { false, 0 }; }
 
     if (ShouldMaskWindowsKeyForHotkey(g_config.windowOverlaysHotkey, true, isAutoRepeatKeyDown)) {
         (void)SendMenuMaskKeyTap();
@@ -1730,7 +1877,8 @@ InputHandlerResult HandleNinjabrainOverlayToggle(HWND hWnd, UINT uMsg, WPARAM wP
         return { false, 0 };
     }
 
-    if (!CheckHotkeyMatch(g_config.ninjabrainOverlayHotkey, vkCode, {}, false, s_bestMatchKeyCount)) { return { false, 0 }; }
+    if (!MatchesHotkeyMainKeyEvent(g_config.ninjabrainOverlayHotkey, vkCode) ||
+        !CheckHotkeyMatch(g_config.ninjabrainOverlayHotkey, vkCode, {}, false, s_bestMatchKeyCount)) { return { false, 0 }; }
 
     if (ShouldMaskWindowsKeyForHotkey(g_config.ninjabrainOverlayHotkey, true, isAutoRepeatKeyDown)) {
         (void)SendMenuMaskKeyTap();
@@ -1796,7 +1944,8 @@ InputHandlerResult HandleKeyRebindsToggle(HWND hWnd, UINT uMsg, WPARAM wParam, L
         return { false, 0 };
     }
 
-    if (!CheckHotkeyMatch(g_config.keyRebinds.toggleHotkey, vkCode, {}, false, s_bestMatchKeyCount)) { return { false, 0 }; }
+    if (!MatchesHotkeyMainKeyEvent(g_config.keyRebinds.toggleHotkey, vkCode) ||
+        !CheckHotkeyMatch(g_config.keyRebinds.toggleHotkey, vkCode, {}, false, s_bestMatchKeyCount)) { return { false, 0 }; }
 
     if (ShouldMaskWindowsKeyForHotkey(g_config.keyRebinds.toggleHotkey, true, isAutoRepeatKeyDown)) {
         (void)SendMenuMaskKeyTap();
@@ -2170,12 +2319,7 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
     // Even if resolution-change features are unsupported, we must not short-circuit the input pipeline.
     if (!IsResolutionChangeSupported(g_gameVersion)) { return { false, 0 }; }
 
-    bool isHotkeyMainKey = false;
-    {
-        std::lock_guard<std::mutex> hotkeyLock(g_hotkeyMainKeysMutex);
-        isHotkeyMainKey = (g_hotkeyMainKeys.find(rawVkCode) != g_hotkeyMainKeys.end()) ||
-                          (g_hotkeyMainKeys.find(vkCode) != g_hotkeyMainKeys.end());
-    }
+    const bool isHotkeyMainKey = IsToolscreenRoutingKey(rawVkCode) || IsToolscreenRoutingKey(vkCode);
 
     const bool hasActiveHoldHotkey = s_activeHoldHotkey.has_value();
 
@@ -2190,18 +2334,16 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
         return { false, 0 };
     }
 
-    // Use config snapshot for thread-safe hotkey iteration
-    auto cfgSnap = GetConfigSnapshot();
+    // Reuse the immutable snapshot for the lifetime of this config version. An
+    // atomic shared_ptr load on every repeat otherwise becomes measurable here.
+    auto cfgSnap = GetInputConfigSnapshotCachedForThread();
     if (!cfgSnap) { return { true, CallWindowProc(g_originalWndProc, hWnd, uMsg, wParam, lParam) }; }
     const Config& cfg = *cfgSnap;
 
     DWORD rebindTargetVk = 0;
     const bool cursorVisible = (cfg.keyRebinds.enabled && cfg.keyRebinds.resolveRebindTargetsForHotkeys) ? IsCursorVisible() : false;
     if (cfg.keyRebinds.enabled && cfg.keyRebinds.resolveRebindTargetsForHotkeys) {
-        const KeyRebind* matchedRebind = FindPreferredEnabledKeyRebind(
-            cfg.keyRebinds.rebinds,
-            cursorVisible,
-            [&](const KeyRebind& rebind) { return MatchesRebindSourceKey(vkCode, rawVkCode, rebind.fromKey); });
+        const KeyRebind* matchedRebind = FindPreferredEnabledKeyRebindForInput(cfg, cursorVisible, vkCode, rawVkCode);
         if (matchedRebind != nullptr) {
             const bool shiftLayerActive = IsShiftLayerActiveForRebind(*matchedRebind, vkCode, rawVkCode, isKeyDown);
             const DWORD effectiveCustomOutputVk = ResolveEffectiveCustomOutputVk(*matchedRebind, shiftLayerActive);
@@ -2209,7 +2351,10 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
         }
     }
 
-    bool s_enableHotkeyDebug = cfg.debug.showHotkeyDebug;
+    // Repeat traffic can be tens of events per second. Edge events contain the
+    // useful diagnostic information without turning debug logging into another
+    // input-thread workload.
+    bool s_enableHotkeyDebug = cfg.debug.showHotkeyDebug && !isAutoRepeatKeyDown;
 
     InputHandlerResult brokenHoldResult;
     if (TryHandleBrokenHoldHotkey(hWnd, uMsg, wParam, lParam, vkCode, rawVkCode, rebindTargetVk, isKeyDown, cfg, s_enableHotkeyDebug,
@@ -2241,6 +2386,21 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
 
     for (size_t hotkeyIdx = 0; hotkeyIdx < cfg.hotkeys.size(); ++hotkeyIdx) {
         const auto& hotkey = cfg.hotkeys[hotkeyIdx];
+        const auto eventCouldMatch = [&](const std::vector<DWORD>& keys) {
+            return MatchesHotkeyMainKeyEvent(keys, vkCode) ||
+                   (rebindTargetVk != 0 && MatchesHotkeyMainKeyEvent(keys, rebindTargetVk));
+        };
+        bool hasCandidateBinding = eventCouldMatch(hotkey.keys);
+        if (!hasCandidateBinding) {
+            for (const auto& alt : hotkey.altSecondaryModes) {
+                if (eventCouldMatch(alt.keys)) {
+                    hasCandidateBinding = true;
+                    break;
+                }
+            }
+        }
+        if (!hasCandidateBinding) continue;
+
         if (s_enableHotkeyDebug) {
             Log("[Hotkey] Checking: " + GetKeyComboString(hotkey.keys) + " (main: " + hotkey.mainMode + ", sec: " + hotkey.secondaryMode +
                 ")");
@@ -2306,11 +2466,14 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
         };
 
         for (const auto& alt : hotkey.altSecondaryModes) {
+            if (!eventCouldMatch(alt.keys)) continue;
             bool skipLiveKeyStateChecks = hotkey.triggerOnRelease || (hotkey.triggerOnHold && !isKeyDown);
             bool skipExclusionChecks = hotkey.triggerOnHold && !isKeyDown;
-            bool matched = CheckHotkeyMatch(alt.keys, vkCode, hotkey.conditions.exclusions, skipLiveKeyStateChecks, s_bestMatchKeyCount, rawVkCode, true,
-                                            isKeyDown, skipExclusionChecks);
+            bool matched = MatchesHotkeyMainKeyEvent(alt.keys, vkCode) &&
+                           CheckHotkeyMatch(alt.keys, vkCode, hotkey.conditions.exclusions, skipLiveKeyStateChecks,
+                                            s_bestMatchKeyCount, rawVkCode, true, isKeyDown, skipExclusionChecks);
             bool matchedViaRebind = !matched && rebindTargetVk &&
+                                    MatchesHotkeyMainKeyEvent(alt.keys, rebindTargetVk) &&
                                     CheckHotkeyMatch(alt.keys, rebindTargetVk, hotkey.conditions.exclusions, skipLiveKeyStateChecks,
                                                      s_bestMatchKeyCount, 0, false, false, skipExclusionChecks);
             if (matched || matchedViaRebind) {
@@ -2389,9 +2552,11 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
         {
             bool skipLiveKeyStateChecks = hotkey.triggerOnRelease || (hotkey.triggerOnHold && !isKeyDown);
             bool skipExclusionChecks = hotkey.triggerOnHold && !isKeyDown;
-            bool matched = CheckHotkeyMatch(hotkey.keys, vkCode, hotkey.conditions.exclusions, skipLiveKeyStateChecks, s_bestMatchKeyCount,
-                                            rawVkCode, true, isKeyDown, skipExclusionChecks);
+            bool matched = MatchesHotkeyMainKeyEvent(hotkey.keys, vkCode) &&
+                           CheckHotkeyMatch(hotkey.keys, vkCode, hotkey.conditions.exclusions, skipLiveKeyStateChecks,
+                                            s_bestMatchKeyCount, rawVkCode, true, isKeyDown, skipExclusionChecks);
             bool matchedViaRebind = !matched && rebindTargetVk &&
+                                    MatchesHotkeyMainKeyEvent(hotkey.keys, rebindTargetVk) &&
                                     CheckHotkeyMatch(hotkey.keys, rebindTargetVk, hotkey.conditions.exclusions, skipLiveKeyStateChecks,
                                                      s_bestMatchKeyCount, 0, false, false, skipExclusionChecks);
             if (matched || matchedViaRebind) {
@@ -2487,6 +2652,10 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
 
     for (size_t sensIdx = 0; sensIdx < cfg.sensitivityHotkeys.size(); ++sensIdx) {
         const auto& sensHotkey = cfg.sensitivityHotkeys[sensIdx];
+        if (!MatchesHotkeyMainKeyEvent(sensHotkey.keys, vkCode) &&
+            (rebindTargetVk == 0 || !MatchesHotkeyMainKeyEvent(sensHotkey.keys, rebindTargetVk))) {
+            continue;
+        }
         if (s_enableHotkeyDebug) {
             Log("[Hotkey] Checking sensitivity hotkey: " + GetKeyComboString(sensHotkey.keys) +
                 " -> sens=" + std::to_string(sensHotkey.sensitivity));
@@ -2502,8 +2671,11 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
         if (!isKeyDown) { continue; }
 
         {
-            bool matched = CheckHotkeyMatch(sensHotkey.keys, vkCode, sensHotkey.conditions.exclusions, false, s_bestMatchKeyCount);
-            bool matchedViaRebind = !matched && rebindTargetVk && CheckHotkeyMatch(sensHotkey.keys, rebindTargetVk, sensHotkey.conditions.exclusions, false, s_bestMatchKeyCount);
+            bool matched = MatchesHotkeyMainKeyEvent(sensHotkey.keys, vkCode) &&
+                           CheckHotkeyMatch(sensHotkey.keys, vkCode, sensHotkey.conditions.exclusions, false, s_bestMatchKeyCount);
+            bool matchedViaRebind = !matched && rebindTargetVk && MatchesHotkeyMainKeyEvent(sensHotkey.keys, rebindTargetVk) &&
+                                    CheckHotkeyMatch(sensHotkey.keys, rebindTargetVk, sensHotkey.conditions.exclusions, false,
+                                                     s_bestMatchKeyCount);
             if (matched || matchedViaRebind) {
                 bool blockKey = matchedViaRebind;
                 std::string hotkeyId = "sens_" + GetKeyComboString(sensHotkey.keys);
@@ -2803,8 +2975,15 @@ static LPARAM StripLocalKeyRepeatTag(LPARAM lParam) {
 }
 
 static bool IsLocalRepeatDebugEnabled() {
-    auto cfgSnap = GetConfigSnapshot();
-    return cfgSnap && cfgSnap->debug.showHotkeyDebug;
+    static thread_local uint64_t cachedVersion = ~uint64_t{ 0 };
+    static thread_local bool cachedEnabled = false;
+    const uint64_t version = g_configSnapshotVersion.load(std::memory_order_acquire);
+    if (cachedVersion != version) {
+        const auto cfgSnap = GetConfigSnapshot();
+        cachedEnabled = cfgSnap && cfgSnap->debug.showHotkeyDebug;
+        cachedVersion = version;
+    }
+    return cachedEnabled;
 }
 
 static const char* GetLocalRepeatMessageName(UINT uMsg) {
@@ -3094,7 +3273,11 @@ static InputHandlerResult HandleLocalKeyRepeat(HWND hWnd, UINT uMsg, WPARAM wPar
     const bool isRepeatTickMessage =
         (uMsg == WM_TIMER && static_cast<UINT_PTR>(wParam) == kToolscreenLocalKeyRepeatTimerId) || uMsg == WM_TOOLSCREEN_LOCAL_KEY_REPEAT;
 
-    if (isRepeatTickMessage || IsLocalKeyRepeatTrackedKeyboardMessage(uMsg) || IsLocalKeyRepeatTrackedCharMessage(uMsg)) {
+    const bool isSystemAutoRepeat =
+        (IsLocalKeyRepeatTrackedKeyboardMessage(uMsg) || IsLocalKeyRepeatTrackedCharMessage(uMsg)) &&
+        (lParam & (static_cast<LPARAM>(1) << 30)) != 0;
+    if (!isSystemAutoRepeat &&
+        (isRepeatTickMessage || IsLocalKeyRepeatTrackedKeyboardMessage(uMsg) || IsLocalKeyRepeatTrackedCharMessage(uMsg))) {
         LogLocalRepeatDebug("enter", uMsg, wParam, lParam, isLocalRepeatTagged);
     }
 
@@ -3424,18 +3607,33 @@ static bool RebindCannotType(const KeyRebind& rebind) {
 }
 
 static bool TryTranslateVkToChar(DWORD vkCode, bool shiftDown, WCHAR& outChar) {
+    struct TranslationCache {
+        HKL layout = nullptr;
+        bool known[2][256]{};
+        WCHAR values[2][256]{};
+    };
+    static thread_local TranslationCache cache;
+
+    HKL keyboardLayout = GetKeyboardLayout(0);
+    if (cache.layout != keyboardLayout) {
+        cache = {};
+        cache.layout = keyboardLayout;
+    }
+
+    const size_t shiftIndex = shiftDown ? 1u : 0u;
+    if (vkCode < 256 && cache.known[shiftIndex][vkCode]) {
+        outChar = cache.values[shiftIndex][vkCode];
+        return outChar != 0;
+    }
+
     BYTE keyboardState[256] = {};
     if (shiftDown) keyboardState[VK_SHIFT] = 0x80;
 
-    HKL keyboardLayout = GetKeyboardLayout(0);
     UINT scanCode = GetScanCodeWithExtendedFlag(vkCode) & 0xFF;
     WCHAR utf16Buffer[8] = {};
 
     int translated = ToUnicodeEx(static_cast<UINT>(vkCode), scanCode, keyboardState, utf16Buffer, 8, 0, keyboardLayout);
-    if (translated == 1) {
-        outChar = utf16Buffer[0];
-        return outChar != 0;
-    }
+    outChar = translated == 1 ? utf16Buffer[0] : 0;
 
     if (translated < 0) {
         BYTE emptyState[256] = {};
@@ -3443,7 +3641,11 @@ static bool TryTranslateVkToChar(DWORD vkCode, bool shiftDown, WCHAR& outChar) {
         ToUnicodeEx(static_cast<UINT>(vkCode), scanCode, emptyState, clearBuffer, 8, 0, keyboardLayout);
     }
 
-    return false;
+    if (vkCode < 256) {
+        cache.values[shiftIndex][vkCode] = outChar;
+        cache.known[shiftIndex][vkCode] = true;
+    }
+    return outChar != 0;
 }
 
 static bool TryTranslateVkToCharWithKeyboardState(DWORD vkCode, const BYTE keyboardState[256], WCHAR& outChar) {
@@ -3711,9 +3913,15 @@ static bool IsCapsLockSuppressionEnabled() {
     if (!g_gameWindowActive.load(std::memory_order_acquire)) return false;
     if (IsHotkeyBindingActive() || IsRebindBindingActive()) return false;
 
-    const auto cfg = GetConfigSnapshot();
-    if (!cfg) return false;
-    return cfg->keyRebinds.suppressCapsLockToggle;
+    static std::atomic<uint64_t> cachedVersion{ ~uint64_t{ 0 } };
+    static std::atomic<bool> cachedValue{ false };
+    const uint64_t version = g_configSnapshotVersion.load(std::memory_order_acquire);
+    if (cachedVersion.load(std::memory_order_acquire) != version) {
+        const auto cfg = GetConfigSnapshot();
+        cachedValue.store(cfg && cfg->keyRebinds.suppressCapsLockToggle, std::memory_order_relaxed);
+        cachedVersion.store(version, std::memory_order_release);
+    }
+    return cachedValue.load(std::memory_order_relaxed);
 }
 
 static bool ShouldDeepSuppressLowLevelModifierKey(DWORD rawVk) {
@@ -3757,24 +3965,39 @@ static bool PostSuppressedLowLevelKeyMessage(HWND hWnd, const LowLevelSuppressed
     return ::PostMessage(hWnd, msg, static_cast<WPARAM>(state.rawVk), msgLParam) != FALSE;
 }
 
-static bool HasVulkanModeHotkeyFastPathNeed() {
-    if (GetRenderBackend() != RenderBackend::Vulkan ||
-        !DoesSubclassedWindowOwnForegroundInput() ||
-        !g_gameWindowActive.load(std::memory_order_acquire) ||
-        IsHotkeyBindingActive() || IsRebindBindingActive()) {
-        return false;
-    }
-
-    const auto cfg = GetConfigSnapshot();
-    if (!cfg) return false;
-
-    for (const auto& hotkey : cfg->hotkeys) {
-        if (!hotkey.keys.empty()) return true;
-        for (const auto& alt : hotkey.altSecondaryModes) {
-            if (!alt.keys.empty()) return true;
+static bool HasConfiguredVulkanModeHotkeys() {
+    static std::atomic<uint64_t> cachedVersion{ ~uint64_t{ 0 } };
+    static std::atomic<bool> cachedValue{ false };
+    const uint64_t version = g_configSnapshotVersion.load(std::memory_order_acquire);
+    if (cachedVersion.load(std::memory_order_acquire) != version) {
+        bool hasModeHotkey = false;
+        if (const auto cfg = GetConfigSnapshot()) {
+            for (const auto& hotkey : cfg->hotkeys) {
+                if (!hotkey.keys.empty()) {
+                    hasModeHotkey = true;
+                    break;
+                }
+                for (const auto& alt : hotkey.altSecondaryModes) {
+                    if (!alt.keys.empty()) {
+                        hasModeHotkey = true;
+                        break;
+                    }
+                }
+                if (hasModeHotkey) break;
+            }
         }
+        cachedValue.store(hasModeHotkey, std::memory_order_relaxed);
+        cachedVersion.store(version, std::memory_order_release);
     }
-    return false;
+    return cachedValue.load(std::memory_order_relaxed);
+}
+
+static bool HasVulkanModeHotkeyFastPathNeed() {
+    return GetRenderBackend() == RenderBackend::Vulkan &&
+           DoesSubclassedWindowOwnForegroundInput() &&
+           g_gameWindowActive.load(std::memory_order_acquire) &&
+           !IsHotkeyBindingActive() && !IsRebindBindingActive() &&
+           HasConfiguredVulkanModeHotkeys();
 }
 
 static bool PostVulkanFastPathKeyMessage(HWND hWnd, const KBDLLHOOKSTRUCT& info, WPARAM hookMessage, bool isKeyDown) {
@@ -3855,7 +4078,7 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int code, WPARAM wParam, LPARAM lPa
 
     const DWORD rawVk = static_cast<DWORD>(info->vkCode);
     const RenderBackend backend = GetRenderBackend();
-    const auto cfg = backend == RenderBackend::Vulkan ? GetConfigSnapshot() : nullptr;
+    const auto cfg = backend == RenderBackend::Vulkan ? GetInputConfigSnapshotCachedForThread() : nullptr;
     const DWORD configuredGuiMainKey =
         (cfg && !cfg->guiHotkey.empty()) ? cfg->guiHotkey.back() : 0;
     const bool isConfiguredGuiMainKey =
@@ -3902,7 +4125,7 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int code, WPARAM wParam, LPARAM lPa
         // This preserves the ordering required by release/hold hotkeys and lets the
         // existing WndProc hotkey pipeline run immediately instead of waiting for
         // Vulkan-delayed delivery of the original WM_KEY* message.
-        if (HasVulkanModeHotkeyFastPathNeed() &&
+        if (!IsHotkeyBindingActive() && !IsRebindBindingActive() && HasConfiguredVulkanModeHotkeys() &&
             PostVulkanFastPathKeyMessage(targetHwnd, *info, wParam, isKeyDown)) {
             return 1;
         }
@@ -3972,24 +4195,28 @@ static bool HasDeepSuppressionEligibleEnabledRebind() {
     if (!g_gameWindowActive.load(std::memory_order_acquire)) return false;
     if (IsHotkeyBindingActive() || IsRebindBindingActive()) return false;
 
-    const auto cfg = GetConfigSnapshot();
-    if (!cfg || !cfg->keyRebinds.enabled) return false;
+    static std::atomic<uint64_t> cachedVersion{ ~uint64_t{ 0 } };
+    static std::atomic<bool> cachedValue{ false };
+    const uint64_t version = g_configSnapshotVersion.load(std::memory_order_acquire);
+    if (cachedVersion.load(std::memory_order_acquire) != version) {
+        bool needed = false;
+        if (const auto cfg = GetConfigSnapshot(); cfg && cfg->keyRebinds.enabled) {
+            for (const auto& rebind : cfg->keyRebinds.rebinds) {
+                if (!rebind.enabled || !IsDeepSuppressionEligibleSourceVk(rebind.fromKey)) continue;
+                if ((cfg->keyRebinds.allowSystemAltTab || cfg->keyRebinds.allowSystemAltF4) && IsAltVk(rebind.fromKey)) continue;
 
-    for (const auto& rebind : cfg->keyRebinds.rebinds) {
-        if (!rebind.enabled) continue;
-        if (!IsDeepSuppressionEligibleSourceVk(rebind.fromKey)) continue;
-        if ((cfg->keyRebinds.allowSystemAltTab || cfg->keyRebinds.allowSystemAltF4) && IsAltVk(rebind.fromKey)) {
-            continue;
+                const DWORD triggerVk = NormalizeModifierVkFromConfig(
+                    rebind.toKey, (rebind.useCustomOutput ? rebind.customOutputScanCode : 0));
+                if (ShouldDeepSuppressModifierForRebind(rebind, rebind.fromKey, rebind.fromKey, true, false, triggerVk)) {
+                    needed = true;
+                    break;
+                }
+            }
         }
-
-        const DWORD triggerVk = NormalizeModifierVkFromConfig(rebind.toKey,
-                                                              (rebind.useCustomOutput ? rebind.customOutputScanCode : 0));
-        if (ShouldDeepSuppressModifierForRebind(rebind, rebind.fromKey, rebind.fromKey, true, false, triggerVk)) {
-            return true;
-        }
+        cachedValue.store(needed, std::memory_order_relaxed);
+        cachedVersion.store(version, std::memory_order_release);
     }
-
-    return false;
+    return cachedValue.load(std::memory_order_relaxed);
 }
 
 static bool HotkeyKeysNeedExactModifierTracking(const std::vector<DWORD>& keys) {
@@ -4007,39 +4234,55 @@ static bool HasExactModifierTrackingNeed() {
     if (!g_gameWindowActive.load(std::memory_order_acquire)) return false;
     if (IsHotkeyBindingActive() || IsRebindBindingActive()) return false;
 
-    const auto cfg = GetConfigSnapshot();
-    if (!cfg) return false;
+    static std::atomic<uint64_t> cachedVersion{ ~uint64_t{ 0 } };
+    static std::atomic<bool> cachedValue{ false };
+    const uint64_t version = g_configSnapshotVersion.load(std::memory_order_acquire);
+    if (cachedVersion.load(std::memory_order_acquire) != version) {
+        bool needed = false;
+        if (const auto cfg = GetConfigSnapshot()) {
+            needed = HotkeyKeysNeedExactModifierTracking(cfg->guiHotkey) ||
+                     HotkeyKeysNeedExactModifierTracking(cfg->borderlessHotkey) ||
+                     HotkeyKeysNeedExactModifierTracking(cfg->imageOverlaysHotkey) ||
+                     HotkeyKeysNeedExactModifierTracking(cfg->windowOverlaysHotkey) ||
+                     HotkeyKeysNeedExactModifierTracking(cfg->ninjabrainOverlayHotkey) ||
+                     HotkeyKeysNeedExactModifierTracking(cfg->keyRebinds.toggleHotkey);
 
-    if (HotkeyKeysNeedExactModifierTracking(cfg->guiHotkey)) return true;
-    if (HotkeyKeysNeedExactModifierTracking(cfg->borderlessHotkey)) return true;
-    if (HotkeyKeysNeedExactModifierTracking(cfg->imageOverlaysHotkey)) return true;
-    if (HotkeyKeysNeedExactModifierTracking(cfg->windowOverlaysHotkey)) return true;
-    if (HotkeyKeysNeedExactModifierTracking(cfg->ninjabrainOverlayHotkey)) return true;
-    if (HotkeyKeysNeedExactModifierTracking(cfg->keyRebinds.toggleHotkey)) return true;
+            for (const auto& hotkey : cfg->hotkeys) {
+                if (needed || HotkeyKeysNeedExactModifierTracking(hotkey.keys)) {
+                    needed = true;
+                    break;
+                }
+                for (const auto& alt : hotkey.altSecondaryModes) {
+                    if (HotkeyKeysNeedExactModifierTracking(alt.keys)) {
+                        needed = true;
+                        break;
+                    }
+                }
+                if (needed) break;
+            }
 
-    for (const auto& hotkey : cfg->hotkeys) {
-        if (HotkeyKeysNeedExactModifierTracking(hotkey.keys)) return true;
-        for (const auto& alt : hotkey.altSecondaryModes) {
-            if (HotkeyKeysNeedExactModifierTracking(alt.keys)) return true;
+            if (!needed) {
+                for (const auto& hotkey : cfg->sensitivityHotkeys) {
+                    if (HotkeyKeysNeedExactModifierTracking(hotkey.keys)) {
+                        needed = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!needed && cfg->keyRebinds.enabled) {
+                for (const auto& rebind : cfg->keyRebinds.rebinds) {
+                    if (rebind.enabled && IsTrackedSpecificModifierVk(rebind.fromKey)) {
+                        needed = true;
+                        break;
+                    }
+                }
+            }
         }
+        cachedValue.store(needed, std::memory_order_relaxed);
+        cachedVersion.store(version, std::memory_order_release);
     }
-
-    for (const auto& hotkey : cfg->sensitivityHotkeys) {
-        if (HotkeyKeysNeedExactModifierTracking(hotkey.keys)) return true;
-    }
-
-    if (!cfg->keyRebinds.enabled) {
-        return false;
-    }
-
-    for (const auto& rebind : cfg->keyRebinds.rebinds) {
-        if (!rebind.enabled) continue;
-        if (IsTrackedSpecificModifierVk(rebind.fromKey)) {
-            return true;
-        }
-    }
-
-    return false;
+    return cachedValue.load(std::memory_order_relaxed);
 }
 
 static void UninstallLowLevelKeyboardHook() {
@@ -4058,23 +4301,50 @@ static void UninstallLowLevelKeyboardHook() {
 }
 
 static void UpdateLowLevelKeyboardHookInstalledState() {
+    static std::atomic<uint64_t> lastConfigVersion{ ~uint64_t{ 0 } };
+    static std::atomic<HWND> lastTargetHwnd{ NULL };
+    static std::atomic<unsigned> lastStateFlags{ ~0u };
+    static std::atomic<RenderBackend> lastBackend{ RenderBackend::Unknown };
+
+    const uint64_t configVersion = g_configSnapshotVersion.load(std::memory_order_acquire);
+    const HWND targetHwnd = g_subclassedHwnd.load(std::memory_order_acquire);
+    const bool shuttingDown = g_isShuttingDown.load(std::memory_order_acquire);
+    const bool gameWindowActive = g_gameWindowActive.load(std::memory_order_acquire);
+    const bool bindingActive = IsHotkeyBindingActive() || IsRebindBindingActive();
+    const RenderBackend backend = GetRenderBackend();
+    const unsigned stateFlags = (shuttingDown ? 1u : 0u) | (gameWindowActive ? 2u : 0u) | (bindingActive ? 4u : 0u);
+
+    if (lastConfigVersion.load(std::memory_order_acquire) == configVersion &&
+        lastTargetHwnd.load(std::memory_order_acquire) == targetHwnd &&
+        lastStateFlags.load(std::memory_order_acquire) == stateFlags &&
+        lastBackend.load(std::memory_order_acquire) == backend) {
+        return;
+    }
+
     const bool needsDeepSuppression = HasDeepSuppressionEligibleEnabledRebind();
     const bool needsExactModifierTracking = HasExactModifierTrackingNeed();
     const bool needsCapsLockSuppression = IsCapsLockSuppressionEnabled();
     const bool needsVulkanModeHotkeyFastPath = HasVulkanModeHotkeyFastPathNeed();
-    const bool shuttingDown = g_isShuttingDown.load(std::memory_order_acquire);
     const bool hookRequested = !shuttingDown &&
         (needsDeepSuppression || needsExactModifierTracking || needsCapsLockSuppression || needsVulkanModeHotkeyFastPath);
     if (!hookRequested) {
-        const HWND targetHwnd = g_subclassedHwnd.load(std::memory_order_acquire);
         ReleaseSuppressedLowLevelRebindKeys(targetHwnd);
         ReleaseVulkanFastPathKeys(targetHwnd);
         ResetLowLevelExactModifierState();
         UninstallLowLevelKeyboardHook();
-        return;
+    } else {
+        EnsureLowLevelKeyboardHookInstalled();
+        if (s_lowLevelKeyboardHook == NULL) {
+            // Preserve the old retry behavior if Windows temporarily rejects
+            // installation; do not memoize a state that was not achieved.
+            return;
+        }
     }
 
-    EnsureLowLevelKeyboardHookInstalled();
+    lastConfigVersion.store(configVersion, std::memory_order_release);
+    lastTargetHwnd.store(targetHwnd, std::memory_order_release);
+    lastStateFlags.store(stateFlags, std::memory_order_release);
+    lastBackend.store(backend, std::memory_order_release);
 }
 
 static uint64_t BuildSyntheticRebindOutputSourceId(DWORD rawVkCode, LPARAM lParam, bool isMouseButton) {
@@ -4837,7 +5107,7 @@ InputHandlerResult HandleKeyRebinding(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
     const bool isAutoRepeatKeyDown = !isMouseButton && isKeyDown && IsTrackedExactAutoRepeatKeyDown(uMsg, wParam, lParam);
 
     // Use config snapshot for thread-safe access to key rebinds
-    auto rebindCfg = GetConfigSnapshot();
+    auto rebindCfg = GetInputConfigSnapshotCachedForThread();
     const bool rebindsEnabled = rebindCfg && rebindCfg->keyRebinds.enabled;
     if (!rebindsEnabled) {
         if (!isMouseButton && !isAutoRepeatKeyDown) {
@@ -4869,10 +5139,7 @@ InputHandlerResult HandleKeyRebinding(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
     }
 
     const DWORD matchVk = isMouseButton ? vkCode : NormalizeModifierVkFromKeyMessage(rawVkCode, lParam);
-    const KeyRebind* matchedRebind = FindPreferredEnabledKeyRebind(
-        rebindCfg->keyRebinds.rebinds,
-        cursorVisible,
-        [&](const KeyRebind& rebind) { return MatchesRebindSourceKey(matchVk, rawVkCode, rebind.fromKey); });
+    const KeyRebind* matchedRebind = FindPreferredEnabledKeyRebindForInput(*rebindCfg, cursorVisible, matchVk, rawVkCode);
     if (matchedRebind != nullptr) {
         if (isKeyDown && !isAutoRepeatKeyDown) {
             s_unreboundKeyDownVks.erase(passthroughVk);
@@ -4922,113 +5189,134 @@ InputHandlerResult HandleCustomCharNoRebind(HWND hWnd, UINT uMsg, WPARAM wParam,
     return { true, DefWindowProc(hWnd, forwardedMsg, wParam, lParam) };
 }
 
+static const KeyRebind* FindPreferredEnabledKeyRebindForChar(const Config& cfg, bool cursorVisible, WCHAR inputChar) {
+    struct CachedLookup {
+        uint64_t configVersion = ~uint64_t{ 0 };
+        HKL keyboardLayout = nullptr;
+        WCHAR inputChar = 0;
+        bool cursorVisible = false;
+        bool valid = false;
+        size_t matchedIndex = static_cast<size_t>(-1);
+    };
+    static thread_local CachedLookup cache;
+
+    const uint64_t version = g_configSnapshotVersion.load(std::memory_order_acquire);
+    const HKL keyboardLayout = GetKeyboardLayout(0);
+    if (cache.valid && cache.configVersion == version && cache.keyboardLayout == keyboardLayout &&
+        cache.inputChar == inputChar && cache.cursorVisible == cursorVisible) {
+        return cache.matchedIndex < cfg.keyRebinds.rebinds.size()
+                   ? &cfg.keyRebinds.rebinds[cache.matchedIndex]
+                   : nullptr;
+    }
+
+    const KeyRebind* match = FindPreferredEnabledKeyRebind(
+        cfg.keyRebinds.rebinds,
+        cursorVisible,
+        [inputChar](const KeyRebind& rebind) {
+            if (rebind.fromKey == 0 || (rebind.toKey == 0 && !IsConsumeOnlyKeyRebind(rebind))) return false;
+
+            WCHAR fromUnshifted = 0;
+            WCHAR fromShifted = 0;
+            const bool hasFromUnshifted = TryTranslateVkToChar(rebind.fromKey, false, fromUnshifted);
+            const bool hasFromShifted = TryTranslateVkToChar(rebind.fromKey, true, fromShifted);
+            return (hasFromUnshifted && inputChar == fromUnshifted) ||
+                   (hasFromShifted && inputChar == fromShifted);
+        });
+
+    cache.configVersion = version;
+    cache.keyboardLayout = keyboardLayout;
+    cache.inputChar = inputChar;
+    cache.cursorVisible = cursorVisible;
+    cache.valid = true;
+    cache.matchedIndex = match ? static_cast<size_t>(match - cfg.keyRebinds.rebinds.data()) : static_cast<size_t>(-1);
+    return match;
+}
+
 InputHandlerResult HandleCharRebinding(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     if (uMsg != WM_CHAR && uMsg != WM_SYSCHAR) { return { false, 0 }; }
     PROFILE_SCOPE("HandleCharRebinding");
 
-    auto charRebindCfg = GetConfigSnapshot();
+    auto charRebindCfg = GetInputConfigSnapshotCachedForThread();
     if (!charRebindCfg || !charRebindCfg->keyRebinds.enabled) { return { false, 0 }; }
-    const bool logHotkeyDebug = charRebindCfg->debug.showHotkeyDebug;
+    const bool logHotkeyDebug = charRebindCfg->debug.showHotkeyDebug &&
+                                (lParam & (static_cast<LPARAM>(1) << 30)) == 0;
     const bool cursorVisible = IsCursorVisible();
 
     WCHAR inputChar = static_cast<WCHAR>(wParam);
+    const KeyRebind* matchedRebind = FindPreferredEnabledKeyRebindForChar(*charRebindCfg, cursorVisible, inputChar);
+    if (matchedRebind != nullptr) {
+        const KeyRebind& rebind = *matchedRebind;
+        if (IsConsumeOnlyKeyRebind(rebind)) {
+            return { true, 0 };
+        }
 
-    for (int pass = 0; pass < 2; ++pass) {
-        const KeyRebindCursorStateMatchPriority passPriority =
-            (pass == 0) ? KeyRebindCursorStateMatchPriority::Exact : KeyRebindCursorStateMatchPriority::Any;
+        const bool shiftDown = IsShiftCurrentlyDown();
+        const bool shiftLayerActive = IsShiftLayerActive(rebind, shiftDown, IsCapsLockCurrentlyOn());
+        const bool typedOutputDisabled = IsEffectiveTypedOutputDisabled(rebind, shiftLayerActive);
+        const bool preferShiftedText = ResolvePreferredOutputShiftState(rebind, shiftLayerActive, shiftDown);
 
-        for (const auto& rebind : charRebindCfg->keyRebinds.rebinds) {
-            if (!rebind.enabled || rebind.fromKey == 0) continue;
-            if (rebind.toKey == 0 && !IsConsumeOnlyKeyRebind(rebind)) continue;
-            if (GetKeyRebindCursorStateMatchPriority(rebind, cursorVisible) != passPriority) continue;
+        if (typedOutputDisabled) {
+            return { true, 0 };
+        }
 
-            WCHAR fromUnshifted = 0;
-            WCHAR fromShifted = 0;
-            bool hasFromUnshifted = TryTranslateVkToChar(rebind.fromKey, false, fromUnshifted);
-            bool hasFromShifted = TryTranslateVkToChar(rebind.fromKey, true, fromShifted);
+        if (shiftLayerActive && HasShiftLayerOutputUnicode(rebind)) {
+            LRESULT r = SendUnicodeScalarAsCharMessage(hWnd, uMsg, (uint32_t)rebind.shiftLayerOutputUnicode, lParam);
+            return { true, r };
+        }
 
-            bool matched = false;
+        if (!shiftLayerActive && rebind.useCustomOutput && rebind.customOutputUnicode != 0) {
+            LRESULT r = SendUnicodeScalarAsCharMessage(hWnd, uMsg, (uint32_t)rebind.customOutputUnicode, lParam);
+            return { true, r };
+        }
 
-            if (hasFromUnshifted && inputChar == fromUnshifted) {
-                matched = true;
-            } else if (hasFromShifted && inputChar == fromShifted) {
-                matched = true;
+        DWORD outputVK = ResolveEffectiveCustomOutputVk(rebind, shiftLayerActive);
+
+        if (outputVK == 0) {
+            if (RebindCannotType(rebind)) {
+                if (logHotkeyDebug) {
+                    Log("[REBIND WM_CHAR] Consuming char code " + std::to_string(static_cast<unsigned int>(inputChar)) +
+                        " (trigger cannot type)");
+                }
+                return { true, 0 };
+            }
+            return { false, 0 };
+        }
+
+        outputVK = NormalizeModifierVkFromConfig(outputVK);
+
+        WCHAR outputChar = 0;
+        if (outputVK == VK_RETURN) {
+            outputChar = L'\r';
+        } else if (outputVK == VK_TAB) {
+            outputChar = L'\t';
+        } else if (outputVK == VK_BACK) {
+            outputChar = L'\b';
+        } else {
+            BYTE ks[256] = {};
+            if (GetKeyboardState(ks)) {
+                ApplyPreferredOutputShiftState(rebind, shiftLayerActive, ks);
+                (void)TryTranslateVkToCharWithKeyboardState(outputVK, ks, outputChar);
             }
 
-            if (matched) {
-                if (IsConsumeOnlyKeyRebind(rebind)) {
-                    return { true, 0 };
-                }
-
-                const bool shiftDown = IsShiftCurrentlyDown();
-                const bool shiftLayerActive = IsShiftLayerActive(rebind, shiftDown, IsCapsLockCurrentlyOn());
-                const bool typedOutputDisabled = IsEffectiveTypedOutputDisabled(rebind, shiftLayerActive);
-                const bool preferShiftedText = ResolvePreferredOutputShiftState(rebind, shiftLayerActive, shiftDown);
-
-                if (typedOutputDisabled) {
-                    return { true, 0 };
-                }
-
-                if (shiftLayerActive && HasShiftLayerOutputUnicode(rebind)) {
-                    LRESULT r = SendUnicodeScalarAsCharMessage(hWnd, uMsg, (uint32_t)rebind.shiftLayerOutputUnicode, lParam);
-                    return { true, r };
-                }
-
-                if (!shiftLayerActive && rebind.useCustomOutput && rebind.customOutputUnicode != 0) {
-                    LRESULT r = SendUnicodeScalarAsCharMessage(hWnd, uMsg, (uint32_t)rebind.customOutputUnicode, lParam);
-                    return { true, r };
-                }
-
-                DWORD outputVK = ResolveEffectiveCustomOutputVk(rebind, shiftLayerActive);
-
-                if (outputVK == 0) {
-                    if (RebindCannotType(rebind)) {
-                        if (logHotkeyDebug) {
-                            Log("[REBIND WM_CHAR] Consuming char code " + std::to_string(static_cast<unsigned int>(inputChar)) +
-                                " (trigger cannot type)");
-                        }
-                        return { true, 0 };
-                    }
-                    return { false, 0 };
-                }
-
-                outputVK = NormalizeModifierVkFromConfig(outputVK);
-
-                WCHAR outputChar = 0;
-                if (outputVK == VK_RETURN) {
-                    outputChar = L'\r';
-                } else if (outputVK == VK_TAB) {
-                    outputChar = L'\t';
-                } else if (outputVK == VK_BACK) {
-                    outputChar = L'\b';
-                } else {
-                    BYTE ks[256] = {};
-                    if (GetKeyboardState(ks)) {
-                        ApplyPreferredOutputShiftState(rebind, shiftLayerActive, ks);
-                        (void)TryTranslateVkToCharWithKeyboardState(outputVK, ks, outputChar);
-                    }
-
-                    if (outputChar == 0) {
-                        (void)TryTranslateVkToCharPreferShiftState(outputVK, preferShiftedText, outputChar);
-                    }
-                }
-
-                if (outputChar == 0) {
-                    if (logHotkeyDebug) {
-                        Log("[REBIND WM_CHAR] Consuming char code " + std::to_string(static_cast<unsigned int>(inputChar)) +
-                            " (output VK has no WM_CHAR)");
-                    }
-                    return { true, 0 };
-                }
-
-                if (logHotkeyDebug) {
-                    Log("[REBIND WM_CHAR] Remapping char code " + std::to_string(static_cast<unsigned int>(inputChar)) + " -> " +
-                        std::to_string(static_cast<unsigned int>(outputChar)));
-                }
-
-                return { true, CallWindowProc(g_originalWndProc, hWnd, uMsg, outputChar, lParam) };
+            if (outputChar == 0) {
+                (void)TryTranslateVkToCharPreferShiftState(outputVK, preferShiftedText, outputChar);
             }
         }
+
+        if (outputChar == 0) {
+            if (logHotkeyDebug) {
+                Log("[REBIND WM_CHAR] Consuming char code " + std::to_string(static_cast<unsigned int>(inputChar)) +
+                    " (output VK has no WM_CHAR)");
+            }
+            return { true, 0 };
+        }
+
+        if (logHotkeyDebug) {
+            Log("[REBIND WM_CHAR] Remapping char code " + std::to_string(static_cast<unsigned int>(inputChar)) + " -> " +
+                std::to_string(static_cast<unsigned int>(outputChar)));
+        }
+
+        return { true, CallWindowProc(g_originalWndProc, hWnd, uMsg, outputChar, lParam) };
     }
     return { false, 0 };
 }
@@ -5101,16 +5389,14 @@ static void ResolveHotkeyPriority(UINT uMsg, WPARAM wParam, LPARAM lParam) {
 
     s_bestMatchKeyCount = 0;
 
-    { // Skip resolution entirely for keys that aren't bound to any hotkey
-        std::lock_guard<std::mutex> lock(g_hotkeyMainKeysMutex);
-        if (g_hotkeyMainKeys.find(vkCode) == g_hotkeyMainKeys.end()) {
-            s_bestMatchKeyCountByMainVk.erase(vkCode);
-            return;
-        }
+    // Skip resolution entirely for keys that aren't bound to any hotkey.
+    if (!IsToolscreenRoutingKey(vkCode)) {
+        s_bestMatchKeyCountByMainVk.erase(vkCode);
+        return;
     }
 
     auto check = [&](const std::vector<DWORD>& keys, const std::vector<DWORD>& exclusions = {}) {
-        if (!keys.empty() && CheckHotkeyMatch(keys, vkCode, exclusions, false))
+        if (MatchesHotkeyMainKeyEvent(keys, vkCode) && CheckHotkeyMatch(keys, vkCode, exclusions, false))
             s_bestMatchKeyCount = (std::max)(s_bestMatchKeyCount, keys.size());
     };
 
@@ -5183,9 +5469,28 @@ static void ResetShiftHotkeyPollingState(HWND hWnd) {
 }
 
 static void UpdateShiftHotkeyPollingState(HWND hWnd) {
-    auto cfgSnap = GetConfigSnapshot();
-    const bool shouldEnable = cfgSnap && ConfigUsesExactShiftHotkeys(*cfgSnap);
-    if (!shouldEnable || !hWnd || !IsWindow(hWnd)) {
+    static uint64_t cachedConfigVersion = ~uint64_t{ 0 };
+    static bool cachedShouldEnable = false;
+    const uint64_t configVersion = g_configSnapshotVersion.load(std::memory_order_acquire);
+    std::shared_ptr<const Config> cfgSnap;
+    if (cachedConfigVersion != configVersion) {
+        cfgSnap = GetConfigSnapshot();
+        cachedShouldEnable = cfgSnap && ConfigUsesExactShiftHotkeys(*cfgSnap);
+        cachedConfigVersion = configVersion;
+    }
+    const bool shouldEnable = cachedShouldEnable;
+    if (!shouldEnable) {
+        if (s_shiftHotkeyPollState.timerArmed || s_shiftHotkeyPollState.exactShiftHotkeysEnabled) {
+            ResetShiftHotkeyPollingState(hWnd);
+        }
+        return;
+    }
+
+    if (s_shiftHotkeyPollState.timerArmed && s_shiftHotkeyPollState.exactShiftHotkeysEnabled) {
+        return;
+    }
+
+    if (!hWnd || !IsWindow(hWnd)) {
         ResetShiftHotkeyPollingState(hWnd);
         return;
     }
@@ -5196,7 +5501,8 @@ static void UpdateShiftHotkeyPollingState(HWND hWnd) {
 
     if (!s_shiftHotkeyPollState.timerArmed) {
         if (SetTimer(hWnd, kToolscreenShiftHotkeyPollTimerId, 10, NULL) == 0) {
-            if (cfgSnap->debug.showHotkeyDebug) {
+            if (!cfgSnap) cfgSnap = GetConfigSnapshot();
+            if (cfgSnap && cfgSnap->debug.showHotkeyDebug) {
                 Log("[Hotkey] WARNING: Failed to arm sided-shift polling timer");
             }
             s_shiftHotkeyPollState = {};
@@ -5329,10 +5635,12 @@ LRESULT CALLBACK SubclassedWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
         return DefWindowProc(hWnd, uMsg, wParam, lParam);
     }
 
-    ScopedExactKeyboardMessageState scopedKeyboardMessageState(uMsg, wParam, lParam);
-
+    const bool isKeyboardRepeatMessage =
+        (uMsg == WM_KEYDOWN || uMsg == WM_SYSKEYDOWN || uMsg == WM_CHAR || uMsg == WM_SYSCHAR) &&
+        (lParam & (static_cast<LPARAM>(1) << 30)) != 0;
     const bool guiOpen = g_showGui.load(std::memory_order_acquire);
-    if (guiOpen && g_forceVisibleCursorWhileGuiOpen.load(std::memory_order_acquire) && g_gameVersion >= GameVersion(1, 13, 0)) {
+    if (!isKeyboardRepeatMessage && guiOpen && g_forceVisibleCursorWhileGuiOpen.load(std::memory_order_acquire) &&
+        g_gameVersion >= GameVersion(1, 13, 0)) {
         EnsureSystemCursorVisible();
         SetCursor(ResolveForcedVisibleGuiCursor(CurrentGameStateForCursor()));
     }
@@ -5343,6 +5651,30 @@ LRESULT CALLBACK SubclassedWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
 
     UpdateLowLevelKeyboardHookInstalledState();
     UpdateShiftHotkeyPollingState(hWnd);
+
+    // Ordinary held gameplay keys do not need to traverse Toolscreen again after
+    // their edge event. Rebind sources and every hotkey-capable key are present in
+    // the versioned routing table, so this bypass retains all Toolscreen behavior
+    // while forwarding unrelated Windows repeats directly to the game. Generic
+    // modifier aliases are populated alongside sided variants, so raw wParam is
+    // sufficient here and avoids exact-key tracking work for bypassed repeats.
+    if ((uMsg == WM_KEYDOWN || uMsg == WM_SYSKEYDOWN) && (lParam & (static_cast<LPARAM>(1) << 30)) != 0 &&
+        !isLocalRepeatTagged && !g_showGui.load(std::memory_order_acquire) && !IsWindowOverlayFocused()) {
+        const DWORD rawVk = static_cast<DWORD>(wParam);
+        if (!IsToolscreenRoutingKey(rawVk)) {
+            return CallWindowProc(g_originalWndProc, hWnd, uMsg, wParam, lParam);
+        }
+    }
+
+    if ((uMsg == WM_CHAR || uMsg == WM_SYSCHAR) && (lParam & (static_cast<LPARAM>(1) << 30)) != 0 &&
+        !g_showGui.load(std::memory_order_acquire) && !IsWindowOverlayFocused() &&
+        !g_configLoadFailed.load(std::memory_order_acquire)) {
+        const InputHandlerResult repeatCharResult = HandleCharRebinding(hWnd, uMsg, wParam, lParam);
+        if (repeatCharResult.consumed) return repeatCharResult.result;
+        return CallWindowProc(g_originalWndProc, hWnd, uMsg, wParam, lParam);
+    }
+
+    ScopedExactKeyboardMessageState scopedKeyboardMessageState(uMsg, wParam, lParam);
     SyncShiftHotkeyPollingStateFromMessage(uMsg, wParam, lParam);
 
     InputHandlerResult result;
