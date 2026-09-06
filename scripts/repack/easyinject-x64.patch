@@ -1,0 +1,78 @@
+diff --git a/compatibility-variant/pom.xml b/compatibility-variant/pom.xml
+index 6cb9a4a..e568769 100644
+--- a/compatibility-variant/pom.xml
++++ b/compatibility-variant/pom.xml
+@@ -14,6 +14,7 @@
+         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+         <project.build.outputTimestamp>2026-08-23T00:00:00Z</project.build.outputTimestamp>
+         <root.dir>${project.basedir}/..</root.dir>
++        <easyinject.x64Only>false</easyinject.x64Only>
+     </properties>
+ 
+     <repositories>
+@@ -38,6 +39,9 @@
+             <resource><directory>${root.dir}/src/main/resources</directory></resource>
+         </resources>
+         <plugins>
++            <plugin>
++                <groupId>org.apache.maven.plugins</groupId><artifactId>maven-surefire-plugin</artifactId><version>3.5.2</version>
++            </plugin>
+             <plugin>
+                 <groupId>org.codehaus.mojo</groupId><artifactId>properties-maven-plugin</artifactId><version>1.2.1</version>
+                 <executions><execution><phase>initialize</phase><goals><goal>read-project-properties</goal></goals>
+@@ -90,9 +94,9 @@
+                         <fail message="Universal packaging requires both Toolscreen and liblogger architectures">
+                             <condition><not><and>
+                                 <available file="${root.dir}/custom-dlls/Toolscreen_x64.dll" type="file" />
+-                                <available file="${root.dir}/custom-dlls/Toolscreen_arm64.dll" type="file" />
++                                <or><istrue value="${easyinject.x64Only}" /><available file="${root.dir}/custom-dlls/Toolscreen_arm64.dll" type="file" /></or>
+                                 <available file="${root.dir}/src/main/resources/dlls/liblogger_x64.dll" type="file" />
+-                                <available file="${root.dir}/src/main/resources/dlls/liblogger_arm64.dll" type="file" />
++                                <or><istrue value="${easyinject.x64Only}" /><available file="${root.dir}/src/main/resources/dlls/liblogger_arm64.dll" type="file" /></or>
+                             </and></not></condition>
+                         </fail>
+                     </target></configuration>
+diff --git a/exe/CMakeLists.txt b/exe/CMakeLists.txt
+index f074a4b..c4e1cff 100644
+--- a/exe/CMakeLists.txt
++++ b/exe/CMakeLists.txt
+@@ -43,6 +43,15 @@ set(ARCHITECTURE_PAYLOAD_FILES
+     "${CUSTOM_DLL_DIR}/Toolscreen_x64.dll"
+     "${CUSTOM_DLL_DIR}/Toolscreen_arm64.dll"
+ )
++option(EASYINJECT_X64_ONLY "Package only the x64 payload" OFF)
++if(EASYINJECT_X64_ONLY)
++    if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8 OR CMAKE_GENERATOR_PLATFORM STREQUAL "ARM64")
++        message(FATAL_ERROR "X64-only packaging requires an x64 compiler")
++    endif()
++    list(FILTER LOGGER_DLL_FILES EXCLUDE REGEX "liblogger_arm64[.]dll$")
++    list(FILTER ARCHITECTURE_PAYLOAD_FILES EXCLUDE REGEX "Toolscreen_arm64[.]dll$")
++    list(FILTER CUSTOM_DLL_FILES EXCLUDE REGEX "_arm64[.]dll$")
++endif()
+ # A stale unsuffixed payload would overwrite the selected architecture at
+ # extraction time, so universal packages never embed it.
+ list(FILTER CUSTOM_DLL_FILES EXCLUDE REGEX "[/\\\\]Toolscreen[.]dll$")
+diff --git a/src/main/java/com/easyinject/Main.java b/src/main/java/com/easyinject/Main.java
+index 0657a53..8c0848e 100644
+--- a/src/main/java/com/easyinject/Main.java
++++ b/src/main/java/com/easyinject/Main.java
+@@ -175,6 +175,19 @@ public class Main {
+     public static void main(String[] args) {
+         OsCheck.requireWindowsOrExit(PROJECT_NAME);
+ 
++        // Reject unsupported payload architectures before changing an instance.
++        if (Main.class.getResource("/dlls/Toolscreen_" + PAYLOAD_ARCH + ".dll") == null) {
++            String message = "This installer does not contain a " + PAYLOAD_ARCH
++                + " payload. Please use an installer and Java runtime for a supported architecture.";
++            System.err.println(message);
++            if (!java.awt.GraphicsEnvironment.isHeadless()) {
++                javax.swing.JOptionPane.showMessageDialog(null, message, PROJECT_NAME,
++                    javax.swing.JOptionPane.ERROR_MESSAGE);
++            }
++            System.exit(1);
++            return;
++        }
++
+         // Internal elevated helper mode (used to ensure Defender exclusions with a single UAC prompt).
+         if (hasArgument(args, DEFENDER_ELEVATED_ENSURE_ARG)) {
+             System.exit(runDefenderElevatedEnsureMode(args));

@@ -2,13 +2,35 @@ name: Build Signed Release
 
 on:
   workflow_dispatch:
+    inputs:
+      repack_144:
+        description: 'Repackage the exact released 1.4.4 x64 DLL instead of building native code'
+        type: boolean
+        default: false
+      installer_version:
+        description: 'Installer version for repack mode only'
+        type: string
+        default: '1.4.5'
+      repack_sign:
+        description: 'Submit repacked installers to SignPath (repack mode only)'
+        type: boolean
+        default: true
 
 permissions:
   actions: read
   contents: read
 
 jobs:
+  repack_144:
+    if: ${{ inputs.repack_144 }}
+    uses: ./.github/workflows/signed-repack.yml
+    with:
+      installer_version: ${{ inputs.installer_version }}
+      sign: ${{ inputs.repack_sign }}
+    secrets: inherit
+
   build_signed_native:
+    if: ${{ !inputs.repack_144 }}
     name: Build and sign native ${{ matrix.arch }} payload
     runs-on: windows-latest
     strategy:

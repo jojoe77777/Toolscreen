@@ -1,0 +1,196 @@
+name: Repack and Sign Toolscreen 1.4.4
+
+on:
+  workflow_call:
+    inputs:
+      installer_version:
+        required: true
+        type: string
+      sign:
+        required: true
+        type: boolean
+  workflow_dispatch:
+    inputs:
+      installer_version:
+        description: 'New installer version (embedded Toolscreen DLL stays 1.4.4)'
+        required: true
+        default: '1.4.5'
+        type: string
+      sign:
+        description: 'Submit the rebuilt installers to SignPath'
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  repack:
+    name: Repack released x64 payload and sign installers
+    runs-on: windows-2022
+    env:
+      INSTALLER_VERSION: ${{ inputs.installer_version }}
+      SIGNPATH_ORGANIZATION_ID: '0126c615-e5f1-4fed-a438-6b8de149c8f4'
+      SIGNPATH_PROJECT_SLUG: 'Toolscreen'
+      SIGNPATH_SIGNING_POLICY_SLUG: 'release-signing'
+    steps:
+      - name: Check out packaging workflow
+        uses: actions/checkout@v4
+
+      - name: Validate version and resolve pinned dependency
+        id: inputs
+        shell: pwsh
+        run: |
+          if ($env:INSTALLER_VERSION -notmatch '^\d+\.\d+\.\d+$') {
+            throw 'Installer version must have three numeric components.'
+          }
+          if ([version]$env:INSTALLER_VERSION -le [version]'1.4.4') {
+            throw 'Use a new installer version above 1.4.4; the payload remains unchanged.'
+          }
+          $manifest = Get-Content scripts/repack/payload.json -Raw | ConvertFrom-Json
+          "easyinject_commit=$($manifest.easyInjectCommit)" >> $env:GITHUB_OUTPUT
+
+      - name: Check out pinned EasyInjectBundled
+        uses: actions/checkout@v4
+        with:
+          repository: jojoe77777/EasyInjectBundled
+          ref: ${{ steps.inputs.outputs.easyinject_commit }}
+          path: out/repack/source
+          persist-credentials: false
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Prepare verified released payload and x64 packaging
+        shell: pwsh
+        run: |
+          ./scripts/repack/prepare.ps1 -SourceDirectory out/repack/source -DownloadDirectory out/repack/downloads -InstallerVersion $env:INSTALLER_VERSION
+
+      - name: Build JAR and run Java tests
+        shell: pwsh
+        run: |
+          mvn -f out/repack/source/pom.xml -pl compatibility-variant '-Deasyinject.x64Only=true' --batch-mode --no-transfer-progress clean package
+          if ($LASTEXITCODE -ne 0) { throw 'JAR build/tests failed' }
+
+      - name: Build EXE and native test runners
+        shell: pwsh
+        run: |
+          $source = (Resolve-Path out/repack/source).Path
+          cmake -S scripts/repack -B out/repack/build -G 'Visual Studio 17 2022' -A x64 "-DEASYINJECT_SOURCE_DIR=$source" "-DINSTALLER_VERSION=$env:INSTALLER_VERSION"
+          if ($LASTEXITCODE -ne 0) { throw 'CMake configuration failed' }
+          cmake --build out/repack/build --config Release --parallel --target EasyInjectExe easyinject_instance_cfg_tests easyinject_launcher_parity_tests easyinject_installer_io_tests
+          if ($LASTEXITCODE -ne 0) { throw 'Native build failed' }
+          ctest --test-dir out/repack/build -C Release --output-on-failure -R '^(instance_cfg_sections|launcher_parity|installer_io)$'
+          if ($LASTEXITCODE -ne 0) { throw 'Native tests failed' }
+
+      - name: Stage and verify unsigned installers
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out/repack/artifacts | Out-Null
+          $name = "Toolscreen-$env:INSTALLER_VERSION-double-click-me"
+          Copy-Item -LiteralPath "out/repack/source/target/$name.jar" -Destination out/repack/artifacts
+          Copy-Item -LiteralPath "out/repack/build/easyinject/Release/$name.exe" -Destination out/repack/artifacts
+          ./scripts/repack/verify.ps1 -ArtifactDirectory out/repack/artifacts -InstallerVersion $env:INSTALLER_VERSION
+
+      - name: Upload JAR for SignPath
+        if: ${{ inputs.sign }}
+        id: jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: repack-signpath-jar-input
+          path: out/repack/artifacts/*.jar
+          if-no-files-found: error
+          retention-days: 2
+
+      - name: Sign rebuilt JAR with origin verification
+        if: ${{ inputs.sign }}
+        uses: signpath/github-action-submit-signing-request@v2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ env.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ env.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ env.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: jar
+          github-artifact-id: ${{ steps.jar.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 1800
+          output-artifact-directory: out/repack/signed-jar
+          parameters: |
+            version: ${{ toJSON(env.INSTALLER_VERSION) }}
+
+      - name: Upload EXE for SignPath
+        if: ${{ inputs.sign }}
+        id: exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: repack-signpath-exe-input
+          path: out/repack/artifacts/*.exe
+          if-no-files-found: error
+          retention-days: 2
+
+      - name: Sign rebuilt EXE with origin verification
+        if: ${{ inputs.sign }}
+        uses: signpath/github-action-submit-signing-request@v2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ env.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ env.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ env.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: installer
+          github-artifact-id: ${{ steps.exe.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 1800
+          output-artifact-directory: out/repack/signed-exe
+          parameters: |
+            version: ${{ toJSON(env.INSTALLER_VERSION) }}
+
+      - name: Verify signed installers and unchanged embedded payloads
+        if: ${{ inputs.sign }}
+        shell: pwsh
+        run: |
+          $name = "Toolscreen-$env:INSTALLER_VERSION-double-click-me"
+          Copy-Item -LiteralPath "out/repack/signed-jar/$name.jar" -Destination out/repack/artifacts -Force
+          Copy-Item -LiteralPath "out/repack/signed-exe/$name.exe" -Destination out/repack/artifacts -Force
+          ./scripts/repack/verify.ps1 -ArtifactDirectory out/repack/artifacts -InstallerVersion $env:INSTALLER_VERSION -RequireSigned
+
+      - name: Write provenance and checksums
+        shell: pwsh
+        env:
+          SIGNED: ${{ inputs.sign }}
+        run: |
+          $manifest = Get-Content scripts/repack/payload.json -Raw | ConvertFrom-Json
+          $manifest | Add-Member installerVersion $env:INSTALLER_VERSION
+          $manifest | Add-Member packagingCommit $env:GITHUB_SHA
+          $manifest | Add-Member workflowRun "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+          $manifest | Add-Member installersSigned ($env:SIGNED -eq 'true')
+          $manifest | Add-Member easyInjectPatchSha256 (Get-FileHash scripts/repack/easyinject-x64.patch -Algorithm SHA256).Hash.ToLowerInvariant()
+          $manifest | ConvertTo-Json -Depth 8 | Set-Content out/repack/artifacts/provenance.json -Encoding utf8
+          Get-ChildItem out/repack/artifacts -File | Sort-Object Name | ForEach-Object {
+            '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name
+          } | Set-Content out/repack/SHA256SUMS.txt -Encoding utf8
+          Copy-Item out/repack/SHA256SUMS.txt out/repack/artifacts
+          "Installer **$env:INSTALLER_VERSION**; unchanged **1.4.4 x64 DLL**; signed: **$env:SIGNED**. See provenance.json and SHA256SUMS.txt in the artifact." >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload repack result
+        uses: actions/upload-artifact@v4
+        with:
+          name: toolscreen-${{ inputs.installer_version }}-x64-repack-${{ inputs.sign && 'signed' || 'unsigned' }}
+          path: out/repack/artifacts/*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload test reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: repack-test-reports
+          path: |
+            out/repack/source/compatibility-variant/target/surefire-reports/*
+            out/repack/build/Testing/Temporary/LastTest.log
+          if-no-files-found: ignore
+          retention-days: 14
