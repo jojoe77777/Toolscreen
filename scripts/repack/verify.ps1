@@ -83,9 +83,8 @@ if ($info.FileVersion -ne $InstallerVersion -or $info.ProductVersion -ne $Instal
 }
 if ($RequireSigned) {
     Assert-RepackSignature $exePath
-    $verification = & jarsigner -J-Duser.language=en -J-Duser.country=US -verify $jarPath 2>&1 | Out-String
-    Assert-NativeExit 'Verify JAR signature'
-    if ($verification -notmatch 'jar verified\.' -or $verification -match 'contains unsigned entries') {
+    $verification = & jarsigner '-J-Duser.language=en' '-J-Duser.country=US' -verify $jarPath 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0 -or $verification -notmatch 'jar verified\.' -or $verification -match 'contains unsigned entries') {
         throw "JAR signature verification failed: $verification"
     }
 }

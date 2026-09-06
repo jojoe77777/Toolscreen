@@ -184,6 +184,17 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      - name: Preserve signing diagnostics on failure
+        if: ${{ failure() && inputs.sign }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: repack-signing-diagnostics-not-release-verified
+          path: |
+            out/repack/signed-jar/*
+            out/repack/signed-exe/*
+          if-no-files-found: ignore
+          retention-days: 2
+
       - name: Upload test reports
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
