@@ -2,7 +2,7 @@
   "releaseTag": "v1.4.4",
   "sourceUrl": "https://github.com/jojoe77777/Toolscreen/releases/download/v1.4.4/Toolscreen-1.4.4-double-click-me.jar",
   "sourceSha256": "9f6e60bd773c1580c04ff0a6f64ef79064682a6fe2f659e35659ca916c0672d3",
-  "easyInjectCommit": "822afdc04bc2f96b1d90c5650d6abaa48c1d5ffe",
+  "easyInjectCommit": "52f8197b624217570da5b6c40b3076db2f2a81d1",
   "payloads": [
     {
       "entry": "dlls/Toolscreen.dll",
