@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory)][string]$ArtifactDirectory,
-    [ValidatePattern('^\d+\.\d+\.\d+$')][string]$InstallerVersion = '1.4.5',
+    [ValidatePattern('^\d+\.\d+\.\d+$')][string]$InstallerVersion = '1.4.7',
     [switch]$RequireSigned
 )
 . "$PSScriptRoot/common.ps1"

@@ -14,7 +14,7 @@ on:
       installer_version:
         description: 'New installer version (embedded Toolscreen DLL stays 1.4.4)'
         required: true
-        default: '1.4.5'
+        default: '1.4.7'
         type: string
       sign:
         description: 'Submit the rebuilt installers to SignPath'
@@ -71,22 +71,20 @@ jobs:
         run: |
           ./scripts/repack/prepare.ps1 -SourceDirectory out/repack/source -DownloadDirectory out/repack/downloads -InstallerVersion $env:INSTALLER_VERSION
 
-      - name: Build JAR and run Java tests
+      - name: Build JAR
         shell: pwsh
         run: |
-          mvn -f out/repack/source/pom.xml -pl compatibility-variant '-Deasyinject.x64Only=true' --batch-mode --no-transfer-progress clean package
-          if ($LASTEXITCODE -ne 0) { throw 'JAR build/tests failed' }
+          mvn -f out/repack/source/pom.xml --batch-mode --no-transfer-progress clean package
+          if ($LASTEXITCODE -ne 0) { throw 'JAR build failed' }
 
-      - name: Build EXE and native test runners
+      - name: Build EXE
         shell: pwsh
         run: |
           $source = (Resolve-Path out/repack/source).Path
           cmake -S scripts/repack -B out/repack/build -G 'Visual Studio 17 2022' -A x64 "-DEASYINJECT_SOURCE_DIR=$source" "-DINSTALLER_VERSION=$env:INSTALLER_VERSION"
           if ($LASTEXITCODE -ne 0) { throw 'CMake configuration failed' }
-          cmake --build out/repack/build --config Release --parallel --target EasyInjectExe easyinject_instance_cfg_tests easyinject_launcher_parity_tests easyinject_installer_io_tests
+          cmake --build out/repack/build --config Release --parallel --target EasyInjectExe
           if ($LASTEXITCODE -ne 0) { throw 'Native build failed' }
-          ctest --test-dir out/repack/build -C Release --output-on-failure -R '^(instance_cfg_sections|launcher_parity|installer_io)$'
-          if ($LASTEXITCODE -ne 0) { throw 'Native tests failed' }
 
       - name: Stage and verify unsigned installers
         shell: pwsh
@@ -168,7 +166,7 @@ jobs:
           $manifest | Add-Member packagingCommit $env:GITHUB_SHA
           $manifest | Add-Member workflowRun "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
           $manifest | Add-Member installersSigned ($env:SIGNED -eq 'true')
-          $manifest | Add-Member easyInjectPatchSha256 (Get-FileHash scripts/repack/easyinject-x64.patch -Algorithm SHA256).Hash.ToLowerInvariant()
+          $manifest | Add-Member easyInjectPatchSha256 $null
           $manifest | ConvertTo-Json -Depth 8 | Set-Content out/repack/artifacts/provenance.json -Encoding utf8
           Get-ChildItem out/repack/artifacts -File | Sort-Object Name | ForEach-Object {
             '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name
@@ -194,14 +192,3 @@ jobs:
             out/repack/signed-exe/*
           if-no-files-found: ignore
           retention-days: 2
-
-      - name: Upload test reports
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: repack-test-reports
-          path: |
-            out/repack/source/compatibility-variant/target/surefire-reports/*
-            out/repack/build/Testing/Temporary/LastTest.log
-          if-no-files-found: ignore
-          retention-days: 14

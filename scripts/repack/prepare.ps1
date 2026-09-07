@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory)][string]$SourceDirectory,
     [Parameter(Mandatory)][string]$DownloadDirectory,
-    [ValidatePattern('^\d+\.\d+\.\d+$')][string]$InstallerVersion = '1.4.5'
+    [ValidatePattern('^\d+\.\d+\.\d+$')][string]$InstallerVersion = '1.4.7'
 )
 . "$PSScriptRoot/common.ps1"
 $source = (Resolve-Path -LiteralPath $SourceDirectory).Path
@@ -11,11 +11,13 @@ if ($commit -ne $RepackManifest.easyInjectCommit) { throw "Unexpected EasyInject
 git -C $source diff --exit-code --quiet HEAD
 Assert-NativeExit 'Require an unmodified EasyInject checkout'
 
-$patch = Join-Path $PSScriptRoot 'easyinject-x64.patch'
-git -C $source apply --check $patch
-Assert-NativeExit 'Check x64 packaging patch'
-git -C $source apply $patch
-Assert-NativeExit 'Apply x64 packaging patch'
+if ($RepackManifest.packagingPatch) {
+    $patch = Join-Path $PSScriptRoot $RepackManifest.packagingPatch
+    git -C $source apply --check $patch
+    Assert-NativeExit 'Check packaging patch'
+    git -C $source apply $patch
+    Assert-NativeExit 'Apply packaging patch'
+}
 
 New-Item -ItemType Directory -Force -Path $DownloadDirectory | Out-Null
 $archivePath = Join-Path (Resolve-Path $DownloadDirectory).Path 'Toolscreen-1.4.4-double-click-me.jar'

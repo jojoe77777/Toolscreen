@@ -10,7 +10,7 @@ on:
       installer_version:
         description: 'Installer version for repack mode only'
         type: string
-        default: '1.4.5'
+        default: '1.4.7'
       repack_sign:
         description: 'Submit repacked installers to SignPath (repack mode only)'
         type: boolean
