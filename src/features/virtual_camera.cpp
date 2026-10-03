@@ -526,6 +526,18 @@ bool StartVirtualCamera(uint32_t width, uint32_t height) {
         return false;
     }
 
+    // CreateFileMappingW may open an existing (smaller) section held by a consumer.
+    MEMORY_BASIC_INFORMATION mappedInfo{};
+    if (VirtualQuery(g_vcState.header, &mappedInfo, sizeof(mappedInfo)) == 0 || mappedInfo.RegionSize < totalSize) {
+        UnmapViewOfFile(g_vcState.header);
+        g_vcState.header = nullptr;
+        CloseHandle(g_vcState.handle);
+        g_vcState.handle = nullptr;
+        g_vcLastError = "Existing shared memory is too small for the requested resolution";
+        Log("Virtual Camera: " + g_vcLastError);
+        return false;
+    }
+
     memset(g_vcState.header, 0, sizeof(queue_header));
     g_vcState.header->state = SHARED_QUEUE_STATE_STARTING;
     g_vcState.header->type = 0;
