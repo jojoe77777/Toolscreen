@@ -1111,51 +1111,59 @@ static bool EnsureSameThreadVirtualCameraReadbacks(int width, int height) {
 }
 
 static bool HarvestSameThreadVirtualCameraReadback() {
-    for (auto& slot : g_sameThreadVirtualCameraReadbackSlots) {
-        if (!slot.pending || !slot.fence || slot.yPbo == 0 || slot.uvPbo == 0 || slot.width <= 0 || slot.height <= 0) { continue; }
+    SameThreadVirtualCameraReadbackSlot* oldestSignalled = nullptr;
+    for (auto& candidate : g_sameThreadVirtualCameraReadbackSlots) {
+        if (!candidate.pending || !candidate.fence || candidate.yPbo == 0 || candidate.uvPbo == 0 || candidate.width <= 0 ||
+            candidate.height <= 0) {
+            continue;
+        }
+        if (oldestSignalled && candidate.timestamp >= oldestSignalled->timestamp) { continue; }
 
-        GLenum fenceStatus = glClientWaitSync(slot.fence, 0, 0);
+        GLenum fenceStatus = glClientWaitSync(candidate.fence, 0, 0);
         if (fenceStatus != GL_ALREADY_SIGNALED && fenceStatus != GL_CONDITION_SATISFIED) { continue; }
 
-        GLint previousPackBuffer = 0;
-        glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &previousPackBuffer);
-        const size_t yBytes = static_cast<size_t>(slot.width) * static_cast<size_t>(slot.height);
-        const size_t uvBytes = yBytes / 2u;
-
-        glBindBuffer(GL_PIXEL_PACK_BUFFER, slot.yPbo);
-        const uint8_t* yMapped =
-            static_cast<const uint8_t*>(glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, static_cast<GLsizeiptr>(yBytes), GL_MAP_READ_BIT));
-
-        glBindBuffer(GL_PIXEL_PACK_BUFFER, slot.uvPbo);
-        const uint8_t* uvMapped =
-            static_cast<const uint8_t*>(glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, static_cast<GLsizeiptr>(uvBytes), GL_MAP_READ_BIT));
-
-        if (yMapped && uvMapped) {
-            WriteVirtualCameraFrameNV12Planes(yMapped, uvMapped, static_cast<uint32_t>(slot.width), static_cast<uint32_t>(slot.height),
-                                              slot.timestamp);
-        }
-
-        if (yMapped) {
-            glBindBuffer(GL_PIXEL_PACK_BUFFER, slot.yPbo);
-            glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
-        }
-        if (uvMapped) {
-            glBindBuffer(GL_PIXEL_PACK_BUFFER, slot.uvPbo);
-            glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
-        }
-
-        glBindBuffer(GL_PIXEL_PACK_BUFFER, previousPackBuffer);
-
-        if (glIsSync(slot.fence)) { glDeleteSync(slot.fence); }
-        slot.fence = nullptr;
-        slot.pending = false;
-        slot.timestamp = 0;
-        slot.width = 0;
-        slot.height = 0;
-        return true;
+        oldestSignalled = &candidate;
     }
 
-    return false;
+    if (!oldestSignalled) { return false; }
+    auto& slot = *oldestSignalled;
+
+    GLint previousPackBuffer = 0;
+    glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &previousPackBuffer);
+    const size_t yBytes = static_cast<size_t>(slot.width) * static_cast<size_t>(slot.height);
+    const size_t uvBytes = yBytes / 2u;
+
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, slot.yPbo);
+    const uint8_t* yMapped =
+        static_cast<const uint8_t*>(glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, static_cast<GLsizeiptr>(yBytes), GL_MAP_READ_BIT));
+
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, slot.uvPbo);
+    const uint8_t* uvMapped =
+        static_cast<const uint8_t*>(glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, static_cast<GLsizeiptr>(uvBytes), GL_MAP_READ_BIT));
+
+    if (yMapped && uvMapped) {
+        WriteVirtualCameraFrameNV12Planes(yMapped, uvMapped, static_cast<uint32_t>(slot.width), static_cast<uint32_t>(slot.height),
+                                          slot.timestamp);
+    }
+
+    if (yMapped) {
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, slot.yPbo);
+        glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+    }
+    if (uvMapped) {
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, slot.uvPbo);
+        glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+    }
+
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, previousPackBuffer);
+
+    if (glIsSync(slot.fence)) { glDeleteSync(slot.fence); }
+    slot.fence = nullptr;
+    slot.pending = false;
+    slot.timestamp = 0;
+    slot.width = 0;
+    slot.height = 0;
+    return true;
 }
 
 static bool SubmitSameThreadVirtualCameraFrameSync(GLuint srcTexture, int width, int height, uint64_t timestamp) {
