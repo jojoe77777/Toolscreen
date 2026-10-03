@@ -393,6 +393,8 @@ struct RendererState {
     std::unordered_map<int, MirrorSnapshotState> mirrorSnapshots;
     std::vector<RetiredMirrorSnapshot> retiredMirrorSnapshots;
     std::unordered_map<std::string, TextureAsset> textureAssets;
+    // Bundled GUI icons already handed to the decode queue but not yet uploaded.
+    std::unordered_set<std::string> queuedGuiTextureIds;
     // The interactive pass owns logical frame selection. The passive OBS pass
     // reuses these exact choices so animated assets and throttled mirrors cannot
     // advance or cross a frame boundary independently.
@@ -3402,17 +3404,12 @@ void RefreshModeCache(int screenW, int screenH, int sourceW, int sourceH) {
                         g_toolscreenPath);
                 }
             }
-            if (g_showGui.load(std::memory_order_acquire)) {
-                allowedTextureIds.insert(kGuiLanguageTextureId);
-                allowedTextureIds.insert(kGuiDiscordTextureId);
-                allowedTextureIds.insert(kGuiEditorTextureId);
-                QueueBundledTextureAsset(
-                    kGuiLanguageTextureId, IDR_LANGUAGE_PNG);
-                QueueBundledTextureAsset(
-                    kGuiDiscordTextureId, IDR_DISCORD_PNG);
-                QueueBundledTextureAsset(
-                    kGuiEditorTextureId, IDR_EDITOR_PNG);
-            }
+            // GUI icons load on demand in GetBundledGuiTexture. Keep them
+            // across config changes: this cache is not refreshed when the
+            // GUI opens, so an icon evicted here would never come back.
+            allowedTextureIds.insert(kGuiLanguageTextureId);
+            allowedTextureIds.insert(kGuiDiscordTextureId);
+            allowedTextureIds.insert(kGuiEditorTextureId);
             if (g_state.configSnapshot->cursorTrail.enabled &&
                 !g_state.configSnapshot->cursorTrail.spritePath.empty()) {
                 allowedTextureIds.insert(kCursorTrailTextureId);
@@ -3456,14 +3453,6 @@ void RefreshModeCache(int screenW, int screenH, int sourceW, int sourceH) {
                     it = g_state.textureAssets.erase(it);
                 }
             }
-        }
-        if (g_showGui.load(std::memory_order_acquire)) {
-            QueueBundledTextureAsset(
-                kGuiLanguageTextureId, IDR_LANGUAGE_PNG);
-            QueueBundledTextureAsset(
-                kGuiDiscordTextureId, IDR_DISCORD_PNG);
-            QueueBundledTextureAsset(
-                kGuiEditorTextureId, IDR_EDITOR_PNG);
         }
     }
     for (auto it = g_state.mirrorSnapshots.begin();
@@ -6908,7 +6897,15 @@ bool GetBundledGuiTexture(int resourceId, uintptr_t& textureId) {
     default: return false;
     }
     auto asset = g_state.textureAssets.find(id);
-    if (asset == g_state.textureAssets.end()) return false;
+    if (asset == g_state.textureAssets.end()) {
+        // Load on first use. The decode queue uploads it on a later frame, so
+        // only queue once until it lands; callers draw a placeholder meanwhile.
+        if (g_state.queuedGuiTextureIds.insert(id).second) {
+            QueueBundledTextureAsset(id, resourceId);
+        }
+        return false;
+    }
+    g_state.queuedGuiTextureIds.erase(id);
     TextureFrame* frame = ResolveTextureFrame(asset->second, false);
     if (!frame || !frame->sampled.descriptor) return false;
     textureId = reinterpret_cast<uintptr_t>(frame->sampled.descriptor);
@@ -7117,6 +7114,7 @@ void Shutdown() {
         DestroyTextureAsset(asset);
     }
     g_state.textureAssets.clear();
+    g_state.queuedGuiTextureIds.clear();
     for (RetiredTextureAsset& retired : g_state.retiredTextureAssets) {
         DestroyTextureAsset(retired.asset);
     }
