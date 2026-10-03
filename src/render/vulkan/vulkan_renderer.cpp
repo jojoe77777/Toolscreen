@@ -2708,7 +2708,10 @@ bool InitializeRenderer(const VulkanRenderer::FinalBlitContext& context) {
     init.Queue = g_state.queue;
     init.DescriptorPoolSize = 2048;
     init.MinImageCount = (std::max)(2u, context.swapchain->minImageCount);
-    init.ImageCount = g_state.imageCount;
+    // The backend advances its vertex/index buffer ring once per
+    // RenderDrawData call, and a frame may record up to three (main pass plus
+    // the OBS composition and settings-GUI overlay passes).
+    init.ImageCount = g_state.imageCount * 3;
     init.UseDynamicRendering = true;
     init.CheckVkResultFn = CheckVkResult;
     init.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
