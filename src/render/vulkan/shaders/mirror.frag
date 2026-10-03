@@ -6,16 +6,13 @@ layout(location = 0) in vec4 fragmentColor;
 layout(location = 1) in vec2 fragmentUv;
 layout(location = 0) out vec4 outputColor;
 
+// Specialization constants hold only appearance settings. Geometry that
+// depends on the game's frame size lives in push constants, so a resize does
+// not compile new pipelines. Constant IDs 4-9 are retired.
 layout(constant_id = 0) const int targetCount = 0;
 layout(constant_id = 1) const float sensitivity = 0.001;
 layout(constant_id = 2) const int colorPassthrough = 0;
 layout(constant_id = 3) const int dynamicBorderWidth = 0;
-layout(constant_id = 4) const float sourceTexelX = 0.0;
-layout(constant_id = 5) const float sourceTexelY = 0.0;
-layout(constant_id = 6) const float cropMinU = 0.0;
-layout(constant_id = 7) const float cropMinV = 0.0;
-layout(constant_id = 8) const float cropMaxU = 1.0;
-layout(constant_id = 9) const float cropMaxV = 1.0;
 layout(constant_id = 10) const float outputR = 1.0;
 layout(constant_id = 11) const float outputG = 1.0;
 layout(constant_id = 12) const float outputB = 1.0;
@@ -104,6 +101,8 @@ layout(push_constant) uniform FragmentPushConstants {
     float staticBorderRadius;
     vec2 staticBorderSize;
     vec2 staticBorderQuadSize;
+    vec2 sourceTexel;
+    vec4 crop; // minU, minV, maxU, maxV
 } pushConstants;
 
 float sdRoundedBox(vec2 p, vec2 b, float r) {
@@ -217,8 +216,9 @@ vec4 getFadeColor(float timeOffset) {
 }
 
 vec4 sampleGradientColor() {
-    vec2 cropSize = max(vec2(cropMaxU - cropMinU, cropMaxV - cropMinV), vec2(0.0001));
-    vec2 gradientUv = (fragmentUv - vec2(cropMinU, cropMinV)) / cropSize;
+    vec2 cropMin = pushConstants.crop.xy;
+    vec2 cropSize = max(pushConstants.crop.zw - cropMin, vec2(0.0001));
+    vec2 gradientUv = (fragmentUv - cropMin) / cropSize;
     vec2 uv = gradientUv - vec2(0.5);
     float timeOffset = pushConstants.gradientTime * gradientAnimationSpeed;
     if (gradientAnimationType == 0) {
@@ -267,9 +267,10 @@ vec3 targetAt(int index) {
 }
 
 bool insideCrop(vec2 uv) {
-    float minV = min(cropMinV, cropMaxV);
-    float maxV = max(cropMinV, cropMaxV);
-    return uv.x >= cropMinU && uv.x <= cropMaxU && uv.y >= minV && uv.y <= maxV;
+    vec4 crop = pushConstants.crop;
+    float minV = min(crop.y, crop.w);
+    float maxV = max(crop.y, crop.w);
+    return uv.x >= crop.x && uv.x <= crop.z && uv.y >= minV && uv.y <= maxV;
 }
 
 bool matchesAt(vec2 uv) {
@@ -335,7 +336,7 @@ void main() {
     if (width > 0) {
         for (int y = -width; y <= width; ++y) {
             for (int x = -width; x <= width; ++x) {
-                if (matchesAt(fragmentUv + vec2(float(x) * sourceTexelX, float(y) * sourceTexelY))) {
+                if (matchesAt(fragmentUv + vec2(float(x), float(y)) * pushConstants.sourceTexel)) {
                     outputColor = vec4(borderR, borderG, borderB, borderA);
                     return;
                 }

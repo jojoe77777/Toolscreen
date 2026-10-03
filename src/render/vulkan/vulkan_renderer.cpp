@@ -36,6 +36,7 @@
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
+#include <deque>
 #include <vector>
 
 extern bool SubclassGameWindow(HWND hwnd);
@@ -95,17 +96,15 @@ const uint32_t kVirtualCameraComputeShader[] =
 #include "shaders/virtual_camera_comp.spv.inc"
 ;
 
+// Mirror fragment specialization constants, in constant_id order with IDs 4-9
+// retired. Only appearance settings belong here: every distinct value compiles
+// a pipeline, so anything derived from the game's frame size goes in
+// MirrorFragmentPushConstants instead.
 struct MirrorSpecialization {
     int32_t targetCount = 0;
     float sensitivity = 0.001f;
     int32_t colorPassthrough = 0;
     int32_t dynamicBorderWidth = 0;
-    float sourceTexelX = 0.0f;
-    float sourceTexelY = 0.0f;
-    float cropMinU = 0.0f;
-    float cropMinV = 0.0f;
-    float cropMaxU = 1.0f;
-    float cropMaxV = 1.0f;
     float output[4] = { 1, 1, 1, 1 };
     float border[4] = { 0, 0, 0, 1 };
     float targets[8][3]{};
@@ -129,7 +128,14 @@ struct MirrorFragmentPushConstants {
     float staticBorderRadius = 0.0f;
     float staticBorderSize[2] = { 0, 0 };
     float staticBorderQuadSize[2] = { 0, 0 };
+    float sourceTexel[2] = { 0, 0 };
+    float crop[4] = { 0, 0, 1, 1 }; // minU, minV, maxU, maxV
 };
+// Pushed at offset 16, after the vertex range; must mirror the std430 layout of
+// FragmentPushConstants in mirror.frag (crop is a vec4 at offset 80).
+static_assert(offsetof(MirrorFragmentPushConstants, sourceTexel) == 56);
+static_assert(offsetof(MirrorFragmentPushConstants, crop) == 64);
+static_assert(sizeof(MirrorFragmentPushConstants) == 80);
 
 struct OverlaySpecialization {
     int32_t keyCount = 0;
@@ -415,7 +421,8 @@ struct RendererState {
     bool rebindIndicatorPreviousEnabled = false;
     std::chrono::steady_clock::time_point rebindIndicatorToggleTime{};
     float rebindIndicatorAlpha = 0.0f;
-    std::vector<MirrorFragmentPushConstants> mirrorFragmentPushData;
+    // Draw callbacks hold pointers into this, so it must not move elements on push_back.
+    std::deque<MirrorFragmentPushConstants> mirrorFragmentPushData;
     std::shared_ptr<const Config> configSnapshot;
     uint64_t configVersion = 0;
     std::string publishedModeId;
@@ -1211,15 +1218,15 @@ uint64_t HashMirrorSpecialization(const MirrorSpecialization& specialization) {
 }
 
 VkPipeline GetMirrorPipeline(const MirrorSpecialization& specialization) {
-    static_assert(sizeof(MirrorSpecialization) == sizeof(uint32_t) * 90);
+    static_assert(sizeof(MirrorSpecialization) == sizeof(uint32_t) * 84);
     const uint64_t key = HashMirrorSpecialization(specialization);
     if (const auto it = g_state.mirrorPipelines.find(key); it != g_state.mirrorPipelines.end()) {
         return it->second;
     }
 
-    std::array<VkSpecializationMapEntry, 90> entries{};
+    std::array<VkSpecializationMapEntry, 84> entries{};
     for (uint32_t i = 0; i < entries.size(); ++i) {
-        entries[i].constantID = i;
+        entries[i].constantID = i < 4 ? i : i + 6; // skip retired IDs 4-9
         entries[i].offset = i * sizeof(uint32_t);
         entries[i].size = sizeof(uint32_t);
     }
@@ -1449,22 +1456,6 @@ void BindMirrorPipelineCallback(const ImDrawList*, const ImDrawCmd* command) {
     if (pipeline) {
         g_state.cmdBindPipeline(g_activeImGuiCommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     }
-}
-
-void PushMirrorGradientTimeCallback(const ImDrawList*, const ImDrawCmd* command) {
-    if (!g_activeImGuiCommandBuffer || !g_state.cmdPushConstants ||
-        !g_state.mirrorPipelineLayout) {
-        return;
-    }
-    const uintptr_t encoded =
-        reinterpret_cast<uintptr_t>(command->UserCallbackData);
-    MirrorFragmentPushConstants push{};
-    push.gradientTime =
-        static_cast<float>(encoded > 0 ? encoded - 1u : 0u) / 1000.0f;
-    g_state.cmdPushConstants(
-        g_activeImGuiCommandBuffer, g_state.mirrorPipelineLayout,
-        VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(float) * 4, sizeof(push),
-        &push);
 }
 
 void PushMirrorFragmentDataCallback(const ImDrawList*, const ImDrawCmd* command) {
@@ -4264,17 +4255,21 @@ void DrawMirrors(const VulkanRenderer::FinalBlitContext& context, SampledImage* 
                           mirror.border.dynamicThickness, 0,
                           (std::max)(outputW, outputH))
                     : 0;
+            // Capture geometry depends on the game's frame size, so it is
+            // pushed per draw; baking it into the specialization would
+            // compile new pipelines on every resize.
+            MirrorFragmentPushConstants geometryPush{};
             // Dynamic border thickness is expressed in output pixels. Convert
             // one output pixel to source UV space so scaling does not also
             // scale the configured border thickness.
-            specialization.sourceTexelX =
+            geometryPush.sourceTexel[0] =
                 std::abs(uv1.x - uv0.x) / static_cast<float>((std::max)(1, outputW));
-            specialization.sourceTexelY =
+            geometryPush.sourceTexel[1] =
                 std::abs(uv1.y - uv0.y) / static_cast<float>((std::max)(1, outputH));
-            specialization.cropMinU = (std::min)(uv0.x, uv1.x);
-            specialization.cropMinV = (std::min)(uv0.y, uv1.y);
-            specialization.cropMaxU = (std::max)(uv0.x, uv1.x);
-            specialization.cropMaxV = (std::max)(uv0.y, uv1.y);
+            geometryPush.crop[0] = (std::min)(uv0.x, uv1.x);
+            geometryPush.crop[1] = (std::min)(uv0.y, uv1.y);
+            geometryPush.crop[2] = (std::max)(uv0.x, uv1.x);
+            geometryPush.crop[3] = (std::max)(uv0.y, uv1.y);
             // Solid and gradient colors are supplied through ImGui's vertex
             // colors. Keep the shader multiplier white; outputA is also the
             // passthrough opacity.
@@ -4328,13 +4323,11 @@ void DrawMirrors(const VulkanRenderer::FinalBlitContext& context, SampledImage* 
             if (pipeline) {
                 draw->AddCallback(BindMirrorPipelineCallback,
                                   reinterpret_cast<void*>(pipeline));
-                const float nonnegativeGradientTime =
-                    gradientElapsed > 0.0f ? gradientElapsed : 0.0f;
-                const uintptr_t encodedGradientTime =
-                    static_cast<uintptr_t>(nonnegativeGradientTime * 1000.0f) + 1u;
+                geometryPush.gradientTime = gradientElapsed > 0.0f ? gradientElapsed : 0.0f;
+                g_state.mirrorFragmentPushData.push_back(geometryPush);
                 draw->AddCallback(
-                    PushMirrorGradientTimeCallback,
-                    reinterpret_cast<void*>(encodedGradientTime));
+                    PushMirrorFragmentDataCallback,
+                    &g_state.mirrorFragmentPushData.back());
                 uint32_t contentQuery = UINT32_MAX;
                 if (timestampFrame && g_state.mirrorQueryPool &&
                     g_state.cmdBeginQuery && g_state.cmdEndQuery &&
@@ -5707,9 +5700,6 @@ void GenerateImGui(const VulkanRenderer::FinalBlitContext& context, SampledImage
     }
     ImGui::NewFrame();
     g_state.mirrorFragmentPushData.clear();
-    if (g_state.mirrorFragmentPushData.capacity() < g_state.mirrors.size()) {
-        g_state.mirrorFragmentPushData.reserve(g_state.mirrors.size());
-    }
     g_state.pickerTextureId = mirrorSource
         ? reinterpret_cast<uintptr_t>(mirrorSource->descriptor)
         : 0;
