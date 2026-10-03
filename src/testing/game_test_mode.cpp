@@ -1,4 +1,5 @@
 #include "game_test_mode.h"
+#include "thread_stack_dump.h"
 
 #include "common/utils.h"
 #include "config/config_toml.h"
@@ -102,6 +103,15 @@ void Require(bool condition, const std::string& message) {
 
 void Skip(const std::string& message) { throw TestSkipped{ message }; }
 
+// When the render thread stops making progress, record where every relevant thread is (once per run).
+void ReportRenderThreadStall(const std::string& reason) {
+    static std::atomic<bool> reported{ false };
+    if (reported.exchange(true)) return;
+    const std::string stacks = DumpInterestingThreadStacks();
+    Log("[GAME TEST] Render thread stalled (" + reason + "). Thread stacks:\n" + stacks);
+    AppendResultLine("{\"event\":\"diagnostic\",\"reason\":\"" + JsonEscape(reason) + "\",\"stacks\":\"" + JsonEscape(stacks) + "\"}");
+}
+
 bool WaitUntil(const std::function<bool()>& predicate, std::chrono::milliseconds timeout) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
@@ -128,6 +138,7 @@ auto RunOnRenderThread(Fn fn, std::chrono::milliseconds timeout = std::chrono::s
         s_renderTasks.emplace_back([task] { (*task)(); });
     }
     if (future.wait_for(timeout) != std::future_status::ready) {
+        ReportRenderThreadStall("a queued render-thread step did not run");
         throw TestFailure{ "Timed out waiting for the render thread to run a test step." };
     }
     return future.get();
@@ -256,7 +267,10 @@ void TestRenderBackendLatched() {
 }
 
 void TestFramesHooked() {
-    Require(WaitForFrames(30, std::chrono::seconds(20)), "Fewer than 30 frames passed through the render hook in 20 s.");
+    if (!WaitForFrames(30, std::chrono::seconds(20))) {
+        ReportRenderThreadStall("fewer than 30 hooked frames in 20 s");
+        Require(false, "Fewer than 30 frames passed through the render hook in 20 s.");
+    }
     Require(s_renderThreadId.load(std::memory_order_acquire) != 0, "The render thread was never identified.");
 }
 
