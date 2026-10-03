@@ -2086,24 +2086,55 @@ InputHandlerResult HandleWindowOverlayMouse(HWND hWnd, UINT uMsg, WPARAM wParam,
     return { false, 0 };
 }
 
-InputHandlerResult HandleGuiInputBlocking(UINT uMsg) {
+// Mouse buttons whose press was not blocked by the GUI (L, R, M, X1, X2). Only these get their release
+// forwarded to the game while the GUI is open, so clicks made inside the GUI never reach the game unpaired.
+static bool s_mouseButtonDownReachedGame[5] = {};
+
+static int GuiBlockingMouseButtonIndex(UINT uMsg, WPARAM wParam) {
     switch (uMsg) {
+    case WM_LBUTTONDOWN:
+    case WM_LBUTTONDBLCLK:
+    case WM_LBUTTONUP:
+        return 0;
+    case WM_RBUTTONDOWN:
+    case WM_RBUTTONDBLCLK:
+    case WM_RBUTTONUP:
+        return 1;
+    case WM_MBUTTONDOWN:
+    case WM_MBUTTONDBLCLK:
+    case WM_MBUTTONUP:
+        return 2;
+    case WM_XBUTTONDOWN:
+    case WM_XBUTTONDBLCLK:
+    case WM_XBUTTONUP:
+        return GET_XBUTTON_WPARAM(wParam) == XBUTTON2 ? 4 : 3;
+    default:
+        return -1;
+    }
+}
+
+InputHandlerResult HandleGuiInputBlocking(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    bool isButtonUp = false;
+    const int buttonIndex = GuiBlockingMouseButtonIndex(uMsg, wParam);
+    switch (uMsg) {
+    case WM_LBUTTONUP:
+    case WM_RBUTTONUP:
+    case WM_MBUTTONUP:
+    case WM_XBUTTONUP:
+        isButtonUp = true;
+        break;
     case WM_KEYDOWN:
     case WM_SYSKEYDOWN:
     case WM_CHAR:
     case WM_MOUSEMOVE:
     case WM_LBUTTONDOWN:
-    case WM_LBUTTONUP:
     case WM_LBUTTONDBLCLK:
     case WM_RBUTTONDOWN:
-    case WM_RBUTTONUP:
     case WM_RBUTTONDBLCLK:
     case WM_MBUTTONDOWN:
-    case WM_MBUTTONUP:
     case WM_MBUTTONDBLCLK:
     case WM_MOUSEWHEEL:
     case WM_XBUTTONDOWN:
-    case WM_XBUTTONUP:
     case WM_XBUTTONDBLCLK:
     case WM_INPUT:
         break;
@@ -2113,7 +2144,18 @@ InputHandlerResult HandleGuiInputBlocking(UINT uMsg) {
 
     PROFILE_SCOPE("HandleGuiInputBlocking");
 
-    if (!g_showGui.load()) { return { false, 0 }; }
+    const bool guiOpen = g_showGui.load();
+    if (buttonIndex >= 0) {
+        const bool downReachedGame = s_mouseButtonDownReachedGame[buttonIndex];
+        s_mouseButtonDownReachedGame[buttonIndex] = !isButtonUp && !guiOpen;
+        // A button held before the GUI opened gets its release forwarded (ImGui already queued it) so it does
+        // not stay held in the game. Skipping hotkeys and rebinds keeps GUI clicks from firing release hotkeys.
+        if (guiOpen && isButtonUp && downReachedGame) {
+            return { true, CallWindowProc(g_originalWndProc, hWnd, uMsg, wParam, lParam) };
+        }
+    }
+
+    if (!guiOpen) { return { false, 0 }; }
 
     return { true, 1 };
 }
@@ -5880,14 +5922,14 @@ LRESULT CALLBACK SubclassedWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
     result = HandleWindowOverlayMouse(hWnd, uMsg, wParam, lParam);
     if (result.consumed) return result.result;
 
-    result = HandleGuiInputBlocking(uMsg);
+    result = HandleGuiInputBlocking(hWnd, uMsg, wParam, lParam);
     if (result.consumed) return result.result;
 
     result = HandleActivate(hWnd, uMsg, wParam, lParam);
     if (result.consumed) return result.result;
 
     if (uMsg == WM_SIZE) {
-        const std::string currentModeId = g_modeIdBuffers[g_currentModeIdIndex.load(std::memory_order_acquire)];
+        const std::string currentModeId = GetPublishedCurrentModeId();
         ForwardWmSizeToSdlWindow(hWnd, wParam, lParam, currentModeId);
         result = HandleWmSizeModeDimensions(hWnd, uMsg, wParam, lParam, currentModeId);
         if (result.consumed) return result.result;

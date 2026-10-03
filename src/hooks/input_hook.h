@@ -70,8 +70,8 @@ InputHandlerResult HandleWindowOverlayKeyboard(HWND hWnd, UINT uMsg, WPARAM wPar
 
 InputHandlerResult HandleWindowOverlayMouse(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
-// Block all input when GUI is open
-InputHandlerResult HandleGuiInputBlocking(UINT uMsg);
+// Block input when GUI is open (mouse button releases are forwarded to the game)
+InputHandlerResult HandleGuiInputBlocking(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
 InputHandlerResult HandleActivate(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
