@@ -495,10 +495,20 @@ void Profiler::EndFrame() {
         }
 
         auto resetWindowMaximums = [](std::unordered_map<std::string, ProfileEntry>& entries) {
-            for (auto& [path, entry] : entries) { entry.maxTimeInLastSecond = 0.0; }
+            for (auto& [path, entry] : entries) {
+                entry.maxTimeInLastSecond = 0.0;
+                // Start a fresh averaging window so rolling averages reflect the last interval only
+                entry.accumulatedTime = 0.0;
+                entry.accumulatedSelfTime = 0.0;
+                entry.accumulatedCalls = 0;
+                entry.frameCount = 0;
+            }
         };
         resetWindowMaximums(m_renderThreadEntries);
         resetWindowMaximums(m_otherThreadEntries);
+        m_accumulatedRenderTime = 0.0;
+        m_accumulatedOtherTime = 0.0;
+        m_frameCountForAveraging = 0;
 
         m_lastUpdateTime = currentTime;
     }
