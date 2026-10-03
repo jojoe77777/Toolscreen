@@ -433,12 +433,17 @@ static bool TryInstallThirdPartyWglSwapBuffersHook(void* jumpTarget, const char*
         return false;
     }
 
-    WGLSWAPBUFFERS trampoline = nullptr;
+    // MinHook keeps the ppOriginal pointer it is given and writes the trampoline through it on every later
+    // attach or detach, and compares it when other hooks are created, so it must outlive the hook. Guarded by
+    // g_wglSwapBuffersThirdPartyHookMutex, which every install path holds. Starting from null makes an
+    // already-created hook on a stale target fail instead of reusing that target's old trampoline.
+    static WGLSWAPBUFFERS s_trampolineSlot = nullptr;
+    s_trampolineSlot = nullptr;
     if (!HookChain::TryCreateAndEnableHook(jumpTarget, reinterpret_cast<void*>(&hkwglSwapBuffers_ThirdParty),
-                                           reinterpret_cast<void**>(&trampoline), what)) {
+                                           reinterpret_cast<void**>(&s_trampolineSlot), what)) {
         return false;
     }
-    g_owglSwapBuffersThirdParty.store(trampoline, std::memory_order_release);
+    g_owglSwapBuffersThirdParty.store(s_trampolineSlot, std::memory_order_release);
 
     g_wglSwapBuffersThirdPartyHookTarget.store(jumpTarget, std::memory_order_release);
     g_lastSkippedWglSwapBuffersStart.store(nullptr, std::memory_order_release);
