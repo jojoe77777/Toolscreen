@@ -151,7 +151,7 @@ static bool ReinitializeVirtualCamera(uint32_t width, uint32_t height) {
     if (IsVirtualCameraActive()) { StopVirtualCamera(); }
 
     if (!StartVirtualCamera(width, height)) {
-        Log("Virtual Camera: Reinit after resize failed - " + g_vcLastError);
+        Log("Virtual Camera: Reinit after resize failed - " + GetVirtualCameraError());
         return false;
     }
 
@@ -689,7 +689,7 @@ bool EnsureVirtualCameraSize(uint32_t width, uint32_t height) {
 
     StopVirtualCamera();
     if (!StartVirtualCamera(width, height)) {
-        Log("Virtual Camera: Resize failed - " + g_vcLastError);
+        Log("Virtual Camera: Resize failed - " + GetVirtualCameraError());
         return false;
     }
 
@@ -893,6 +893,9 @@ void AbandonVirtualCameraGpuFrame(const VirtualCameraGpuFrame& frame) {
 
 bool IsVirtualCameraActive() { return g_virtualCameraActive.load(std::memory_order_acquire); }
 
-const char* GetVirtualCameraError() { return g_vcLastError.c_str(); }
+std::string GetVirtualCameraError() {
+    std::lock_guard<std::mutex> lock(g_vcMutex);
+    return g_vcLastError;
+}
 
 

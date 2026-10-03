@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <atomic>
 #include <cstddef>
+#include <string>
 
 // This works independently of OBS Studio - the driver just needs to be installed
 
@@ -71,7 +72,7 @@ bool FlushPendingVirtualCameraResize();
 
 void RequestVirtualCameraRecoveryFrames();
 
-const char* GetVirtualCameraError();
+std::string GetVirtualCameraError();
 
 extern std::atomic<bool> g_virtualCameraActive;
 
