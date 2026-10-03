@@ -4457,8 +4457,10 @@ static void RenderWindowOverlaysDirect(std::span<const WindowOverlayConfig> over
 
         if (entry.hasNewFrame.load(std::memory_order_acquire)) {
             std::lock_guard<std::mutex> lock(entry.swapMutex);
-            entry.readyBuffer.swap(entry.backBuffer);
-            entry.hasNewFrame.store(false, std::memory_order_release);
+            if (entry.hasNewFrame.load(std::memory_order_relaxed)) {
+                entry.readyBuffer.swap(entry.backBuffer);
+                entry.hasNewFrame.store(false, std::memory_order_release);
+            }
         }
 
         WindowOverlayRenderData* renderData = entry.backBuffer.get();

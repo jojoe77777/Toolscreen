@@ -556,10 +556,9 @@ bool CaptureWindowContent(WindowOverlayCacheEntry& entry, const WindowOverlayCon
             {
                 std::lock_guard<std::mutex> lock(entry.swapMutex);
                 entry.writeBuffer.swap(entry.readyBuffer);
+                // Signal that a new frame is available for the render thread
+                entry.hasNewFrame.store(true, std::memory_order_release);
             }
-
-            // Signal that a new frame is available for the render thread
-            entry.hasNewFrame.store(true, std::memory_order_release);
         }
     }
 
@@ -614,10 +613,9 @@ bool CaptureWindowContent(WindowOverlayCacheEntry& entry, const WindowOverlayCon
             {
                 std::lock_guard<std::mutex> lock(entry.swapMutex);
                 entry.writeBuffer.swap(entry.readyBuffer);
+                // Signal that a new frame is available for the render thread
+                entry.hasNewFrame.store(true, std::memory_order_release);
             }
-
-            // Signal that a new frame is available for the render thread
-            entry.hasNewFrame.store(true, std::memory_order_release);
         }
     }
 

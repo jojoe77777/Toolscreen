@@ -498,9 +498,8 @@ void UpdateBrowserOverlayBuffer(BrowserOverlayCacheEntry& entry, const unsigned 
     {
         std::lock_guard<std::mutex> lock(entry.swapMutex);
         entry.writeBuffer.swap(entry.readyBuffer);
+        entry.hasNewFrame.store(true, std::memory_order_release);
     }
-
-    entry.hasNewFrame.store(true, std::memory_order_release);
 }
 
 void EnqueueBrowserOverlayDecode(BrowserOverlayEncodedFrame&& frame) {
@@ -603,9 +602,8 @@ bool CaptureBrowserOverlayHostWindow(BrowserOverlayCacheEntry& entry) {
             {
                 std::lock_guard<std::mutex> lock(entry.swapMutex);
                 entry.writeBuffer.swap(entry.readyBuffer);
+                entry.hasNewFrame.store(true, std::memory_order_release);
             }
-
-            entry.hasNewFrame.store(true, std::memory_order_release);
             success = true;
         }
     }
@@ -1588,8 +1586,10 @@ bool PrepareBrowserOverlayTexture(const BrowserOverlayConfig& config, BrowserOve
 
     if (entry->hasNewFrame.load(std::memory_order_acquire)) {
         std::lock_guard<std::mutex> swapLock(entry->swapMutex);
-        entry->readyBuffer.swap(entry->backBuffer);
-        entry->hasNewFrame.store(false, std::memory_order_release);
+        if (entry->hasNewFrame.load(std::memory_order_relaxed)) {
+            entry->readyBuffer.swap(entry->backBuffer);
+            entry->hasNewFrame.store(false, std::memory_order_release);
+        }
     }
 
     BrowserOverlayRenderData* renderData = entry->backBuffer.get();
