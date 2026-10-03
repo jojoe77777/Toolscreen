@@ -172,6 +172,7 @@ int g_selectedImageScreenW = 0, g_selectedImageScreenH = 0;
 std::string g_scrollToImageName;
 bool g_imageCropMode = false;
 std::atomic<HWND> g_minecraftHwnd{ NULL };
+std::atomic<bool> g_gameWindowHooksReady{ false };
 std::wstring g_toolscreenPath;
 std::string g_currentModeId = "";
 std::mutex g_modeIdMutex;
@@ -2582,13 +2583,13 @@ static bool IsTrackedGlfwNoApiWindow() {
     return GetTrackedGlfwWindow(window, hwnd, generation, noApi) && noApi;
 }
 
-static void TrackGlfwWindow(void* window, HWND hwnd, bool noApi) {
+static void TrackGlfwWindow(void* window, HWND hwnd, bool noApi, DWORD ownerThreadId) {
     if (!window || !hwnd) return;
     std::lock_guard<std::mutex> lock(g_glfwWindowStateMutex);
     ++g_glfwWindowState.generation;
     g_glfwWindowState.window = window;
     g_glfwWindowState.hwnd = hwnd;
-    g_glfwWindowState.ownerThreadId = GetCurrentThreadId();
+    g_glfwWindowState.ownerThreadId = ownerThreadId;
     g_glfwWindowState.noApi = noApi;
     g_glfwWindowState.windowSizeCallback = nullptr;
     g_glfwWindowState.framebufferSizeCallback = nullptr;
@@ -2645,7 +2646,7 @@ void* hkglfwCreateWindow(int width, int height, const char* title, void* monitor
             std::lock_guard<std::mutex> lock(g_glfwWindowStateMutex);
             noApi = g_glfwWindowState.pendingNoApi;
         }
-        TrackGlfwWindow(window, hwnd, noApi);
+        TrackGlfwWindow(window, hwnd, noApi, GetCurrentThreadId());
         g_minecraftHwnd.store(hwnd, std::memory_order_release);
         LogCategory("init", "[WINDOW] GLFW created the Minecraft HWND; deferring window-bound initialization until a real render backend frame.");
     }
@@ -2827,7 +2828,7 @@ static bool IsTrackedSdlNoApiWindow() {
     return GetTrackedSdlWindow(window, hwnd, generation, noApi) && noApi;
 }
 
-static bool TrackSdlWindow(void* window, HWND hwnd, bool noApi) {
+static bool TrackSdlWindow(void* window, HWND hwnd, bool noApi, DWORD ownerThreadId) {
     if (!window || !hwnd) return false;
     bool changed = false;
     {
@@ -2838,7 +2839,7 @@ static bool TrackSdlWindow(void* window, HWND hwnd, bool noApi) {
         }
         g_sdlWindowState.window = window;
         g_sdlWindowState.hwnd = hwnd;
-        g_sdlWindowState.ownerThreadId = GetCurrentThreadId();
+        g_sdlWindowState.ownerThreadId = ownerThreadId;
         g_sdlWindowState.noApi = noApi;
     }
     g_lastSdlCursorWindow.store(window, std::memory_order_release);
@@ -2851,11 +2852,12 @@ static bool TrackSdlWindow(void* window, HWND hwnd, bool noApi) {
 static void TrackSdlWindowFromHandle(void* window) {
     const HWND hwnd = ResolveSdlWindowHwnd(window);
     DWORD pid = 0;
-    if (!hwnd || !IsWindow(hwnd) || GetWindowThreadProcessId(hwnd, &pid) == 0 || pid != GetCurrentProcessId()) return;
+    const DWORD ownerThreadId = hwnd && IsWindow(hwnd) ? GetWindowThreadProcessId(hwnd, &pid) : 0;
+    if (ownerThreadId == 0 || pid != GetCurrentProcessId()) return;
 
     const uint64_t flags = sdlGetWindowFlagsProc ? sdlGetWindowFlagsProc(window) : 0;
     const bool noApi = (flags & SDL_WINDOW_VULKAN_FLAG) != 0 && (flags & SDL_WINDOW_OPENGL_FLAG) == 0;
-    const bool changed = TrackSdlWindow(window, hwnd, noApi);
+    const bool changed = TrackSdlWindow(window, hwnd, noApi, ownerThreadId);
     g_minecraftHwnd.store(hwnd, std::memory_order_release);
     if (changed) {
         LogCategory("init", "[WINDOW] SDL3 created the Minecraft HWND; deferring window-bound initialization until a real render backend frame.");
@@ -2977,6 +2979,95 @@ static bool TryInstallSdlHooks(HMODULE sdl) {
     g_sdlHooksInstalled.store(true, std::memory_order_release);
     LogCategory("init", "[WINDOW] Installed SDL3 window lifecycle and relative-mouse hooks.");
     return true;
+}
+
+// Window hooks install only after the game window has existed for a while, so
+// glfwCreateWindow/SDL_CreateWindow already ran without us. Rebuild the state
+// those hooks would have recorded from the live window instead.
+static void AdoptExistingGlfwWindow(HMODULE glfw, HWND hwnd) {
+    if (!glfw || !hwnd || !glfwGetWin32WindowProc) return;
+    // GLFW's Win32 backend stores its window pointer in this property.
+    void* window = GetPropW(hwnd, L"GLFW");
+    if (!window || glfwGetWin32WindowProc(window) != hwnd) return;
+
+    using GLFWGETWINDOWATTRIB = int (*)(void* window, int attrib);
+    using GLFWGETINPUTMODE = int (*)(void* window, int mode);
+    const auto getWindowAttrib = reinterpret_cast<GLFWGETWINDOWATTRIB>(GetProcAddress(glfw, "glfwGetWindowAttrib"));
+    const auto getInputMode = reinterpret_cast<GLFWGETINPUTMODE>(GetProcAddress(glfw, "glfwGetInputMode"));
+
+    const bool noApi = getWindowAttrib && getWindowAttrib(window, GLFW_CLIENT_API_HINT) == GLFW_NO_API_VALUE;
+    TrackGlfwWindow(window, hwnd, noApi, GetWindowThreadProcessId(hwnd, nullptr));
+    {
+        // GLFW only exposes a callback through its setter, so swap it out and
+        // straight back to read the one Minecraft registered.
+        std::lock_guard<std::mutex> lock(g_glfwWindowStateMutex);
+        if (oglfwSetWindowSizeCallback) {
+            const GLFWWINDOWSIZEFUN callback = oglfwSetWindowSizeCallback(window, nullptr);
+            oglfwSetWindowSizeCallback(window, callback);
+            g_glfwWindowState.windowSizeCallback = callback;
+        }
+        if (oglfwSetFramebufferSizeCallback) {
+            const GLFWFRAMEBUFFERSIZEFUN callback = oglfwSetFramebufferSizeCallback(window, nullptr);
+            oglfwSetFramebufferSizeCallback(window, callback);
+            g_glfwWindowState.framebufferSizeCallback = callback;
+        }
+    }
+    g_lastGlfwCursorWindow.store(window, std::memory_order_release);
+    if (getInputMode) {
+        g_nativeCursorGrabbed.store(getInputMode(window, GLFW_CURSOR) == GLFW_CURSOR_DISABLED, std::memory_order_release);
+    }
+    g_minecraftHwnd.store(hwnd, std::memory_order_release);
+    LogCategory("init", "[WINDOW] Adopted the existing GLFW window (noApi=" + std::string(noApi ? "true" : "false") + ").");
+}
+
+static void AdoptExistingSdlWindow(HMODULE sdl, HWND hwnd) {
+    if (!sdl || !hwnd || !sdlGetWindowPropertiesProc || !sdlGetPointerPropertyProc) return;
+    using SDLGETWINDOWS = void** (*)(int* count);
+    using SDLFREE = void (*)(void* memory);
+    const auto getWindows = reinterpret_cast<SDLGETWINDOWS>(GetProcAddress(sdl, "SDL_GetWindows"));
+    const auto sdlFree = reinterpret_cast<SDLFREE>(GetProcAddress(sdl, "SDL_free"));
+    if (!getWindows) return;
+
+    int count = 0;
+    void** windows = getWindows(&count);
+    if (!windows) return;
+    for (int i = 0; i < count; ++i) {
+        if (ResolveSdlWindowHwnd(windows[i]) == hwnd) {
+            TrackSdlWindowFromHandle(windows[i]);
+            break;
+        }
+    }
+    if (sdlFree) sdlFree(windows);
+}
+
+// Top-level window classes that belong to the game itself: GLFW (LWJGL 3),
+// SDL3, and LWJGL 2's Display.
+static bool IsGameWindowClass(HWND hwnd) {
+    wchar_t className[64]{};
+    if (!GetClassNameW(hwnd, className, static_cast<int>(std::size(className)))) return false;
+    return wcscmp(className, L"GLFW30") == 0 || wcscmp(className, L"SDL_app") == 0 || wcscmp(className, L"LWJGL") == 0;
+}
+
+static HWND FindGameWindow() {
+    struct Search {
+        HWND visible = NULL;
+        HWND hidden = NULL;
+    } search;
+    EnumWindows(
+        [](HWND hwnd, LPARAM param) -> BOOL {
+            DWORD pid = 0;
+            GetWindowThreadProcessId(hwnd, &pid);
+            if (pid != GetCurrentProcessId() || !IsGameWindowClass(hwnd)) return TRUE;
+            auto* result = reinterpret_cast<Search*>(param);
+            if (IsWindowVisible(hwnd)) {
+                result->visible = hwnd;
+                return FALSE;
+            }
+            if (!result->hidden) result->hidden = hwnd;
+            return TRUE;
+        },
+        reinterpret_cast<LPARAM>(&search));
+    return search.visible ? search.visible : search.hidden;
 }
 
 static UINT GetRawInputDataHook_Impl(GETRAWINPUTDATAPROC next, HRAWINPUT hRawInput, UINT uiCommand, LPVOID pData, PUINT pcbSize,
@@ -3583,7 +3674,7 @@ static BOOL SwapBuffersHook_Impl(WGLSWAPBUFFERS next, HDC hDc) {
                 DWORD pid = 0;
                 if (trackedHwnd && IsWindow(trackedHwnd) &&
                     GetWindowThreadProcessId(trackedHwnd, &pid) != 0 && pid == GetCurrentProcessId()) {
-                    TrackGlfwWindow(trackedWindow, trackedHwnd, false);
+                    TrackGlfwWindow(trackedWindow, trackedHwnd, false, GetCurrentThreadId());
                     trackedNoApi = false;
                 }
             }
@@ -3594,7 +3685,7 @@ static BOOL SwapBuffersHook_Impl(WGLSWAPBUFFERS next, HDC hDc) {
                     DWORD pid = 0;
                     if (trackedHwnd && IsWindow(trackedHwnd) &&
                         GetWindowThreadProcessId(trackedHwnd, &pid) != 0 && pid == GetCurrentProcessId()) {
-                        TrackSdlWindow(trackedWindow, trackedHwnd, false);
+                        TrackSdlWindow(trackedWindow, trackedHwnd, false, GetCurrentThreadId());
                         trackedNoApi = false;
                     }
                 }
@@ -4174,6 +4265,125 @@ FARPROC WINAPI hkGetProcAddress(HMODULE module, LPCSTR name) {
     return VulkanHooks::InterceptLoaderGetProcAddress(module, name, realFunction);
 }
 
+static constexpr auto kGameWindowHookDelay = std::chrono::seconds(2);
+
+// Blocks until one game window has existed continuously for
+// kGameWindowHookDelay. A window that disappears early (such as a bootstrap
+// window) restarts the wait. Returns the window, or NULL on shutdown.
+static HWND WaitForStableGameWindow() {
+    HWND tracked = NULL;
+    auto firstSeen = std::chrono::steady_clock::now();
+    while (!g_stopHookCompat.load(std::memory_order_acquire) && !g_isShuttingDown.load(std::memory_order_acquire)) {
+        const bool trackedAlive = tracked && IsWindow(tracked);
+        if (!trackedAlive || !IsWindowVisible(tracked)) {
+            // Prefer a visible window over a hidden one we were already timing.
+            const HWND candidate = FindGameWindow();
+            if (candidate != tracked && (!trackedAlive || (candidate && IsWindowVisible(candidate)))) {
+                tracked = candidate;
+                firstSeen = std::chrono::steady_clock::now();
+                if (tracked) LogCategory("init", "[WINDOW] Game window found; waiting 2s before installing hooks.");
+            }
+        }
+        if (tracked && std::chrono::steady_clock::now() - firstSeen >= kGameWindowHookDelay) {
+            return tracked;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    return NULL;
+}
+
+// Installs every hook except the Vulkan proc-address capture, which DllMain
+// installs immediately so it sees LWJGL's Vulkan instance/device creation.
+static void InstallGameWindowHooks(HWND gameWindow) {
+    LogCategory("init", "Setting up game-window hooks...");
+
+    HMODULE hOpenGL32 = GetModuleHandle(L"opengl32.dll");
+    HMODULE hUser32 = GetModuleHandle(L"user32.dll");
+    HMODULE hGlfw = GetModuleHandle(L"glfw.dll");
+    HMODULE hSdl = GetModuleHandle(L"SDL3.dll");
+    HMODULE hKernel32 = GetModuleHandle(L"kernel32.dll");
+
+    if (!hUser32) {
+        Log("ERROR: GetModuleHandle(user32.dll) returned NULL");
+        return;
+    }
+
+#define HOOK(mod, name) CreateHookOrDie(GetProcAddress(mod, #name), &hk##name, &o##name, #name)
+    if (hOpenGL32) {
+        HOOK(hOpenGL32, wglSwapBuffers);
+        HOOK(hOpenGL32, glBindTexture);
+    }
+    // Keep the established export-hook range intact and add the 26.2 renderer.
+    if (IsVersionInRange(g_gameVersion, GameVersion(1, 0, 0), GameVersion(1, 21, 0)) ||
+        IsMinecraft26_2FinalOrNewer(g_gameVersion)) {
+        if (hOpenGL32 && HOOK(hOpenGL32, glViewport)) {
+            g_glViewportHookCount.fetch_add(1);
+            LogCategory("init", "Initial glViewport hook created via opengl32.dll");
+        }
+    }
+    HOOK(hUser32, SetCursorPos);
+    HOOK(hUser32, GetClientRect);
+    HOOK(hUser32, ClipCursor);
+    HOOK(hUser32, SetCursor);
+    HOOK(hUser32, GetRawInputData);
+    if (hKernel32) {
+        HOOK(hKernel32, LoadLibraryA);
+        HOOK(hKernel32, LoadLibraryW);
+        HOOK(hKernel32, LoadLibraryExA);
+        HOOK(hKernel32, LoadLibraryExW);
+    }
+    if (hGlfw) TryInstallGlfwHooks(hGlfw);
+    else LogCategory("init", "[WINDOW] glfw.dll is not loaded yet; its hooks will install when it loads.");
+    if (hSdl) TryInstallSdlHooks(hSdl);
+    else LogCategory("init", "[WINDOW] SDL3.dll is not loaded yet; its hooks will install when it loads.");
+#undef HOOK
+
+    LPVOID pGlBindFramebuffer = hOpenGL32 ? GetProcAddress(hOpenGL32, "glBindFramebuffer") : nullptr;
+    if (pGlBindFramebuffer != NULL) {
+        CreateHookOrDie(pGlBindFramebuffer, &hkglBindFramebuffer, &oglBindFramebuffer, "glBindFramebuffer");
+    } else {
+        LogCategory("init",
+                    "WARNING: glBindFramebuffer not found in opengl32.dll - will attempt to hook via WGL/GLEW after context init");
+    }
+
+    LPVOID pGlBlitNamedFramebuffer = hOpenGL32 ? GetProcAddress(hOpenGL32, "glBlitNamedFramebuffer") : nullptr;
+    if (pGlBlitNamedFramebuffer != NULL) {
+        CreateHookOrDie(pGlBlitNamedFramebuffer, &hkglBlitNamedFramebuffer, &oglBlitNamedFramebuffer, "glBlitNamedFramebuffer");
+    } else {
+        LogCategory("init",
+                    "WARNING: glBlitNamedFramebuffer not found in opengl32.dll - will attempt to hook via GLEW after context init");
+    }
+
+    LPVOID pGlBlitFramebuffer = hOpenGL32 ? GetProcAddress(hOpenGL32, "glBlitFramebuffer") : nullptr;
+    if (pGlBlitFramebuffer != NULL) {
+        if (CreateHookOrDie(pGlBlitFramebuffer, &hkglBlitFramebuffer, &oglBlitFramebuffer, "glBlitFramebuffer")) {
+            g_glBlitFramebufferHooked.store(true, std::memory_order_release);
+        }
+    } else {
+        LogCategory("init",
+                    "WARNING: glBlitFramebuffer not found in opengl32.dll - will attempt to hook via WGL/GLEW after context init");
+    }
+
+    if (MH_EnableHook(MH_ALL_HOOKS) != MH_OK) {
+        Log("ERROR: MH_EnableHook(MH_ALL_HOOKS) failed!");
+        return;
+    }
+    g_minHookEnabled.store(true, std::memory_order_release);
+    // Close the GetModuleHandle/LoadLibrary-hook handoff: GLFW may have
+    // loaded after the first probe but before these loader hooks went live.
+    if (HMODULE lateGlfw = GetModuleHandleW(L"glfw.dll")) {
+        TryInstallGlfwHooks(lateGlfw);
+        AdoptExistingGlfwWindow(lateGlfw, gameWindow);
+    }
+    if (HMODULE lateSdl = GetModuleHandleW(L"SDL3.dll")) {
+        TryInstallSdlHooks(lateSdl);
+        AdoptExistingSdlWindow(lateSdl, gameWindow);
+    }
+
+    g_gameWindowHooksReady.store(true, std::memory_order_release);
+    LogCategory("init", "Game-window hooks enabled.");
+}
+
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
     if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hModule);
@@ -4342,96 +4552,27 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             return TRUE;
         }
 
-        LogCategory("init", "Setting up hooks...");
-
-        HMODULE hOpenGL32 = GetModuleHandle(L"opengl32.dll");
-        HMODULE hUser32 = GetModuleHandle(L"user32.dll");
-        HMODULE hGlfw = GetModuleHandle(L"glfw.dll");
-        HMODULE hSdl = GetModuleHandle(L"SDL3.dll");
+        // Vulkan context capture is the one hook that must run before the game
+        // window exists: LWJGL resolves vkGetInstanceProcAddr and creates its
+        // instance/device during window setup. Everything else waits for the
+        // game window (see InstallGameWindowHooks).
         HMODULE hKernel32 = GetModuleHandle(L"kernel32.dll");
-
-        if (!hUser32) {
-            Log("ERROR: GetModuleHandle(user32.dll) returned NULL");
-            return TRUE;
-        }
-
-#define HOOK(mod, name) CreateHookOrDie(GetProcAddress(mod, #name), &hk##name, &o##name, #name)
-        if (hOpenGL32) {
-            HOOK(hOpenGL32, wglSwapBuffers);
-            HOOK(hOpenGL32, glBindTexture);
-        }
-        // Keep the established export-hook range intact and add the 26.2 renderer.
-        if (IsVersionInRange(g_gameVersion, GameVersion(1, 0, 0), GameVersion(1, 21, 0)) ||
-            IsMinecraft26_2FinalOrNewer(g_gameVersion)) {
-            if (hOpenGL32 && HOOK(hOpenGL32, glViewport)) {
-                g_glViewportHookCount.fetch_add(1);
-                LogCategory("init", "Initial glViewport hook created via opengl32.dll");
-            }
-        }
-        HOOK(hUser32, SetCursorPos);
-        HOOK(hUser32, GetClientRect);
-        HOOK(hUser32, ClipCursor);
-        HOOK(hUser32, SetCursor);
-        HOOK(hUser32, GetRawInputData);
-        if (hKernel32) {
-            HOOK(hKernel32, GetProcAddress);
-            HOOK(hKernel32, LoadLibraryA);
-            HOOK(hKernel32, LoadLibraryW);
-            HOOK(hKernel32, LoadLibraryExA);
-            HOOK(hKernel32, LoadLibraryExW);
-        }
-        if (hGlfw) TryInstallGlfwHooks(hGlfw);
-        else LogCategory("init", "[WINDOW] glfw.dll is not loaded yet; its readiness hook will install when it loads.");
-        if (hSdl) TryInstallSdlHooks(hSdl);
-        else LogCategory("init", "[WINDOW] SDL3.dll is not loaded yet; its readiness hook will install when it loads.");
-#undef HOOK
-
-        LPVOID pGlBindFramebuffer = hOpenGL32 ? GetProcAddress(hOpenGL32, "glBindFramebuffer") : nullptr;
-        if (pGlBindFramebuffer != NULL) {
-            CreateHookOrDie(pGlBindFramebuffer, &hkglBindFramebuffer, &oglBindFramebuffer, "glBindFramebuffer");
+        if (!hKernel32 ||
+            !CreateHookOrDie(GetProcAddress(hKernel32, "GetProcAddress"), &hkGetProcAddress, &oGetProcAddress, "GetProcAddress") ||
+            MH_EnableHook(MH_ALL_HOOKS) != MH_OK) {
+            Log("ERROR: Failed to enable the Vulkan proc-address capture hook.");
         } else {
-            LogCategory("init",
-                        "WARNING: glBindFramebuffer not found in opengl32.dll - will attempt to hook via WGL/GLEW after context init");
+            LogCategory("init", "Vulkan capture hook enabled; remaining hooks wait for the game window.");
         }
-
-        LPVOID pGlBlitNamedFramebuffer = hOpenGL32 ? GetProcAddress(hOpenGL32, "glBlitNamedFramebuffer") : nullptr;
-        if (pGlBlitNamedFramebuffer != NULL) {
-            CreateHookOrDie(pGlBlitNamedFramebuffer, &hkglBlitNamedFramebuffer, &oglBlitNamedFramebuffer, "glBlitNamedFramebuffer");
-        } else {
-            LogCategory("init",
-                        "WARNING: glBlitNamedFramebuffer not found in opengl32.dll - will attempt to hook via GLEW after context init");
-        }
-
-        LPVOID pGlBlitFramebuffer = hOpenGL32 ? GetProcAddress(hOpenGL32, "glBlitFramebuffer") : nullptr;
-        if (pGlBlitFramebuffer != NULL) {
-            if (CreateHookOrDie(pGlBlitFramebuffer, &hkglBlitFramebuffer, &oglBlitFramebuffer, "glBlitFramebuffer")) {
-                g_glBlitFramebufferHooked.store(true, std::memory_order_release);
-            }
-        } else {
-            LogCategory("init",
-                        "WARNING: glBlitFramebuffer not found in opengl32.dll - will attempt to hook via WGL/GLEW after context init");
-        }
-
-        if (MH_EnableHook(MH_ALL_HOOKS) != MH_OK) {
-            Log("ERROR: MH_EnableHook(MH_ALL_HOOKS) failed!");
-            return TRUE;
-        }
-        g_minHookEnabled.store(true, std::memory_order_release);
-        // Close the GetModuleHandle/LoadLibrary-hook handoff: GLFW may have
-        // loaded after the first probe but before these loader hooks went live.
-        if (HMODULE lateGlfw = GetModuleHandleW(L"glfw.dll")) {
-            TryInstallGlfwHooks(lateGlfw);
-        }
-        if (HMODULE lateSdl = GetModuleHandleW(L"SDL3.dll")) {
-            TryInstallSdlHooks(lateSdl);
-        }
-
-        LogCategory("init", "Hooks enabled.");
         VulkanHooks::InstallIfAvailable();
 
-        // This thread periodically detects those detours (prolog or IAT) and chains behind them.
+        // Waits for the game window, installs the remaining hooks, then
+        // periodically detects third-party detours (prolog or IAT) and chains behind them.
         g_stopHookCompat.store(false, std::memory_order_release);
         g_hookCompatThread = std::thread([]() {
+            const HWND gameWindow = WaitForStableGameWindow();
+            if (!gameWindow) return;
+            InstallGameWindowHooks(gameWindow);
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             while (!g_stopHookCompat.load(std::memory_order_acquire) && !g_isShuttingDown.load(std::memory_order_acquire)) {
                 HookChain::RefreshAllThirdPartyHookChains();

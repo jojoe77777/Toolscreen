@@ -320,6 +320,9 @@ extern std::atomic<bool> g_allImagesLoaded;
 extern std::mutex g_decodedImagesMutex;
 extern std::vector<DecodedImageData> g_decodedImagesQueue;
 extern std::atomic<HWND> g_minecraftHwnd;
+// Latched once the game window has existed for 2 seconds. Until then
+// only the Vulkan context capture path may run; every other hook stays inert.
+extern std::atomic<bool> g_gameWindowHooksReady;
 extern std::string g_gameStateBuffers[2];
 extern std::atomic<int> g_currentGameStateIndex;
 extern std::mutex g_hotkeyMainKeysMutex;

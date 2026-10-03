@@ -659,6 +659,12 @@ VKAPI_ATTR void VKAPI_CALL hkFreeCommandBuffers(VkDevice device, VkCommandPool p
     }
 }
 
+// Vulkan handle tracking always runs so the context is captured before the game
+// window exists. Toolscreen's own rendering waits for the game-window gate.
+bool RendererHooksReady() {
+    return g_gameWindowHooksReady.load(std::memory_order_acquire);
+}
+
 template <typename SubmitInfo>
 std::vector<VkCommandBuffer> CollectSubmittedCommandBuffers(uint32_t submitCount, const SubmitInfo* submits) {
     std::vector<VkCommandBuffer> result;
@@ -683,7 +689,7 @@ VKAPI_ATTR VkResult VKAPI_CALL hkQueueSubmit(VkQueue queue, uint32_t submitCount
     const DeviceDispatch* d = FindDevice(snapshot, queueIt->second.device);
     if (!d || !d->queueSubmit) return VK_ERROR_INITIALIZATION_FAILED;
     VkResult result = d->queueSubmit(queue, submitCount, submits, fence);
-    if (result == VK_SUCCESS) {
+    if (result == VK_SUCCESS && RendererHooksReady()) {
         auto buffers = CollectSubmittedCommandBuffers(submitCount, submits);
         VulkanRenderer::OnQueueSubmit(queueIt->second.device, queue, static_cast<uint32_t>(buffers.size()), buffers.data(), fence);
     }
@@ -698,7 +704,7 @@ VKAPI_ATTR VkResult VKAPI_CALL hkQueueSubmit2(VkQueue queue, uint32_t submitCoun
     PFN_vkQueueSubmit2 submit = d ? d->queueSubmit2 : nullptr;
     if (!submit) return VK_ERROR_EXTENSION_NOT_PRESENT;
     VkResult result = submit(queue, submitCount, submits, fence);
-    if (result == VK_SUCCESS) {
+    if (result == VK_SUCCESS && RendererHooksReady()) {
         auto buffers = CollectSubmittedCommandBuffers(submitCount, submits);
         VulkanRenderer::OnQueueSubmit(queueIt->second.device, queue, static_cast<uint32_t>(buffers.size()), buffers.data(), fence);
     }
@@ -713,7 +719,7 @@ VKAPI_ATTR VkResult VKAPI_CALL hkQueueSubmit2KHR(VkQueue queue, uint32_t submitC
     PFN_vkQueueSubmit2KHR submit = d ? d->queueSubmit2KHR : nullptr;
     if (!submit) return VK_ERROR_EXTENSION_NOT_PRESENT;
     VkResult result = submit(queue, submitCount, submits, fence);
-    if (result == VK_SUCCESS) {
+    if (result == VK_SUCCESS && RendererHooksReady()) {
         auto buffers = CollectSubmittedCommandBuffers(submitCount, submits);
         VulkanRenderer::OnQueueSubmit(queueIt->second.device, queue, static_cast<uint32_t>(buffers.size()), buffers.data(), fence);
     }
@@ -726,6 +732,7 @@ VKAPI_ATTR VkResult VKAPI_CALL hkQueuePresentKHR(VkQueue queue, const VkPresentI
     if (queueIt == snapshot->queues.end()) return VK_ERROR_INITIALIZATION_FAILED;
     const DeviceDispatch* d = FindDevice(snapshot, queueIt->second.device);
     if (!d || !d->queuePresentKHR) return VK_ERROR_EXTENSION_NOT_PRESENT;
+    if (!RendererHooksReady()) return d->queuePresentKHR(queue, presentInfo);
 
     // Call the renderer before forwarding to the next layer.  When OBS is
     // injected, the stored dispatch function remains its vkQueuePresentKHR
@@ -767,6 +774,10 @@ VKAPI_ATTR void VKAPI_CALL hkCmdBlitImage(VkCommandBuffer commandBuffer, VkImage
                          destinationLayout, regionCount, regions, filter);
             }
         }
+        return;
+    }
+    if (!RendererHooksReady()) {
+        dispatch->cmdBlitImage(commandBuffer, source, sourceLayout, destination, destinationLayout, regionCount, regions, filter);
         return;
     }
     if (!nativeDispatch || !nativeDispatch->cmdBlitImage)

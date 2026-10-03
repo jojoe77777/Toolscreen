@@ -667,7 +667,7 @@ if(TOOLSCREEN_ENABLE_JAR_PACKAGING OR TOOLSCREEN_ENABLE_EXE_PACKAGING)
     FetchContent_Declare(
         easyinjectbundled
         GIT_REPOSITORY https://github.com/jojoe77777/EasyInjectBundled.git
-        GIT_TAG 7a388c0af56760118f74083ea175f66d3463cdbb
+        GIT_TAG f59501eb8058b363bb5384d51c4434536ee35a6a
     )
 
     FetchContent_GetProperties(easyinjectbundled)
@@ -782,7 +782,7 @@ if(TOOLSCREEN_ENABLE_JAR_PACKAGING OR TOOLSCREEN_ENABLE_EXE_PACKAGING)
         FetchContent_Declare(
             easyinjectbundled_exe
             GIT_REPOSITORY https://github.com/jojoe77777/EasyInjectBundled.git
-            GIT_TAG 7a388c0af56760118f74083ea175f66d3463cdbb
+            GIT_TAG f59501eb8058b363bb5384d51c4434536ee35a6a
         )
 
         FetchContent_GetProperties(easyinjectbundled_exe)
