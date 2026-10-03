@@ -169,18 +169,24 @@ void UpdateActiveMirrorConfigs() {
         const MirrorGroupItem* item = nullptr;
     };
 
+    // Read the version before the snapshot. PublishConfigSnapshot stores the snapshot first and bumps the
+    // version second, so this order can only pair a newer snapshot with an older version (forcing a rebuild
+    // next call), never an older snapshot with a newer version.
+    const uint64_t snapVer = g_configSnapshotVersion.load(std::memory_order_acquire);
+
     // Use config snapshot for thread-safe access to modes/mirrors/mirrorGroups
     auto cfgSnap = GetConfigSnapshot();
     if (!cfgSnap) return;
     const Config& cfg = *cfgSnap;
 
-    const uint64_t snapVer = g_configSnapshotVersion.load(std::memory_order_acquire);
-    static uint64_t s_lookupSnapshotVersion = 0;
+    // The lookup maps hold raw pointers into the snapshot, so keep that snapshot alive and rebuild whenever
+    // the published snapshot object changes.
+    static std::shared_ptr<const Config> s_lookupSnapshot;
     static std::unordered_map<std::string, const MirrorGroupConfig*> s_groupByName;
     static std::unordered_map<std::string, const MirrorConfig*> s_mirrorByName;
 
-    if (s_lookupSnapshotVersion != snapVer) {
-        s_lookupSnapshotVersion = snapVer;
+    if (s_lookupSnapshot != cfgSnap) {
+        s_lookupSnapshot = cfgSnap;
         s_groupByName.clear();
         s_mirrorByName.clear();
         s_groupByName.reserve(cfg.mirrorGroups.size());
