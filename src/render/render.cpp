@@ -2895,6 +2895,18 @@ void CleanupGPUResources() {
             while (glGetError() != GL_NO_ERROR) {}
             g_debugVBO = 0;
         }
+        if (g_fullscreenQuadVAO) {
+            trackCleanupResource("<global>", "g_fullscreenQuadVAO", static_cast<uintptr_t>(g_fullscreenQuadVAO));
+            glDeleteVertexArrays(1, &g_fullscreenQuadVAO);
+            while (glGetError() != GL_NO_ERROR) {}
+            g_fullscreenQuadVAO = 0;
+        }
+        if (g_fullscreenQuadVBO) {
+            trackCleanupResource("<global>", "g_fullscreenQuadVBO", static_cast<uintptr_t>(g_fullscreenQuadVBO));
+            glDeleteBuffers(1, &g_fullscreenQuadVBO);
+            while (glGetError() != GL_NO_ERROR) {}
+            g_fullscreenQuadVBO = 0;
+        }
         clearTrackedCleanupResource();
     } catch (const std::exception& e) {
         logCleanupStdException("vao/vbo cleanup", e);
