@@ -2191,12 +2191,10 @@ bool CreateTextureFrame(int width, int height, TextureFrame& frame) {
     frame.sampled.descriptor = ImGui_ImplVulkan_AddTexture(
         g_state.mirrorSampler, frame.sampled.view,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    frame.sampled.linearDescriptor = ImGui_ImplVulkan_AddTexture(
-        g_state.linearSampler, frame.sampled.view,
-        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    // The linear descriptor is created lazily by ResolveTextureFrame and
+    // PrepareStreamingTexture so large animations do not exhaust the pool.
     frame.sampled.descriptorLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    return frame.sampled.descriptor != VK_NULL_HANDLE &&
-           frame.sampled.linearDescriptor != VK_NULL_HANDLE;
+    return frame.sampled.descriptor != VK_NULL_HANDLE;
 }
 
 bool CreateTextureAsset(const DecodedImageData& decoded, TextureAsset& asset) {
@@ -2405,13 +2403,27 @@ void RecordTextureUploads(VkCommandBuffer commandBuffer) {
     }
 }
 
+void EnsureLinearDescriptor(TextureFrame& frame) {
+    if (frame.sampled.linearDescriptor || !frame.sampled.view) return;
+    // The passive OBS context has no Vulkan backend, so allocate through the
+    // interactive context that owns the descriptor pool.
+    ImGuiContext* previous = ImGui::GetCurrentContext();
+    ImGui::SetCurrentContext(g_state.imguiContext);
+    frame.sampled.linearDescriptor = ImGui_ImplVulkan_AddTexture(
+        g_state.linearSampler, frame.sampled.view,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    ImGui::SetCurrentContext(previous);
+}
+
 TextureFrame* ResolveTextureFrame(TextureAsset& asset, bool linear) {
     if (!asset.uploadRecorded || asset.frames.empty()) return nullptr;
     if (g_obsCompositionPass) {
         const auto resolved =
             g_state.frameResolvedTextureFrames.find(&asset);
         if (resolved != g_state.frameResolvedTextureFrames.end()) {
-            return resolved->second;
+            TextureFrame* cached = resolved->second;
+            if (linear && cached) EnsureLinearDescriptor(*cached);
+            return cached;
         }
     }
     size_t index = 0;
@@ -2429,11 +2441,7 @@ TextureFrame* ResolveTextureFrame(TextureAsset& asset, bool linear) {
         index = (std::min)(index, asset.frames.size() - 1);
     }
     TextureFrame& frame = asset.frames[index];
-    if (linear && !frame.sampled.linearDescriptor) {
-        frame.sampled.linearDescriptor = ImGui_ImplVulkan_AddTexture(
-            g_state.linearSampler, frame.sampled.view,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    }
+    if (linear) EnsureLinearDescriptor(frame);
     if (!g_obsCompositionPass) {
         g_state.frameResolvedTextureFrames[&asset] = &frame;
     }
@@ -2549,11 +2557,7 @@ TextureFrame* PrepareStreamingTexture(
             &toShader);
         slot.uploadedGeneration = generation;
     }
-    if (linear && !slot.frame.sampled.linearDescriptor) {
-        slot.frame.sampled.linearDescriptor = ImGui_ImplVulkan_AddTexture(
-            g_state.linearSampler, slot.frame.sampled.view,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    }
+    if (linear) EnsureLinearDescriptor(slot.frame);
     return &slot.frame;
 }
 
