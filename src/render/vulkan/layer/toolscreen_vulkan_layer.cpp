@@ -632,16 +632,27 @@ VKAPI_ATTR void VKAPI_CALL LayerCmdCopyImage(
     std::lock_guard lock(g_mutex);
     DeviceState* state = FindDeviceFromObject(commandBuffer);
     if (!state || !state->cmdCopyImage) return;
-    const auto sourceIt = state->images.find(source);
     const auto destinationIt = state->images.find(destination);
+    if (!state->obsExportImageCount || destinationIt == state->images.end() ||
+        !destinationIt->second.obsExport) {
+        // Only copies into a tracked OBS export image can be redirected.
+        state->cmdCopyImage(commandBuffer, source, sourceLayout, destination,
+                            destinationLayout, regionCount, regions);
+        g_passThroughCount.fetch_add(1);
+        return;
+    }
+    const auto sourceIt = state->images.find(source);
     std::string reject;
+    bool rejectForeignCaller = false;
     const void* caller = _ReturnAddress();
     const bool obsCaller = IsObsCaller(caller);
     if (!GetModuleHandleW(L"graphics-hook64.dll"))
         reject = "OBS graphics-hook64.dll is absent";
-    else if (!obsCaller)
-        reject = "call origin is " + ModuleForAddress(caller) +
-                 ", not graphics-hook64.dll";
+    else if (!obsCaller) {
+        // The caller module name is resolved only if the rejection is logged.
+        rejectForeignCaller = true;
+        reject = "call origin is not graphics-hook64.dll";
+    }
     else if (sourceIt == state->images.end() || !sourceIt->second.swapchain)
         reject = "source is not a tracked Minecraft swapchain image";
     else if (destinationIt == state->images.end() ||
@@ -732,7 +743,11 @@ VKAPI_ATTR void VKAPI_CALL LayerCmdCopyImage(
                         destinationLayout, regionCount, regions);
     const uint64_t count = g_passThroughCount.fetch_add(1) + 1;
     if (ShouldLogReject()) {
-        Log("copy candidate REJECTED/pass-through: reason=" + reject +
+        Log("copy candidate REJECTED/pass-through: reason=" +
+            (rejectForeignCaller
+                 ? "call origin is " + ModuleForAddress(caller) +
+                       ", not graphics-hook64.dll"
+                 : reject) +
             ", source=" + Handle(reinterpret_cast<uint64_t>(source)) +
             ", destination=" +
             Handle(reinterpret_cast<uint64_t>(destination)) + ", extent=" +
