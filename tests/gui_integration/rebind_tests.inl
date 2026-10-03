@@ -331,6 +331,21 @@ void RunVulkanGuiHotkeyUsesLowLevelExactModifierStateTest(TestRunMode runMode = 
         "Expected the Vulkan GUI hotkey not to match after left Ctrl is released.");
 }
 
+void RunLowLevelKeyboardHookRunsOnDedicatedThreadTest(TestRunMode runMode = TestRunMode::Automated) {
+    (void)runMode;
+    DWORD hookThreadId = 0;
+    bool installed = false;
+    bool removed = false;
+    CycleLowLevelKeyboardHookForTest(hookThreadId, installed, removed);
+    StopLowLevelKeyboardHookThread();
+    StopLowLevelKeyboardHookThread();
+
+    Expect(installed, "Expected the low-level keyboard hook to install through its owning thread.");
+    Expect(hookThreadId != 0 && hookThreadId != GetCurrentThreadId(),
+        "Expected the low-level keyboard hook to be owned by a dedicated thread, not the requesting thread.");
+    Expect(removed, "Expected the low-level keyboard hook to be removed through its owning thread.");
+}
+
 static void RenderKeyboardInputsFrame(DummyWindow& window) {
     RenderSettingsFrame(window, trc("tabs.inputs"), trc("inputs.keyboard"));
 }

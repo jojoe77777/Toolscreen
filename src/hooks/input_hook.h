@@ -91,6 +91,10 @@ InputHandlerResult HandleCharRebinding(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
 void ResetLocalKeyRepeatState(HWND hWnd);
 
 void ReleaseActiveLowLevelRebindKeys(HWND hWnd);
+// Stops the thread that owns the low-level keyboard hook (removing the hook). Called on DLL detach.
+void StopLowLevelKeyboardHookThread();
+// Reports whether the low-level keyboard hook is installed and which thread owns it.
+bool GetLowLevelKeyboardHookState(DWORD& outHookThreadId);
 
 void ReleaseHeldPassthroughRebindSources(HWND hWnd);
 
@@ -105,6 +109,8 @@ size_t GetActiveSyntheticRebindOutputCountForTest();
 void ResetExactKeyboardMessageStateForTest();
 size_t GetUnreboundKeyDownCountForTest();
 void ResetHotkeyRuntimeStateForTest();
+// Installs then removes the low-level keyboard hook through its owning thread.
+bool CycleLowLevelKeyboardHookForTest(DWORD& outHookThreadId, bool& outInstalled, bool& outRemoved);
 void ResetLowLevelExactModifierStateForTest();
 void SetLowLevelExactModifierDownForTest(DWORD vk, bool isDown);
 bool DoesLowLevelHotkeyChordMatchForTest(const std::vector<DWORD>& keys, DWORD incomingVk);

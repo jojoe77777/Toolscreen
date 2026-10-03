@@ -4787,6 +4787,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         // Stop background threads
         StopBrowserOverlayThread();
         StopWindowCaptureThread();
+        StopLowLevelKeyboardHookThread();
         VulkanHooks::Shutdown();
 
         Log("Background threads stopped.");

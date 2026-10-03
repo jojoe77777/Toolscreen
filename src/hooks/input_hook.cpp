@@ -68,7 +68,12 @@ extern std::mutex g_triggerOnReleaseMutex;
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 static size_t s_bestMatchKeyCount = 0;
 static std::unordered_map<DWORD, size_t> s_bestMatchKeyCountByMainVk;
-static HHOOK s_lowLevelKeyboardHook = NULL;
+// The WH_KEYBOARD_LL hook is owned by a dedicated thread (see LowLevelKeyboardHookThreadProc). Windows runs a
+// low-level hook callback on the installing thread's message loop, so installing it on the game's window
+// thread made every keystroke system-wide wait on that thread, and a stall longer than LowLevelHooksTimeout
+// (world loads, GC pauses) made Windows silently remove the hook.
+static std::atomic<HHOOK> s_lowLevelKeyboardHook{ NULL };
+// Serializes install/uninstall requests to the hook thread.
 static std::mutex s_lowLevelKeyboardHookMutex;
 static std::atomic<bool> s_vulkanGuiHotkeyPending{ false };
 static std::atomic<bool> s_vulkanGuiHotkeyMainDown{ false };
@@ -4320,6 +4325,107 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int code, WPARAM wParam, LPARAM lPa
     return 1;
 }
 
+static constexpr UINT kLowLevelHookThreadSyncMessage = WM_APP + 0x4C4C;
+static constexpr DWORD kLowLevelHookThreadRequestTimeoutMs = 1000;
+static HANDLE s_lowLevelHookThread = NULL;
+static DWORD s_lowLevelHookThreadId = 0;
+// Signalled by the hook thread once its message queue exists, and after each sync request is applied.
+static HANDLE s_lowLevelHookThreadReadyEvent = NULL;
+static HANDLE s_lowLevelHookThreadSyncDoneEvent = NULL;
+static std::atomic<bool> s_lowLevelHookDesiredInstalled{ false };
+
+// Runs on the hook thread: installs or removes the hook to match s_lowLevelHookDesiredInstalled.
+static void ApplyDesiredLowLevelKeyboardHookStateOnHookThread() {
+    const bool wantInstalled = s_lowLevelHookDesiredInstalled.load(std::memory_order_acquire) &&
+                               !g_isShuttingDown.load(std::memory_order_acquire);
+    const HHOOK current = s_lowLevelKeyboardHook.load(std::memory_order_acquire);
+
+    if (wantInstalled && current == NULL) {
+        if (g_hModule == NULL) return;
+        const HHOOK hook = SetWindowsHookExW(WH_KEYBOARD_LL, LowLevelKeyboardProc, g_hModule, 0);
+        if (hook == NULL) {
+            Log("WARNING: Failed to install low-level keyboard hook for deep key rebind suppression.");
+            return;
+        }
+        s_lowLevelKeyboardHook.store(hook, std::memory_order_release);
+        LogCategory("init", "Installed low-level keyboard hook for exact modifier tracking and deep key rebind suppression.");
+    } else if (!wantInstalled && current != NULL) {
+        s_lowLevelKeyboardHook.store(NULL, std::memory_order_release);
+        if (UnhookWindowsHookEx(current) == FALSE) {
+            Log("WARNING: Failed to uninstall low-level keyboard hook for deep key rebind suppression.");
+            return;
+        }
+        LogCategory("init", "Uninstalled low-level keyboard hook for exact modifier tracking and deep key rebind suppression.");
+    }
+}
+
+static DWORD WINAPI LowLevelKeyboardHookThreadProc(LPVOID) {
+    // Force creation of this thread's message queue before announcing readiness, so posted requests are not lost.
+    MSG msg;
+    PeekMessageW(&msg, NULL, WM_USER, WM_USER, PM_NOREMOVE);
+    SetEvent(s_lowLevelHookThreadReadyEvent);
+
+    while (GetMessageW(&msg, NULL, 0, 0) > 0) {
+        if (msg.hwnd == NULL && msg.message == kLowLevelHookThreadSyncMessage) {
+            ApplyDesiredLowLevelKeyboardHookStateOnHookThread();
+            SetEvent(s_lowLevelHookThreadSyncDoneEvent);
+            continue;
+        }
+        DispatchMessageW(&msg);
+    }
+
+    if (const HHOOK hook = s_lowLevelKeyboardHook.exchange(NULL, std::memory_order_acq_rel)) { UnhookWindowsHookEx(hook); }
+    return 0;
+}
+
+// Caller must hold s_lowLevelKeyboardHookMutex.
+static bool EnsureLowLevelKeyboardHookThreadStartedLocked() {
+    if (s_lowLevelHookThread != NULL) return true;
+
+    if (s_lowLevelHookThreadReadyEvent == NULL) { s_lowLevelHookThreadReadyEvent = CreateEventW(NULL, FALSE, FALSE, NULL); }
+    if (s_lowLevelHookThreadSyncDoneEvent == NULL) { s_lowLevelHookThreadSyncDoneEvent = CreateEventW(NULL, FALSE, FALSE, NULL); }
+    if (s_lowLevelHookThreadReadyEvent == NULL || s_lowLevelHookThreadSyncDoneEvent == NULL) {
+        Log("WARNING: Failed to create events for the low-level keyboard hook thread.");
+        return false;
+    }
+
+    DWORD threadId = 0;
+    HANDLE thread = CreateThread(NULL, 0, LowLevelKeyboardHookThreadProc, NULL, 0, &threadId);
+    if (thread == NULL) {
+        Log("WARNING: Failed to start the low-level keyboard hook thread.");
+        return false;
+    }
+    // Keystrokes system-wide wait on this thread while the hook is installed, so keep it responsive.
+    SetThreadPriority(thread, THREAD_PRIORITY_HIGHEST);
+
+    if (WaitForSingleObject(s_lowLevelHookThreadReadyEvent, kLowLevelHookThreadRequestTimeoutMs) != WAIT_OBJECT_0) {
+        Log("WARNING: Low-level keyboard hook thread did not start in time.");
+        PostThreadMessageW(threadId, WM_QUIT, 0, 0);
+        CloseHandle(thread);
+        return false;
+    }
+
+    s_lowLevelHookThread = thread;
+    s_lowLevelHookThreadId = threadId;
+    return true;
+}
+
+// Caller must hold s_lowLevelKeyboardHookMutex. Asks the hook thread to install or remove the hook and waits
+// for it to finish. The hook thread never waits on the caller, so this cannot deadlock.
+static void RequestLowLevelKeyboardHookStateLocked(bool installed) {
+    s_lowLevelHookDesiredInstalled.store(installed, std::memory_order_release);
+    if (!EnsureLowLevelKeyboardHookThreadStartedLocked()) return;
+
+    ResetEvent(s_lowLevelHookThreadSyncDoneEvent);
+    if (!PostThreadMessageW(s_lowLevelHookThreadId, kLowLevelHookThreadSyncMessage, 0, 0)) {
+        Log("WARNING: Failed to send a request to the low-level keyboard hook thread.");
+        return;
+    }
+    if (WaitForSingleObject(s_lowLevelHookThreadSyncDoneEvent, kLowLevelHookThreadRequestTimeoutMs) != WAIT_OBJECT_0) {
+        Log("WARNING: Low-level keyboard hook thread did not respond in time.");
+    }
+}
+
 static void EnsureLowLevelKeyboardHookInstalled() {
     if (s_lowLevelKeyboardHook != NULL) return;
     if (g_isShuttingDown.load(std::memory_order_acquire)) return;
@@ -4328,13 +4434,27 @@ static void EnsureLowLevelKeyboardHookInstalled() {
     if (s_lowLevelKeyboardHook != NULL) return;
     if (g_hModule == NULL) return;
 
-    s_lowLevelKeyboardHook = SetWindowsHookExW(WH_KEYBOARD_LL, LowLevelKeyboardProc, g_hModule, 0);
-    if (s_lowLevelKeyboardHook == NULL) {
-        Log("WARNING: Failed to install low-level keyboard hook for deep key rebind suppression.");
-        return;
-    }
+    RequestLowLevelKeyboardHookStateLocked(true);
+}
 
-    LogCategory("init", "Installed low-level keyboard hook for exact modifier tracking and deep key rebind suppression.");
+bool GetLowLevelKeyboardHookState(DWORD& outHookThreadId) {
+    std::lock_guard<std::mutex> lock(s_lowLevelKeyboardHookMutex);
+    outHookThreadId = s_lowLevelHookThreadId;
+    return s_lowLevelKeyboardHook != NULL;
+}
+
+void StopLowLevelKeyboardHookThread() {
+    std::lock_guard<std::mutex> lock(s_lowLevelKeyboardHookMutex);
+    s_lowLevelHookDesiredInstalled.store(false, std::memory_order_release);
+    if (s_lowLevelHookThread == NULL) return;
+
+    // The thread removes the hook as it exits. Bound the wait: at process exit the thread may already be gone,
+    // and under the loader lock it cannot finish exiting, so never block indefinitely here.
+    PostThreadMessageW(s_lowLevelHookThreadId, WM_QUIT, 0, 0);
+    WaitForSingleObject(s_lowLevelHookThread, 200);
+    CloseHandle(s_lowLevelHookThread);
+    s_lowLevelHookThread = NULL;
+    s_lowLevelHookThreadId = 0;
 }
 
 static bool HasDeepSuppressionEligibleEnabledRebind() {
@@ -4436,15 +4556,7 @@ static void UninstallLowLevelKeyboardHook() {
     std::lock_guard<std::mutex> lock(s_lowLevelKeyboardHookMutex);
     if (s_lowLevelKeyboardHook == NULL) return;
 
-    HHOOK hook = s_lowLevelKeyboardHook;
-    s_lowLevelKeyboardHook = NULL;
-
-    if (UnhookWindowsHookEx(hook) == FALSE) {
-        Log("WARNING: Failed to uninstall low-level keyboard hook for deep key rebind suppression.");
-        return;
-    }
-
-    LogCategory("init", "Uninstalled low-level keyboard hook for exact modifier tracking and deep key rebind suppression.");
+    RequestLowLevelKeyboardHookStateLocked(false);
 }
 
 static void UpdateLowLevelKeyboardHookInstalledState() {
@@ -4704,6 +4816,20 @@ size_t GetActiveSyntheticRebindOutputCountForTest() {
 void ResetExactKeyboardMessageStateForTest() { ResetExactKeyboardMessageState(); }
 
 size_t GetUnreboundKeyDownCountForTest() { return s_unreboundKeyDownVks.size(); }
+
+bool CycleLowLevelKeyboardHookForTest(DWORD& outHookThreadId, bool& outInstalled, bool& outRemoved) {
+    std::lock_guard<std::mutex> lock(s_lowLevelKeyboardHookMutex);
+    // The test executable has no DLL module handle; hook from the executable's module instead.
+    const HMODULE previousModule = g_hModule;
+    if (g_hModule == NULL) { g_hModule = GetModuleHandleW(nullptr); }
+    RequestLowLevelKeyboardHookStateLocked(true);
+    outInstalled = s_lowLevelKeyboardHook != NULL;
+    outHookThreadId = s_lowLevelHookThreadId;
+    RequestLowLevelKeyboardHookStateLocked(false);
+    outRemoved = s_lowLevelKeyboardHook == NULL;
+    g_hModule = previousModule;
+    return outInstalled && outRemoved;
+}
 
 void ResetHotkeyRuntimeStateForTest() {
     s_bestMatchKeyCount = 0;
