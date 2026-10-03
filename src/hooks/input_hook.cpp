@@ -2017,7 +2017,11 @@ InputHandlerResult HandleWindowOverlayKeyboard(HWND hWnd, UINT uMsg, WPARAM wPar
     bool imguiWantsKeyboard = g_showGui.load() && g_imguiWantCaptureKeyboard.load(std::memory_order_acquire);
 
     if (!imguiWantsKeyboard) {
-        if (ForwardKeyboardToWindowOverlay(uMsg, wParam, lParam)) { return { true, 1 }; }
+        if (ForwardKeyboardToWindowOverlay(uMsg, wParam, lParam)) {
+            // Also release the key in the game so a key held before the overlay took focus does not stick.
+            if (uMsg == WM_KEYUP || uMsg == WM_SYSKEYUP) { CallWindowProc(g_originalWndProc, hWnd, uMsg, wParam, lParam); }
+            return { true, 1 };
+        }
     }
     return { false, 0 };
 }
