@@ -5666,6 +5666,18 @@ void DrawNativeTextureGrid(const VulkanRenderer::FinalBlitContext& context,
     }
 }
 
+// Toolscreen uploads the font atlas itself (RendererHasTextures is off), so the stock backend never owns
+// an atlas texture. When the atlas replaces its texture, ImGui marks the old one WantDestroy and waits for
+// its TexID to be cleared. Toolscreen retires the matching Vulkan resources in RefreshFontResourcesIfNeeded,
+// so only the CPU-side handle needs clearing here; ImGui then drops the texture on the next NewFrame.
+void ReleaseRetiredToolscreenAtlasTextures() {
+    for (ImTextureData* tex : ImGui::GetPlatformIO().Textures) {
+        if (tex && tex->Status == ImTextureStatus_WantDestroy && tex->BackendUserData == nullptr) {
+            tex->SetTexID(ImTextureID_Invalid);
+        }
+    }
+}
+
 void GenerateImGui(const VulkanRenderer::FinalBlitContext& context, SampledImage* mirrorSource,
                     SampledImage* eyeZoomSource,
                     TimestampFrame* timestampFrame) {
@@ -5695,6 +5707,7 @@ void GenerateImGui(const VulkanRenderer::FinalBlitContext& context, SampledImage
     } else {
         ImGuiInputQueue_DrainToImGui();
     }
+    ReleaseRetiredToolscreenAtlasTextures();
     ImGui::NewFrame();
     g_state.mirrorFragmentPushData.clear();
     g_state.pickerTextureId = mirrorSource
@@ -6424,6 +6437,16 @@ bool RecordVirtualCameraFrame(
     return true;
 }
 
+// Renders draw data while hiding the texture list from the stock backend. Toolscreen owns the font atlas
+// upload, and letting ImGui_ImplVulkan_RenderDrawData service atlas textures made it mark Toolscreen's
+// texture Destroyed without clearing its TexID, which trips ImGui's assert (and corrupts state in release).
+void RenderDrawDataWithoutTextureUpdates(ImDrawData* drawData, VkCommandBuffer commandBuffer) {
+    ImVector<ImTextureData*>* textures = drawData->Textures;
+    drawData->Textures = nullptr;
+    ImGui_ImplVulkan_RenderDrawData(drawData, commandBuffer);
+    drawData->Textures = textures;
+}
+
 bool RecordDrawData(
     const VulkanRenderer::FinalBlitContext& context, VkImageView view,
     ImDrawData* drawData = nullptr) {
@@ -6447,8 +6470,7 @@ bool RecordDrawData(
         context.dispatch->cmdBeginRendering(
             context.commandBuffer, &rendering);
         g_activeImGuiCommandBuffer = context.commandBuffer;
-        ImGui_ImplVulkan_RenderDrawData(
-            drawData, context.commandBuffer);
+        RenderDrawDataWithoutTextureUpdates(drawData, context.commandBuffer);
         g_activeImGuiCommandBuffer = VK_NULL_HANDLE;
         context.dispatch->cmdEndRendering(context.commandBuffer);
         return true;
@@ -6458,8 +6480,7 @@ bool RecordDrawData(
         context.dispatch->cmdBeginRenderingKHR(
             context.commandBuffer, &rendering);
         g_activeImGuiCommandBuffer = context.commandBuffer;
-        ImGui_ImplVulkan_RenderDrawData(
-            drawData, context.commandBuffer);
+        RenderDrawDataWithoutTextureUpdates(drawData, context.commandBuffer);
         g_activeImGuiCommandBuffer = VK_NULL_HANDLE;
         context.dispatch->cmdEndRenderingKHR(context.commandBuffer);
         return true;
