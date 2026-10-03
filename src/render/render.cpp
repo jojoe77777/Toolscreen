@@ -3612,7 +3612,11 @@ static bool SelectEyeZoomCaptureTexture(GLuint preferredTexture, int preferredW,
     return false;
 }
 
+static bool IsEyeZoomDebugLogEnabled() { return g_config.debug.logTextureOps; }
+
 static void LogEyeZoomDebugThrottled(const char* stage, const std::string& message) {
+    if (!IsEyeZoomDebugLogEnabled()) { return; }
+
     struct EyeZoomDebugLogState {
         ULONGLONG lastLogMs = 0;
         std::string lastMessage;
@@ -6261,34 +6265,40 @@ void handleEyeZoomMode(const GLState& s, const EyeZoomConfig& zoomConfig, int fu
     const char* selectedCaptureSource = useSnapshot ? "snapshot" : "none";
 
     if (useSnapshot && !s_eyeZoomSnapshotValid) {
-        LogEyeZoomDebugThrottled("snapshot_state",
-                                 "snapshot requested but invalid tex=" + std::to_string(s_eyeZoomSnapshotTexture) + " size=" +
-                                     std::to_string(s_eyeZoomSnapshotWidth) + "x" + std::to_string(s_eyeZoomSnapshotHeight));
+        if (IsEyeZoomDebugLogEnabled()) {
+            LogEyeZoomDebugThrottled("snapshot_state",
+                                     "snapshot requested but invalid tex=" + std::to_string(s_eyeZoomSnapshotTexture) + " size=" +
+                                         std::to_string(s_eyeZoomSnapshotWidth) + "x" + std::to_string(s_eyeZoomSnapshotHeight));
+        }
         return;
     }
 
     if (!useSnapshot &&
         !SelectEyeZoomCaptureTexture(preferredGameTexture, preferredGameW, preferredGameH, gameTextureToUse, gameTextureW,
                                      gameTextureH, &selectedCaptureSource, true)) {
-        int preferredActualW = 0;
-        int preferredActualH = 0;
-        bool preferredValid =
-            (preferredGameTexture != 0 && preferredGameTexture != UINT_MAX) && IsSampleableTexture2D(preferredGameTexture, &preferredActualW, &preferredActualH);
-        LogEyeZoomDebugThrottled(
-            "source_failure",
-            "no usable source preferredTex=" + std::to_string(preferredGameTexture) + " expected=" +
-                std::to_string(preferredGameW) + "x" + std::to_string(preferredGameH) + " actual=" +
-                std::to_string(preferredActualW) + "x" + std::to_string(preferredActualH) + " preferredValid=" +
-                std::to_string(preferredValid ? 1 : 0));
+        if (IsEyeZoomDebugLogEnabled()) {
+            int preferredActualW = 0;
+            int preferredActualH = 0;
+            bool preferredValid =
+                (preferredGameTexture != 0 && preferredGameTexture != UINT_MAX) && IsSampleableTexture2D(preferredGameTexture, &preferredActualW, &preferredActualH);
+            LogEyeZoomDebugThrottled(
+                "source_failure",
+                "no usable source preferredTex=" + std::to_string(preferredGameTexture) + " expected=" +
+                    std::to_string(preferredGameW) + "x" + std::to_string(preferredGameH) + " actual=" +
+                    std::to_string(preferredActualW) + "x" + std::to_string(preferredActualH) + " preferredValid=" +
+                    std::to_string(preferredValid ? 1 : 0));
+        }
         return;
     }
 
     if (!useSnapshot) {
-        LogEyeZoomDebugThrottled("source_select",
-                                 std::string("selected=") + selectedCaptureSource + " tex=" + std::to_string(gameTextureToUse) +
-                                     " size=" + std::to_string(gameTextureW) + "x" + std::to_string(gameTextureH) +
-                                     " preferredTex=" + std::to_string(preferredGameTexture) + " preferredExpected=" +
-                                     std::to_string(preferredGameW) + "x" + std::to_string(preferredGameH));
+        if (IsEyeZoomDebugLogEnabled()) {
+            LogEyeZoomDebugThrottled("source_select",
+                                     std::string("selected=") + selectedCaptureSource + " tex=" + std::to_string(gameTextureToUse) +
+                                         " size=" + std::to_string(gameTextureW) + "x" + std::to_string(gameTextureH) +
+                                         " preferredTex=" + std::to_string(preferredGameTexture) + " preferredExpected=" +
+                                         std::to_string(preferredGameW) + "x" + std::to_string(preferredGameH));
+        }
     }
 
     glBindFramebuffer(GL_FRAMEBUFFER, s.fb);
@@ -6358,10 +6368,12 @@ void handleEyeZoomMode(const GLState& s, const EyeZoomConfig& zoomConfig, int fu
     if (finalZoomOutputWidth > fullW) finalZoomOutputWidth = fullW;
 
     if (zoomOutputWidth <= 20) {
-        LogEyeZoomDebugThrottled("layout_skip",
-                                 "zoom output width too small width=" + std::to_string(zoomOutputWidth) + " full=" +
-                                     std::to_string(fullW) + "x" + std::to_string(fullH) + " viewportX=" +
-                                     std::to_string(viewportX));
+        if (IsEyeZoomDebugLogEnabled()) {
+            LogEyeZoomDebugThrottled("layout_skip",
+                                     "zoom output width too small width=" + std::to_string(zoomOutputWidth) + " full=" +
+                                         std::to_string(fullW) + "x" + std::to_string(fullH) + " viewportX=" +
+                                         std::to_string(viewportX));
+        }
         return;
     }
     if (finalZoomOutputWidth < 1) { finalZoomOutputWidth = zoomOutputWidth; }
@@ -6416,12 +6428,14 @@ void handleEyeZoomMode(const GLState& s, const EyeZoomConfig& zoomConfig, int fu
     srcRight = (std::min)(texWidth, srcRight);
     srcTop = (std::min)(texHeight, srcTop);
     if (srcRight <= srcLeft || srcTop <= srcBottom) {
-        LogEyeZoomDebugThrottled("source_rect",
-                                 "invalid source rect tex=" + std::to_string(texWidth) + "x" + std::to_string(texHeight) +
-                                     " clone=" + std::to_string(zoomConfig.cloneWidth) + "x" +
-                                     std::to_string(zoomConfig.cloneHeight) + " rect=" + std::to_string(srcLeft) + "," +
-                                     std::to_string(srcBottom) + " -> " + std::to_string(srcRight) + "," +
-                                     std::to_string(srcTop));
+        if (IsEyeZoomDebugLogEnabled()) {
+            LogEyeZoomDebugThrottled("source_rect",
+                                     "invalid source rect tex=" + std::to_string(texWidth) + "x" + std::to_string(texHeight) +
+                                         " clone=" + std::to_string(zoomConfig.cloneWidth) + "x" +
+                                         std::to_string(zoomConfig.cloneHeight) + " rect=" + std::to_string(srcLeft) + "," +
+                                         std::to_string(srcBottom) + " -> " + std::to_string(srcRight) + "," +
+                                         std::to_string(srcTop));
+        }
         return;
     }
 
@@ -6432,15 +6446,17 @@ void handleEyeZoomMode(const GLState& s, const EyeZoomConfig& zoomConfig, int fu
     const int sourcePixelWidth = srcRight - srcLeft;
     const int sourcePixelHeight = srcTop - srcBottom;
 
-    LogEyeZoomDebugThrottled("render_state",
-                             std::string("mode=") + (useSnapshot ? "snapshot" : "live") + " source=" + selectedCaptureSource +
-                                 " tex=" + std::to_string(useSnapshot ? s_eyeZoomSnapshotTexture : gameTextureToUse) +
-                                 " texSize=" + std::to_string(texWidth) + "x" + std::to_string(texHeight) + " srcRect=" +
-                                 std::to_string(srcLeft) + "," + std::to_string(srcBottom) + " -> " +
-                                 std::to_string(srcRight) + "," + std::to_string(srcTop) + " dstRect=" +
-                                 std::to_string(dstLeft) + "," + std::to_string(dstBottom) + " -> " +
-                                 std::to_string(dstRight) + "," + std::to_string(dstTop) + " opacity=" +
-                                 std::to_string(opacity));
+    if (IsEyeZoomDebugLogEnabled()) {
+        LogEyeZoomDebugThrottled("render_state",
+                                 std::string("mode=") + (useSnapshot ? "snapshot" : "live") + " source=" + selectedCaptureSource +
+                                     " tex=" + std::to_string(useSnapshot ? s_eyeZoomSnapshotTexture : gameTextureToUse) +
+                                     " texSize=" + std::to_string(texWidth) + "x" + std::to_string(texHeight) + " srcRect=" +
+                                     std::to_string(srcLeft) + "," + std::to_string(srcBottom) + " -> " +
+                                     std::to_string(srcRight) + "," + std::to_string(srcTop) + " dstRect=" +
+                                     std::to_string(dstLeft) + "," + std::to_string(dstBottom) + " -> " +
+                                     std::to_string(dstRight) + "," + std::to_string(dstTop) + " opacity=" +
+                                     std::to_string(opacity));
+    }
 
 
     auto EnsureEyeZoomSnapshotAllocated = [&]() -> bool {
@@ -6579,11 +6595,13 @@ void handleEyeZoomMode(const GLState& s, const EyeZoomConfig& zoomConfig, int fu
                                          sourcePixelWidth, sourcePixelHeight);
             displayTexture = s_eyeZoomTempTexture;
             displaySourceRect = fullSourceRect;
-            LogEyeZoomDebugThrottled("present_path",
-                                     "target=default_fbo via_temp=1 tempTex=" + std::to_string(s_eyeZoomTempTexture) +
-                                         " tempSize=" + std::to_string(s_eyeZoomTempWidth) + "x" +
-                                         std::to_string(s_eyeZoomTempHeight) + " sourceTex=" +
-                                         std::to_string(gameTextureToUse));
+            if (IsEyeZoomDebugLogEnabled()) {
+                LogEyeZoomDebugThrottled("present_path",
+                                         "target=default_fbo via_temp=1 tempTex=" + std::to_string(s_eyeZoomTempTexture) +
+                                             " tempSize=" + std::to_string(s_eyeZoomTempWidth) + "x" +
+                                             std::to_string(s_eyeZoomTempHeight) + " sourceTex=" +
+                                             std::to_string(gameTextureToUse));
+            }
 
             glBindFramebuffer(GL_FRAMEBUFFER, s.fb);
             if (oglViewport)
@@ -6591,10 +6609,12 @@ void handleEyeZoomMode(const GLState& s, const EyeZoomConfig& zoomConfig, int fu
             else
                 glViewport(0, 0, fullW, fullH);
         } else if (s.fb == 0) {
-            LogEyeZoomDebugThrottled("present_path",
-                                     "target=default_fbo via_temp=0 sourceTex=" + std::to_string(gameTextureToUse) +
-                                         " sourceSize=" + std::to_string(gameTextureW) + "x" +
-                                         std::to_string(gameTextureH));
+            if (IsEyeZoomDebugLogEnabled()) {
+                LogEyeZoomDebugThrottled("present_path",
+                                         "target=default_fbo via_temp=0 sourceTex=" + std::to_string(gameTextureToUse) +
+                                             " sourceSize=" + std::to_string(gameTextureW) + "x" +
+                                             std::to_string(gameTextureH));
+            }
         }
 
         if (opacity < 1.0f) {
@@ -6620,13 +6640,15 @@ void handleEyeZoomMode(const GLState& s, const EyeZoomConfig& zoomConfig, int fu
             s_eyeZoomSnapshotValid = true;
         } else {
             s_eyeZoomSnapshotValid = false;
-            LogEyeZoomDebugThrottled("snapshot_copy_state",
-                                     std::string("snapshot invalidated after copy source=") + selectedCaptureSource + " tex=" +
-                                         std::to_string(displayTexture) + " size=" + std::to_string(zoomOutputWidth) + "x" +
-                                         std::to_string(zoomOutputHeight) + " snapshotTex=" +
-                                         std::to_string(s_eyeZoomSnapshotTexture) + " snapshotSize=" +
-                                         std::to_string(s_eyeZoomSnapshotWidth) + "x" +
-                                         std::to_string(s_eyeZoomSnapshotHeight));
+            if (IsEyeZoomDebugLogEnabled()) {
+                LogEyeZoomDebugThrottled("snapshot_copy_state",
+                                         std::string("snapshot invalidated after copy source=") + selectedCaptureSource + " tex=" +
+                                             std::to_string(displayTexture) + " size=" + std::to_string(zoomOutputWidth) + "x" +
+                                             std::to_string(zoomOutputHeight) + " snapshotTex=" +
+                                             std::to_string(s_eyeZoomSnapshotTexture) + " snapshotSize=" +
+                                             std::to_string(s_eyeZoomSnapshotWidth) + "x" +
+                                             std::to_string(s_eyeZoomSnapshotHeight));
+            }
         }
         glBindFramebuffer(GL_FRAMEBUFFER, s.fb);
         if (oglViewport)
