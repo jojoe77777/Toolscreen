@@ -165,6 +165,24 @@ struct ActiveHoldHotkeyState {
     bool blockKey = false;
 };
 static std::optional<ActiveHoldHotkeyState> s_activeHoldHotkey;
+// How a press-triggered hotkey handled each key-down, so the key-up is not blocked when its key-down reached the game.
+enum class HotkeyKeyDownDisposition : uint8_t { None = 0, Forwarded, Blocked };
+static HotkeyKeyDownDisposition s_hotkeyKeyDownDispositions[256] = {};
+
+static void SetHotkeyKeyDownDisposition(DWORD vk, HotkeyKeyDownDisposition disposition) {
+    if (vk < 256) { s_hotkeyKeyDownDispositions[vk] = disposition; }
+}
+
+static HotkeyKeyDownDisposition TakeHotkeyKeyDownDisposition(DWORD vk) {
+    if (vk >= 256) { return HotkeyKeyDownDisposition::None; }
+    const HotkeyKeyDownDisposition disposition = s_hotkeyKeyDownDispositions[vk];
+    s_hotkeyKeyDownDispositions[vk] = HotkeyKeyDownDisposition::None;
+    return disposition;
+}
+
+static void ResetHotkeyKeyDownDispositions() {
+    for (auto& disposition : s_hotkeyKeyDownDispositions) { disposition = HotkeyKeyDownDisposition::None; }
+}
 static std::unordered_map<uint64_t, UINT> s_activeSyntheticRebindOutputsBySource;
 static std::unordered_map<UINT, size_t> s_activeSyntheticRebindOutputRefCounts;
 static std::mutex s_activeSyntheticRebindOutputsMutex;
@@ -2149,6 +2167,7 @@ InputHandlerResult HandleActivate(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lP
         ResetLowLevelExactModifierState();
         ResetLocalKeyRepeatState(hWnd);
         ReleaseActiveLowLevelRebindKeys(hWnd);
+        ResetHotkeyKeyDownDispositions();
 
         if (auto cs = GetConfigSnapshot(); cs && cs->debug.showHotkeyDebug) {
             Log(std::string("[WINDOW] Window became inactive via ") + focusSource + ".");
@@ -2359,6 +2378,9 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
         vkCode = ResolveEffectiveKeyboardVkForMessage(uMsg, wParam, lParam);
     }
 
+    // A fresh press starts unhandled; a matching press-triggered hotkey records its block/forward decision below.
+    if (isKeyDown && !isAutoRepeatKeyDown) { SetHotkeyKeyDownDisposition(vkCode, HotkeyKeyDownDisposition::None); }
+
     // Even if resolution-change features are unsupported, we must not short-circuit the input pipeline.
     if (!IsResolutionChangeSupported(g_gameVersion)) { return { false, 0 }; }
 
@@ -2529,6 +2551,24 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
 
                 if (hotkey.triggerOnHold) { return handleHoldMode(alt.keys, alt.mode, hotkeyId, blockKey); }
 
+                if (!hotkey.triggerOnRelease) {
+                    if (isKeyDown) {
+                        if (!isAutoRepeatKeyDown) {
+                            SetHotkeyKeyDownDisposition(vkCode, blockKey ? HotkeyKeyDownDisposition::Blocked
+                                                                         : HotkeyKeyDownDisposition::Forwarded);
+                        }
+                    } else {
+                        // Pass the key-up on when its key-down was not blocked, so the game does not see the key stuck.
+                        const HotkeyKeyDownDisposition downDisposition = TakeHotkeyKeyDownDisposition(vkCode);
+                        if (blockKey && !matchedViaRebind && downDisposition != HotkeyKeyDownDisposition::Blocked) {
+                            if (downDisposition == HotkeyKeyDownDisposition::Forwarded) {
+                                return { true, CallWindowProc(g_originalWndProc, hWnd, uMsg, wParam, lParam) };
+                            }
+                            return { false, 0 };
+                        }
+                    }
+                }
+
                 // Handle trigger-on-release invalidation tracking
                 if (hotkey.triggerOnRelease) {
                     if (isKeyDown) {
@@ -2613,6 +2653,24 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
                 if (hotkey.triggerOnHold) {
                     if (currentSecMode.empty()) { currentSecMode = GetHotkeySecondaryMode(hotkeyIdx); }
                     return handleHoldMode(hotkey.keys, currentSecMode, hotkeyId, blockKey);
+                }
+
+                if (!hotkey.triggerOnRelease) {
+                    if (isKeyDown) {
+                        if (!isAutoRepeatKeyDown) {
+                            SetHotkeyKeyDownDisposition(vkCode, blockKey ? HotkeyKeyDownDisposition::Blocked
+                                                                         : HotkeyKeyDownDisposition::Forwarded);
+                        }
+                    } else {
+                        // Pass the key-up on when its key-down was not blocked, so the game does not see the key stuck.
+                        const HotkeyKeyDownDisposition downDisposition = TakeHotkeyKeyDownDisposition(vkCode);
+                        if (blockKey && !matchedViaRebind && downDisposition != HotkeyKeyDownDisposition::Blocked) {
+                            if (downDisposition == HotkeyKeyDownDisposition::Forwarded) {
+                                return { true, CallWindowProc(g_originalWndProc, hWnd, uMsg, wParam, lParam) };
+                            }
+                            return { false, 0 };
+                        }
+                    }
                 }
 
                 if (hotkey.triggerOnRelease) {
@@ -4605,6 +4663,7 @@ void ResetHotkeyRuntimeStateForTest() {
     s_bestMatchKeyCount = 0;
     s_bestMatchKeyCountByMainVk.clear();
     s_activeHoldHotkey.reset();
+    ResetHotkeyKeyDownDispositions();
     s_shiftHotkeyPollState = {};
 }
 
