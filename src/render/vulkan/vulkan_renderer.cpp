@@ -5676,6 +5676,7 @@ void GenerateImGui(const VulkanRenderer::FinalBlitContext& context, SampledImage
     ImGui::SetCurrentContext(obsPass ? g_state.obsImGuiContext : g_state.imguiContext);
     if (!obsPass) {
         ImGui_ImplVulkan_NewFrame();
+        SyncImGuiMouseCursorOwnership();
         ImGui_ImplWin32_NewFrame();
     }
     ImGuiIO& io = ImGui::GetIO();

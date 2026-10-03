@@ -4960,6 +4960,7 @@ static void RenderSameThreadImGui(const SameThreadOverlayState& request, bool re
         {
             PROFILE_SCOPE_CAT("ImGui Backend NewFrame", "ImGui");
             ImGui_ImplOpenGL3_NewFrame();
+            SyncImGuiMouseCursorOwnership();
             ImGui_ImplWin32_NewFrame();
         }
         {

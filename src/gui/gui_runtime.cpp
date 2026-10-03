@@ -452,6 +452,21 @@ void HandleImGuiContextReset() {
     }
 }
 
+// Call on the current ImGui context before ImGui_ImplWin32_NewFrame. ImGui frames also run
+// for overlays while the settings GUI is closed, and the Win32 backend calls
+// SetCursor(IDC_ARROW) whenever its cursor type changes (including the first frame of a
+// new context). With the mouse grabbed in-game that puts a visible arrow on screen.
+// Outside the settings GUI the game owns the cursor, so ImGui must leave it alone.
+void SyncImGuiMouseCursorOwnership() {
+    if (ImGui::GetCurrentContext() == nullptr) { return; }
+    ImGuiIO& io = ImGui::GetIO();
+    if (g_showGui.load(std::memory_order_acquire)) {
+        io.ConfigFlags &= ~ImGuiConfigFlags_NoMouseCursorChange;
+    } else {
+        io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
+    }
+}
+
 void InitializeImGuiContext(HWND hwnd) {
     std::lock_guard<std::recursive_mutex> imguiLock(GetImGuiContextMutex());
     const HGLRC currentGlContext = wglGetCurrentContext();
@@ -508,6 +523,7 @@ static void RenderFullscreenWelcomeToastImGui(float toastOpacity) {
     if (ImGui::GetCurrentContext() == nullptr) { return; }
 
     ImGui_ImplOpenGL3_NewFrame();
+    SyncImGuiMouseCursorOwnership();
     ImGui_ImplWin32_NewFrame();
     SyncImGuiDisplayMetrics(hwnd);
     ApplyDynamicGuiFontRefresh();
@@ -1703,6 +1719,8 @@ void HandleConfigLoadFailed(HDC hDc, BOOL (*oWglSwapBuffers)(HDC)) {
     }
 
     ImGui_ImplOpenGL3_NewFrame();
+    // The config error screen is interactive, so ImGui keeps control of the cursor here.
+    ImGui::GetIO().ConfigFlags &= ~ImGuiConfigFlags_NoMouseCursorChange;
     ImGui_ImplWin32_NewFrame();
     SyncImGuiDisplayMetrics(g_minecraftHwnd.load());
     ImGui::NewFrame();

@@ -51,6 +51,7 @@ void LoadImageAsync(DecodedImageData::Type type, std::string id, std::string pat
 std::string WideToUtf8(const std::wstring& wide_string);
 void HandleImGuiContextReset();
 void InitializeImGuiContext(HWND hwnd);
+void SyncImGuiMouseCursorOwnership();
 std::recursive_mutex& GetImGuiContextMutex();
 void StartSupportersFetch();
 void StopSupportersFetch();
