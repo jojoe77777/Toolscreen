@@ -4102,25 +4102,18 @@ static BOOL SwapBuffersHook_Impl(WGLSWAPBUFFERS next, HDC hDc) {
         Profiler::GetInstance().SetEnabled(showProfiler);
         if (showProfiler) { Profiler::GetInstance().MarkAsRenderThread(); }
 
-        ModeConfig modeToRenderCopy;
-        bool modeFound = false;
-        {
-            const ModeConfig* tempMode = GetModeFromSnapshotOrFallback(frameCfg, desiredModeId);
-            if (!tempMode && g_isTransitioningMode) {
-                tempMode = GetModeFromSnapshotOrFallback(frameCfg, lastFrameModeIdCopy);
-            }
-            if (tempMode) {
-                modeToRenderCopy = *tempMode;
-                modeFound = true;
-            }
+        // Points into frameCfgSnap, which stays alive (and immutable) for the rest of this hook.
+        const ModeConfig* modeToRender = GetModeFromSnapshotOrFallback(frameCfg, desiredModeId);
+        if (!modeToRender && g_isTransitioningMode) {
+            modeToRender = GetModeFromSnapshotOrFallback(frameCfg, lastFrameModeIdCopy);
         }
 
-        if (!modeFound) {
+        if (!modeToRender) {
             Log("ERROR: Could not find mode to render, aborting frame");
             return next(hDc);
         }
 
-        bool isEyeZoom = modeToRenderCopy.id == "EyeZoom";
+        bool isEyeZoom = modeToRender->id == "EyeZoom";
         bool shouldRenderGui = g_showGui.load();
 
         bool isTransitioningFromEyeZoom = false;
@@ -4204,8 +4197,8 @@ static BOOL SwapBuffersHook_Impl(WGLSWAPBUFFERS next, HDC hDc) {
             ProcessPendingDecodedImages();
         }
 
-        int current_gameW = modeToRenderCopy.width;
-        int current_gameH = modeToRenderCopy.height;
+        int current_gameW = modeToRender->width;
+        int current_gameH = modeToRender->height;
 
         g_obsCaptureReady.store(false);
 
@@ -4213,7 +4206,7 @@ static BOOL SwapBuffersHook_Impl(WGLSWAPBUFFERS next, HDC hDc) {
         bool hideAnimOnScreen = frameCfg.hideAnimationsInGame && IsModeTransitionActive();
         {
             PROFILE_SCOPE_CAT("Normal Mode Handling", "Rendering");
-            RenderMode(&modeToRenderCopy, s, current_gameW, current_gameH, hideAnimOnScreen, false);
+            RenderMode(modeToRender, s, current_gameW, current_gameH, hideAnimOnScreen, false);
         }
 
         // All ImGui rendering is handled by render thread (via FrameRenderRequest ImGui state fields)
@@ -4244,7 +4237,7 @@ static BOOL SwapBuffersHook_Impl(WGLSWAPBUFFERS next, HDC hDc) {
         bool sharedObsFrameRendered = false;
         if (shouldRenderSharedObsFrame) {
             PROFILE_SCOPE_CAT("Capture Shared OBS/Virtual Camera Frame", "OBS");
-            sharedObsFrameRendered = RenderSameThreadObsFrame(&modeToRenderCopy, s, current_gameW, current_gameH, false);
+            sharedObsFrameRendered = RenderSameThreadObsFrame(modeToRender, s, current_gameW, current_gameH, false);
         }
         if (shouldRenderVirtualCameraFrame && sharedObsFrameRendered) {
             PROFILE_SCOPE_CAT("Capture Virtual Camera Frame", "VirtualCamera");
