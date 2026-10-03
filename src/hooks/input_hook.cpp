@@ -1431,6 +1431,10 @@ InputHandlerResult HandleSetCursor(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
         return { true, true };
     }
 
+    // Only the client area belongs to the game. Over the title bar and borders, let
+    // DefWindowProc pick the arrow or resize cursor, the same as GLFW and SDL do.
+    if (LOWORD(lParam) != HTCLIENT) { return { false, 0 }; }
+
     const bool isModern = g_gameVersion >= GameVersion(1, 13, 0);
     const bool cursorShouldHide = isModern ? g_nativeCursorGrabbed.load(std::memory_order_acquire) : !IsCursorVisible();
     if (cursorShouldHide && !g_showGui.load()) {

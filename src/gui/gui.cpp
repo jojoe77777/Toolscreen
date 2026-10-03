@@ -2422,9 +2422,11 @@ void CloseSettingsGuiWindow() {
 
     ApplyDeferredGuiCursorModeAfterClose();
 
+    const bool cursorVisibleAfterClose = g_wasCursorVisible.load(std::memory_order_acquire);
     if (ApplyConfineCursorToGameWindow()) {
-        SetCursor(NULL);
-    } else if (!g_wasCursorVisible.load(std::memory_order_acquire)) {
+        // Confining only restricts movement; a menu cursor must stay visible.
+        if (!cursorVisibleAfterClose) { SetCursor(NULL); }
+    } else if (!cursorVisibleAfterClose) {
         RECT clipRect{};
         if (GetWindowClientRectInScreen(hwnd, clipRect)) {
             ClipCursor(&clipRect);

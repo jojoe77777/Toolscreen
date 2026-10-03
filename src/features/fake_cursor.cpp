@@ -3,7 +3,9 @@
 #include "common/utils.h"
 #include "common/gl_overlay.h"
 #include "render/render_backend.h"
+#include <deque>
 #include <filesystem>
+#include <set>
 #include <shared_mutex>
 #include <string>
 #include <vector>
@@ -124,16 +126,40 @@ void InitializeCursorDefinitions() {
     g_cursorDefsInitialized = true;
 }
 
+static void ClearFailedCursorLoads();
+
 void RefreshCursorDefinitions() {
-    std::lock_guard<std::mutex> lock(g_cursorDefsMutex);
-    LogCategory("cursor_textures", "[CursorTextures] RefreshCursorDefinitions starting...");
-    ScanCursorDefinitionsLocked();
-    g_cursorDefsInitialized = true;
+    {
+        std::lock_guard<std::mutex> lock(g_cursorDefsMutex);
+        LogCategory("cursor_textures", "[CursorTextures] RefreshCursorDefinitions starting...");
+        ScanCursorDefinitionsLocked();
+        g_cursorDefsInitialized = true;
+    }
+    // Let files the user replaced or fixed get another load attempt.
+    ClearFailedCursorLoads();
 }
 
 // Global cursor list and mutex
-std::vector<CursorData> g_cursorList;
+std::deque<CursorData> g_cursorList;
 std::mutex g_cursorListMutex;
+
+// (path, size) pairs whose load failed. GetSelectedCursor runs on every WM_SETCURSOR,
+// so without this a broken cursor file is re-read from disk on every mouse move.
+// Guarded by g_cursorListMutex and cleared by RefreshCursorDefinitions.
+static std::set<std::pair<std::wstring, int>> s_failedCursorLoads;
+static std::string s_lastFallbackLogKey;
+
+static void ClearFailedCursorLoads() {
+    std::lock_guard<std::mutex> lock(g_cursorListMutex);
+    s_failedCursorLoads.clear();
+    s_lastFallbackLogKey.clear();
+}
+
+// A load attempted before the OpenGL context is current fails only because glGenTextures
+// returns 0; remembering that failure would disable the cursor for the whole session.
+static bool CanCacheCursorLoadFailure() {
+    return GetRenderBackend() == RenderBackend::Vulkan || wglGetCurrentContext() != nullptr;
+}
 
 static void ComputeCursorContentBounds(CursorData& outData, const std::vector<unsigned char>& pixels,
                                        const std::vector<unsigned char>* invertPixels, int width, int height) {
@@ -544,6 +570,10 @@ static bool LoadSingleCursor(const std::wstring& path, UINT loadType, int size, 
     glGenTextures(1, &outData.texture);
     if (outData.texture == 0) {
         LogCategory("cursor_textures", "[CursorTextures] ERROR: glGenTextures returned 0 - OpenGL context may not be valid");
+        if (outData.invertMaskTexture) {
+            glDeleteTextures(1, &outData.invertMaskTexture);
+            outData.invertMaskTexture = 0;
+        }
         DestroyCursorOrIcon(outData.hCursor, outData.loadType);
         outData.hCursor = nullptr;
         return false;
@@ -643,6 +673,7 @@ const CursorData* LoadOrFindCursor(const std::wstring& path, UINT loadType, int 
                 return &cursor;
             }
         }
+        if (s_failedCursorLoads.count({ path, size }) != 0) { return nullptr; }
     }
 
     LogCategory("cursor_textures", "[CursorTextures] Loading cursor on-demand: " + pathStr + " at size " + std::to_string(size));
@@ -655,6 +686,10 @@ const CursorData* LoadOrFindCursor(const std::wstring& path, UINT loadType, int 
         return &g_cursorList.back();
     } else {
         LogCategory("cursor_textures", "[CursorTextures] ERROR: Failed to load cursor on-demand: " + pathStr);
+        if (CanCacheCursorLoadFailure()) {
+            std::lock_guard<std::mutex> lock(g_cursorListMutex);
+            s_failedCursorLoads.insert({ path, size });
+        }
         return nullptr;
     }
 }
@@ -876,7 +911,13 @@ static bool CreateTextureFromHandle(HCURSOR hCursor, CursorData& outData) {
 
     while (glGetError() != GL_NO_ERROR) {}
     glGenTextures(1, &outData.texture);
-    if (outData.texture == 0) { return false; }
+    if (outData.texture == 0) {
+        if (outData.invertMaskTexture) {
+            glDeleteTextures(1, &outData.invertMaskTexture);
+            outData.invertMaskTexture = 0;
+        }
+        return false;
+    }
 
     BindTextureDirect(GL_TEXTURE_2D, outData.texture);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
@@ -1002,34 +1043,41 @@ const CursorData* GetSelectedCursor(const std::string& gameState, int size) {
     UINT loadType = IMAGE_CURSOR;
     GetCursorPathByName(selectedCursorName, cursorPath, loadType);
 
-    const CursorData* cursorData = FindCursor(cursorPath, selectedSize);
-    if (!cursorData && !cursorPath.empty()) {
-        cursorData =
-            LoadOrFindCursor(cursorPath, loadType, selectedSize);
-    }
+    // LoadOrFindCursor checks the cache first and loads with the definition's own
+    // load type, so a separate FindCursor pass would only repeat a failed load.
+    const CursorData* cursorData = cursorPath.empty() ? nullptr : LoadOrFindCursor(cursorPath, loadType, selectedSize);
     if (cursorData) { return cursorData; }
-
-    Log("[GetSelectedCursor] Cursor '" + selectedCursorName + "' not found at size " + std::to_string(selectedSize) + ", trying fallback");
 
     {
         std::lock_guard<std::mutex> lock(g_cursorListMutex);
+        // This runs on every WM_SETCURSOR, so log the fallback once per missing cursor.
+        const std::string fallbackLogKey = selectedCursorName + "@" + std::to_string(selectedSize);
+        const bool shouldLog = fallbackLogKey != s_lastFallbackLogKey;
+        s_lastFallbackLogKey = fallbackLogKey;
+        if (shouldLog) {
+            Log("[GetSelectedCursor] Cursor '" + selectedCursorName + "' not found at size " + std::to_string(selectedSize) +
+                ", trying fallback");
+        }
+
         for (const auto& cursor : g_cursorList) {
             if (cursor.size == selectedSize &&
                 (cursor.texture != 0 || !cursor.rgbaPixels.empty())) {
-                Log("[GetSelectedCursor] Fallback: using cursor from " + WideToUtf8(cursor.filePath));
+                if (shouldLog) { Log("[GetSelectedCursor] Fallback: using cursor from " + WideToUtf8(cursor.filePath)); }
                 return &cursor;
             }
         }
         for (const auto& cursor : g_cursorList) {
             if (cursor.texture != 0 || !cursor.rgbaPixels.empty()) {
-                Log("[GetSelectedCursor] Fallback: using cursor from " + WideToUtf8(cursor.filePath) + " at size " +
-                    std::to_string(cursor.size));
+                if (shouldLog) {
+                    Log("[GetSelectedCursor] Fallback: using cursor from " + WideToUtf8(cursor.filePath) + " at size " +
+                        std::to_string(cursor.size));
+                }
                 return &cursor;
             }
         }
-    }
 
-    Log("[GetSelectedCursor] No fallback cursor available, rendering nothing");
+        if (shouldLog) { Log("[GetSelectedCursor] No fallback cursor available, rendering nothing"); }
+    }
     return nullptr;
 }
 

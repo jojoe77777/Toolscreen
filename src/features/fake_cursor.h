@@ -4,6 +4,7 @@
 #define GLEW_STATIC
 #endif
 #include <GL/glew.h>
+#include <deque>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -33,7 +34,9 @@ struct CursorData {
     std::vector<unsigned char> invertRgbaPixels;
 };
 
-extern std::vector<CursorData> g_cursorList;
+// std::deque keeps element addresses stable across push_back, so the
+// CursorData pointers handed out below stay valid while other threads load more.
+extern std::deque<CursorData> g_cursorList;
 extern std::mutex g_cursorListMutex;
 
 void LoadCursorTextures();
