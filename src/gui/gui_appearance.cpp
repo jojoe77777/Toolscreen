@@ -2,6 +2,7 @@
 
 #include "config/config_toml.h"
 
+#include <atomic>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -447,6 +448,14 @@ void SaveTheme() {
         }
         Log("Saved theme to theme.toml: " + g_config.appearance.theme);
     } catch (const std::exception& e) { Log("ERROR: Failed to save theme: " + std::string(e.what())); }
+}
+
+static std::atomic<bool> s_deferredThemeSavePending{ false };
+
+void RequestDeferredThemeSave() { s_deferredThemeSavePending.store(true, std::memory_order_release); }
+
+void FlushDeferredThemeSave() {
+    if (s_deferredThemeSavePending.exchange(false, std::memory_order_acq_rel)) { SaveTheme(); }
 }
 
 void LoadTheme() {

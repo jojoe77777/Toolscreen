@@ -115,6 +115,10 @@ bool WriteFileAtomically(const std::wstring& path, const std::function<bool(std:
 
 bool SaveConfigToTomlFile(const Config& config, const std::wstring& path);
 
+// Theme colour edits defer the theme.toml write until the edit finishes (defined in gui_appearance.cpp).
+void RequestDeferredThemeSave();
+void FlushDeferredThemeSave();
+
 bool LoadConfigFromTomlFile(const std::wstring& path, Config& config);
 
 

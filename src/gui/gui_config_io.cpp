@@ -359,6 +359,9 @@ void SaveConfig() {
 void SaveConfigImmediate() {
     PROFILE_SCOPE_CAT("Config Save (Immediate)", "IO Operations");
 
+    // Persist a theme colour edit that never saw its end-of-interaction flush (e.g. GUI closed mid-drag).
+    FlushDeferredThemeSave();
+
     if (s_isConfigSaving.load()) {
         Log("SaveConfigImmediate: Waiting for background save to complete...");
         if (!WaitForConfigSaveIdle(3000)) {
