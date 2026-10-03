@@ -820,9 +820,7 @@ void SwitchProfile(const std::string& newProfileName) {
     {
         std::lock_guard<std::mutex> lock(g_modeIdMutex);
         g_currentModeId = g_config.defaultMode;
-        const int nextIndex = 1 - g_currentModeIdIndex.load(std::memory_order_relaxed);
-        g_modeIdBuffers[nextIndex] = g_config.defaultMode;
-        g_currentModeIdIndex.store(nextIndex, std::memory_order_release);
+        PublishCurrentModeIdBuffer(g_config.defaultMode);
     }
 
     WriteCurrentModeToFile(g_config.defaultMode);

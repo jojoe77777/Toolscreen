@@ -1738,9 +1738,7 @@ bool SwitchToMode(const std::string& newModeId, const std::string& source, bool 
     LogCategory("mode_switch", "[MODE_SWITCH] StartModeTransition completed");
 
     g_currentModeId = newModeId;
-    int nextIndex = 1 - g_currentModeIdIndex.load(std::memory_order_relaxed);
-    g_modeIdBuffers[nextIndex] = newModeId;
-    g_currentModeIdIndex.store(nextIndex, std::memory_order_release);
+    PublishCurrentModeIdBuffer(newModeId);
     LogCategory("mode_switch", "[MODE_SWITCH] Published new active mode after transition setup: " + newModeId);
 
     modeLock.unlock();
@@ -2067,7 +2065,7 @@ bool isWallTitleOrWaiting(const std::string& state) {
 ModeViewportInfo GetCurrentModeViewport_Internal() {
     ModeViewportInfo info;
     // Lock-free read of current mode ID from double-buffer
-    std::string modeId = g_modeIdBuffers[g_currentModeIdIndex.load(std::memory_order_acquire)];
+    std::string modeId = GetPublishedCurrentModeId();
 
     // Use snapshot for thread-safe mode config lookup (called from multiple threads)
     auto vpSnap = GetConfigSnapshot();
@@ -2537,12 +2535,7 @@ DWORD WINAPI FileMonitorThread(LPVOID lpParam) {
             lastWriteTime = curWriteTime;
             haveLastWriteTime = true;
 
-            int currentIdx = g_currentGameStateIndex.load(std::memory_order_acquire);
-            if (g_gameStateBuffers[currentIdx] != *state) {
-                int nextIdx = 1 - currentIdx;
-                g_gameStateBuffers[nextIdx] = *state;
-                g_currentGameStateIndex.store(nextIdx, std::memory_order_release);
-            }
+            PublishGameStateBufferIfChanged(*state);
         }
 
         closeActiveFile();
@@ -3521,7 +3514,7 @@ static void RequestCurrentModeClientResizeSync(HWND hwnd, const char* source) {
     auto cfgSnap = GetConfigSnapshot();
     if (!cfgSnap) { return; }
 
-    const std::string currentModeId = g_modeIdBuffers[g_currentModeIdIndex.load(std::memory_order_acquire)];
+    const std::string currentModeId = GetPublishedCurrentModeId();
     const ModeConfig* mode = GetModeFromSnapshotOrFallback(*cfgSnap, currentModeId);
     if (!mode || mode->width <= 0 || mode->height <= 0) { return; }
 

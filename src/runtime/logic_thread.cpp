@@ -190,7 +190,7 @@ void UpdateActiveMirrorConfigs() {
     }
 
     // Get current mode ID from double-buffer (lock-free)
-    std::string currentModeId = g_modeIdBuffers[g_currentModeIdIndex.load(std::memory_order_acquire)];
+    std::string currentModeId = GetPublishedCurrentModeId();
 
     if (currentModeId == s_lastMirrorConfigModeId && snapVer == s_lastMirrorConfigSnapshotVersion) {
         return;
@@ -436,7 +436,7 @@ void UpdateCachedViewportMode() {
     PROFILE_SCOPE_CAT("LT Viewport Cache", "Logic Thread");
 
     // Read current mode ID from double-buffer (lock-free)
-    std::string currentModeId = g_modeIdBuffers[g_currentModeIdIndex.load(std::memory_order_acquire)];
+    std::string currentModeId = GetPublishedCurrentModeId();
     const uint64_t snapVer = g_configSnapshotVersion.load(std::memory_order_acquire);
 
     // Also force periodic refresh every 60 ticks (~1 second) as a safety net
@@ -519,7 +519,7 @@ void CheckWorldExitReset() {
     PROFILE_SCOPE_CAT("LT World Exit Check", "Logic Thread");
 
     // Get current game state from lock-free buffer
-    std::string currentGameState = g_gameStateBuffers[g_currentGameStateIndex.load(std::memory_order_acquire)];
+    std::string currentGameState = GetPublishedGameState();
     bool isInWorld = (currentGameState.find("inworld") != std::string::npos);
 
     if (s_wasInWorld && !isInWorld) {
@@ -585,7 +585,7 @@ void CheckGameStateReset() {
     if (!IsResolutionChangeSupported(g_gameVersion)) { return; }
 
     // Get current game state from lock-free buffer
-    std::string localGameState = g_gameStateBuffers[g_currentGameStateIndex.load(std::memory_order_acquire)];
+    std::string localGameState = GetPublishedGameState();
 
     if (isWallTitleOrWaiting(localGameState) && !isWallTitleOrWaiting(s_previousGameStateForReset)) {
         auto cfgSnap = GetConfigSnapshot();

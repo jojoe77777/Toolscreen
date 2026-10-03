@@ -793,9 +793,7 @@ void LoadConfig() {
             std::lock_guard<std::mutex> lock(g_modeIdMutex);
             if (g_currentModeId.empty()) {
                 g_currentModeId = g_config.defaultMode;
-                int nextIndex = 1 - g_currentModeIdIndex.load(std::memory_order_relaxed);
-                g_modeIdBuffers[nextIndex] = g_config.defaultMode;
-                g_currentModeIdIndex.store(nextIndex, std::memory_order_release);
+                PublishCurrentModeIdBuffer(g_config.defaultMode);
             }
         }
 

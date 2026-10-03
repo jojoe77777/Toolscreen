@@ -100,9 +100,34 @@ std::shared_ptr<const Config> GetConfigSnapshot() {
     return g_configSnapshot.load(std::memory_order_acquire);
 }
 
+// Guards the published mode-ID and game-state double buffers. Readers copy under a shared lock so a
+// writer can never reassign a buffer string while another thread is still copying it.
+static std::shared_mutex g_publishedStateBuffersLock;
+
 std::string GetPublishedCurrentModeId() {
-    const int index = g_currentModeIdIndex.load(std::memory_order_acquire);
-    return g_modeIdBuffers[index];
+    std::shared_lock<std::shared_mutex> lock(g_publishedStateBuffersLock);
+    return g_modeIdBuffers[g_currentModeIdIndex.load(std::memory_order_acquire)];
+}
+
+void PublishCurrentModeIdBuffer(const std::string& modeId) {
+    std::unique_lock<std::shared_mutex> lock(g_publishedStateBuffersLock);
+    const int nextIndex = 1 - g_currentModeIdIndex.load(std::memory_order_relaxed);
+    g_modeIdBuffers[nextIndex] = modeId;
+    g_currentModeIdIndex.store(nextIndex, std::memory_order_release);
+}
+
+std::string GetPublishedGameState() {
+    std::shared_lock<std::shared_mutex> lock(g_publishedStateBuffersLock);
+    return g_gameStateBuffers[g_currentGameStateIndex.load(std::memory_order_acquire)];
+}
+
+void PublishGameStateBufferIfChanged(const std::string& state) {
+    std::unique_lock<std::shared_mutex> lock(g_publishedStateBuffersLock);
+    const int currentIdx = g_currentGameStateIndex.load(std::memory_order_relaxed);
+    if (g_gameStateBuffers[currentIdx] == state) { return; }
+    const int nextIdx = 1 - currentIdx;
+    g_gameStateBuffers[nextIdx] = state;
+    g_currentGameStateIndex.store(nextIdx, std::memory_order_release);
 }
 
 // HOTKEY SECONDARY MODE STATE - Thread-safe runtime state separated from Config
@@ -1518,7 +1543,7 @@ static HCURSOR SetCursorHook_Impl(SETCURSORPROC next, HCURSOR hCursor) {
 
     if (g_gameVersion >= GameVersion(1, 13, 0)) {
         if (hCursor != NULL && !g_nativeCursorGrabbed.load(std::memory_order_acquire)) {
-            const std::string localGameState = g_gameStateBuffers[g_currentGameStateIndex.load(std::memory_order_acquire)];
+            const std::string localGameState = GetPublishedGameState();
             const CursorTextures::CursorData* cursorData = CursorTextures::GetSelectedCursor(localGameState, 64);
             if (cursorData && cursorData->hCursor) { return next(cursorData->hCursor); }
         }
@@ -1526,7 +1551,7 @@ static HCURSOR SetCursorHook_Impl(SETCURSORPROC next, HCURSOR hCursor) {
     }
 
     if (g_showGui.load()) {
-        const std::string localGameState = g_gameStateBuffers[g_currentGameStateIndex.load(std::memory_order_acquire)];
+        const std::string localGameState = GetPublishedGameState();
         const CursorTextures::CursorData* cursorData = CursorTextures::GetSelectedCursor(localGameState, 64);
         if (cursorData && cursorData->hCursor) { return next(cursorData->hCursor); }
     }
@@ -1667,8 +1692,7 @@ static bool GetLatestViewportForHook(int& outModeW, int& outModeH, bool& outStre
     ViewportHookCache& s_cache = GetViewportHookCache();
 
     const uint64_t configVersion = g_configSnapshotVersion.load(std::memory_order_acquire);
-    const int modeIdx = g_currentModeIdIndex.load(std::memory_order_acquire);
-    const std::string& currentModeId = g_modeIdBuffers[modeIdx];
+    const std::string currentModeId = GetPublishedCurrentModeId();
 
     const int screenW = (std::max)(1, GetCachedWindowWidth());
     const int screenH = (std::max)(1, GetCachedWindowHeight());
@@ -2799,7 +2823,7 @@ static void ReplayPendingGlfwResizeCallbacksOnWindowThread(HWND hwnd) {
 
 void hkglfwSetCursor(void* window, void* cursor) {
     if (cursor != nullptr && g_gameVersion >= GameVersion(1, 13, 0) && !g_nativeCursorGrabbed.load(std::memory_order_acquire)) {
-        const std::string localGameState = g_gameStateBuffers[g_currentGameStateIndex.load(std::memory_order_acquire)];
+        const std::string localGameState = GetPublishedGameState();
         const CursorTextures::CursorData* cursorData = CursorTextures::GetSelectedCursor(localGameState, 64);
         if (cursorData && cursorData->hCursor) {
             SetCursor(cursorData->hCursor);
@@ -3258,7 +3282,7 @@ static UINT GetRawInputDataHook_Impl(GETRAWINPUTDATAPROC next, HRAWINPUT hRawInp
             if (transitionSnap.active) {
                 modeId = transitionSnap.toModeId;
             } else {
-                modeId = g_modeIdBuffers[g_currentModeIdIndex.load(std::memory_order_acquire)];
+                modeId = GetPublishedCurrentModeId();
             }
 
             auto inputCfgSnap = GetConfigSnapshot();
@@ -4045,7 +4069,7 @@ static BOOL SwapBuffersHook_Impl(WGLSWAPBUFFERS next, HDC hDc) {
         }
 
         // Lock-free read of current mode ID from double-buffer
-        std::string desiredModeId = g_modeIdBuffers[g_currentModeIdIndex.load(std::memory_order_acquire)];
+        std::string desiredModeId = GetPublishedCurrentModeId();
 
         // Lock-free read of last frame mode ID from double-buffer
         std::string lastFrameModeIdCopy = g_lastFrameModeIdBuffers[g_lastFrameModeIdIndex.load(std::memory_order_acquire)];

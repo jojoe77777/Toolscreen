@@ -1173,6 +1173,11 @@ std::shared_ptr<const Config> GetConfigSnapshot();
 // Lock-free read of the published current mode id.
 // Render/input readers should prefer this over reading g_currentModeId directly.
 std::string GetPublishedCurrentModeId();
+// Publishes a new active mode ID to the lock-guarded double buffer read by GetPublishedCurrentModeId().
+void PublishCurrentModeIdBuffer(const std::string& modeId);
+// Copies the latest published game state (e.g. "inworld,unpaused").
+std::string GetPublishedGameState();
+void PublishGameStateBufferIfChanged(const std::string& state);
 
 // HOTKEY SECONDARY MODE STATE (separated from Config for thread safety)
 // state mutated by input_hook and logic_thread while Config is read elsewhere.

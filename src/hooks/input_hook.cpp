@@ -1119,7 +1119,7 @@ static void ResendCurrentModeWmSize(HWND hWnd, const char* source) {
     auto cfgSnap = GetConfigSnapshot();
     if (!cfgSnap) { return; }
 
-    const std::string currentModeId = g_modeIdBuffers[g_currentModeIdIndex.load(std::memory_order_acquire)];
+    const std::string currentModeId = GetPublishedCurrentModeId();
     const ModeConfig* mode = GetModeFromSnapshotOrFallback(*cfgSnap, currentModeId);
     if (!mode || mode->width <= 0 || mode->height <= 0) { return; }
 
@@ -1417,7 +1417,7 @@ static HCURSOR ResolveForcedVisibleGuiCursor(const std::string& gameState) {
 }
 
 static std::string CurrentGameStateForCursor() {
-    return g_gameStateBuffers[g_currentGameStateIndex.load(std::memory_order_acquire)];
+    return GetPublishedGameState();
 }
 
 InputHandlerResult HandleSetCursor(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, const std::string& gameState) {
@@ -2668,7 +2668,7 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
                     }
 
                     // Lock-free read of current mode ID from double-buffer
-                    std::string current = g_modeIdBuffers[g_currentModeIdIndex.load(std::memory_order_acquire)];
+                    std::string current = GetPublishedCurrentModeId();
                     std::string targetMode;
 
                     if (currentSecMode.empty()) {
@@ -2840,7 +2840,7 @@ InputHandlerResult HandleMouseCoordinateTranslationPhase(HWND hWnd, UINT uMsg, W
     if (clientW <= 0 || clientH <= 0) { return { false, 0 }; }
 
     ModeViewportInfo geo;
-    const std::string currentModeId = g_modeIdBuffers[g_currentModeIdIndex.load(std::memory_order_acquire)];
+    const std::string currentModeId = GetPublishedCurrentModeId();
     auto cfgSnap = GetConfigSnapshot();
     const ModeConfig* currentMode = cfgSnap ? GetModeFromSnapshotOrFallback(*cfgSnap, currentModeId) : nullptr;
     const bool fullscreenMode = currentMode && EqualsIgnoreCase(currentMode->id, "Fullscreen");
@@ -5602,8 +5602,8 @@ static InputHandlerResult DispatchSyntheticShiftHotkeyEvent(HWND hWnd, DWORD vkC
     result = HandleGuiToggle(hWnd, uMsg, static_cast<WPARAM>(vkCode), lParam);
     if (result.consumed) return result;
 
-    const std::string currentModeId = g_modeIdBuffers[g_currentModeIdIndex.load(std::memory_order_acquire)];
-    const std::string localGameState = g_gameStateBuffers[g_currentGameStateIndex.load(std::memory_order_acquire)];
+    const std::string currentModeId = GetPublishedCurrentModeId();
+    const std::string localGameState = GetPublishedGameState();
     return HandleHotkeys(hWnd, uMsg, static_cast<WPARAM>(vkCode), lParam, currentModeId, localGameState);
 }
 
@@ -5799,7 +5799,7 @@ LRESULT CALLBACK SubclassedWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
     if (result.consumed) return result.result;
 
     if (uMsg == WM_SETCURSOR) {
-        const std::string localGameState = g_gameStateBuffers[g_currentGameStateIndex.load(std::memory_order_acquire)];
+        const std::string localGameState = GetPublishedGameState();
         result = HandleSetCursor(hWnd, uMsg, wParam, lParam, localGameState);
         if (result.consumed) return result.result;
     }
@@ -5847,8 +5847,8 @@ LRESULT CALLBACK SubclassedWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
     case WM_RBUTTONUP:
     case WM_MBUTTONDOWN:
     case WM_MBUTTONUP: {
-        const std::string currentModeId = g_modeIdBuffers[g_currentModeIdIndex.load(std::memory_order_acquire)];
-        const std::string localGameState = g_gameStateBuffers[g_currentGameStateIndex.load(std::memory_order_acquire)];
+        const std::string currentModeId = GetPublishedCurrentModeId();
+        const std::string localGameState = GetPublishedGameState();
         result = HandleHotkeys(hWnd, uMsg, wParam, lParam, currentModeId, localGameState);
         if (result.consumed) return result.result;
         break;
