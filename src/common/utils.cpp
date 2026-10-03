@@ -2224,9 +2224,22 @@ void LoadImageAsync(DecodedImageData::Type type, std::string id, std::string pat
                     }
                 }
 
+                // stb's own fopen uses the ANSI code page; open via the wide path so non-ASCII paths work.
+                bool stillImageOpenFailed = false;
+                auto loadStillImage = [&]() -> unsigned char* {
+                    FILE* imageFile = nullptr;
+                    if (_wfopen_s(&imageFile, final_path.c_str(), L"rb") != 0 || !imageFile) {
+                        stillImageOpenFailed = true;
+                        return nullptr;
+                    }
+                    unsigned char* result = stbi_load_from_file(imageFile, &w, &h, &c, 4);
+                    fclose(imageFile);
+                    return result;
+                };
+
                 if (!isVideo && isGif) {
                     FILE* f = nullptr;
-                    errno_t err = fopen_s(&f, path_utf8.c_str(), "rb");
+                    errno_t err = _wfopen_s(&f, final_path.c_str(), L"rb");
                     if (err == 0 && f) {
                         fseek(f, 0, SEEK_END);
                         long fileSize = ftell(f);
@@ -2270,10 +2283,10 @@ void LoadImageAsync(DecodedImageData::Type type, std::string id, std::string pat
 
                     if (!data) {
                         frameCount = 0;
-                        data = stbi_load(path_utf8.c_str(), &w, &h, &c, 4);
+                        data = loadStillImage();
                     }
                 } else if (!isVideo) {
-                    data = stbi_load(path_utf8.c_str(), &w, &h, &c, 4);
+                    data = loadStillImage();
                 }
 
                 if (g_isShuttingDown.load()) {
@@ -2367,6 +2380,8 @@ void LoadImageAsync(DecodedImageData::Type type, std::string id, std::string pat
                     std::string reason = "unknown error";
                     if (isVideo) {
                         reason = "MPEG-1 video could not be decoded into the configured cache budget";
+                    } else if (stillImageOpenFailed) {
+                        reason = "can't fopen";
                     } else if (stbi_failure_reason()) {
                         reason = stbi_failure_reason();
                     }
