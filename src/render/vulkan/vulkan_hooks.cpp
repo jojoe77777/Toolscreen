@@ -425,8 +425,6 @@ VKAPI_ATTR void VKAPI_CALL hkDestroyDevice(VkDevice device, const VkAllocationCa
             auto bufferIt = s.commandBuffers.find(item.first);
             return bufferIt == s.commandBuffers.end() || bufferIt->second == device;
         });
-        std::erase_if(s.fences, [&](const auto& item) { return item.second == device; });
-        std::erase_if(s.semaphores, [&](const auto& item) { return item.second == device; });
     });
 }
 
@@ -581,18 +579,13 @@ VKAPI_ATTR VkResult VKAPI_CALL hkCreateImageView(VkDevice device, const VkImageV
     auto snapshot = g_snapshot.load(std::memory_order_acquire);
     const DeviceDispatch* d = FindDevice(snapshot, device);
     if (!d || !d->createImageView) return VK_ERROR_INITIALIZATION_FAILED;
-    VkResult result = d->createImageView(device, info, allocator, view);
-    if (result == VK_SUCCESS && info && view && *view) {
-        UpdateSnapshot([&](TrackingSnapshot& s) { s.imageViews[*view] = info->image; });
-    }
-    return result;
+    return d->createImageView(device, info, allocator, view);
 }
 
 VKAPI_ATTR void VKAPI_CALL hkDestroyImageView(VkDevice device, VkImageView view, const VkAllocationCallbacks* allocator) {
     auto snapshot = g_snapshot.load(std::memory_order_acquire);
     const DeviceDispatch* d = FindDevice(snapshot, device);
     if (d && d->destroyImageView) d->destroyImageView(device, view, allocator);
-    UpdateSnapshot([&](TrackingSnapshot& s) { s.imageViews.erase(view); });
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL hkCreateCommandPool(VkDevice device, const VkCommandPoolCreateInfo* info,
@@ -850,24 +843,21 @@ VKAPI_ATTR void VKAPI_CALL hkCmdBlitImage(VkCommandBuffer commandBuffer, VkImage
     }
 }
 
-#define DEFINE_SYNC_CREATE(kind, Kind, field, mapField) \
+#define DEFINE_SYNC_CREATE(kind, Kind, field) \
 VKAPI_ATTR VkResult VKAPI_CALL hkCreate##Kind(VkDevice device, const Vk##Kind##CreateInfo* info, \
                                                const VkAllocationCallbacks* allocator, Vk##Kind* value) { \
     auto snapshot = g_snapshot.load(std::memory_order_acquire); \
     const DeviceDispatch* d = FindDevice(snapshot, device); \
     if (!d || !d->field) return VK_ERROR_INITIALIZATION_FAILED; \
-    VkResult result = d->field(device, info, allocator, value); \
-    if (result == VK_SUCCESS && value && *value) UpdateSnapshot([&](TrackingSnapshot& s) { s.mapField[*value] = device; }); \
-    return result; \
+    return d->field(device, info, allocator, value); \
 } \
 VKAPI_ATTR void VKAPI_CALL hkDestroy##Kind(VkDevice device, Vk##Kind value, const VkAllocationCallbacks* allocator) { \
     auto snapshot = g_snapshot.load(std::memory_order_acquire); \
     const DeviceDispatch* d = FindDevice(snapshot, device); \
     if (d && d->destroy##Kind) d->destroy##Kind(device, value, allocator); \
-    UpdateSnapshot([&](TrackingSnapshot& s) { s.mapField.erase(value); }); \
 }
-DEFINE_SYNC_CREATE(fence, Fence, createFence, fences)
-DEFINE_SYNC_CREATE(semaphore, Semaphore, createSemaphore, semaphores)
+DEFINE_SYNC_CREATE(fence, Fence, createFence)
+DEFINE_SYNC_CREATE(semaphore, Semaphore, createSemaphore)
 #undef DEFINE_SYNC_CREATE
 
 } // namespace

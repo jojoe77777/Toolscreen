@@ -125,14 +125,11 @@ struct TrackingSnapshot {
     std::unordered_map<VkImage, ImageMetadata> images;
     std::unordered_map<VkSwapchainKHR, SwapchainMetadata> swapchains;
     std::unordered_map<VkSurfaceKHR, SurfaceMetadata> surfaces;
-    std::unordered_map<VkImageView, VkImage> imageViews;
     std::unordered_map<VkQueue, QueueMetadata> queues;
     std::unordered_map<VkCommandPool, VkDevice> commandPools;
     std::unordered_map<VkCommandPool, uint32_t> commandPoolFamilies;
     std::unordered_map<VkCommandBuffer, VkDevice> commandBuffers;
     std::unordered_map<VkCommandBuffer, uint32_t> commandBufferFamilies;
-    std::unordered_map<VkFence, VkDevice> fences;
-    std::unordered_map<VkSemaphore, VkDevice> semaphores;
 };
 
 std::shared_ptr<const TrackingSnapshot> GetSnapshot();
