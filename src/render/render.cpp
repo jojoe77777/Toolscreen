@@ -2389,6 +2389,7 @@ struct PixelStoreStateGuard {
     GLint unpackSkipRows = 0;
     GLint packAlignment = 0;
     GLint unpackAlignment = 0;
+    GLint unpackBuffer = 0;
 
     PixelStoreStateGuard() {
         glGetIntegerv(GL_UNPACK_ROW_LENGTH, &unpackRowLength);
@@ -2396,6 +2397,9 @@ struct PixelStoreStateGuard {
         glGetIntegerv(GL_UNPACK_SKIP_ROWS, &unpackSkipRows);
         glGetIntegerv(GL_PACK_ALIGNMENT, &packAlignment);
         glGetIntegerv(GL_UNPACK_ALIGNMENT, &unpackAlignment);
+        glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &unpackBuffer);
+        // Uploads under this guard source client memory; a bound unpack PBO would reinterpret the pointer as an offset.
+        if (unpackBuffer != 0) { glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0); }
     }
 
     ~PixelStoreStateGuard() {
@@ -2404,6 +2408,7 @@ struct PixelStoreStateGuard {
         glPixelStorei(GL_UNPACK_SKIP_ROWS, unpackSkipRows);
         glPixelStorei(GL_PACK_ALIGNMENT, packAlignment);
         glPixelStorei(GL_UNPACK_ALIGNMENT, unpackAlignment);
+        if (unpackBuffer != 0) { glBindBuffer(GL_PIXEL_UNPACK_BUFFER, static_cast<GLuint>(unpackBuffer)); }
     }
 };
 
