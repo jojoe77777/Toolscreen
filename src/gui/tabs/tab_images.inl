@@ -88,6 +88,16 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.images"))) {
                         for (auto& mode : g_config.modes) {
                             RenameModeSource(mode, ModeSourceType::Image, oldImageName, img.name);
                         }
+                        // Render looks images up by name; re-key the loaded texture so it stays visible.
+                        {
+                            std::lock_guard<std::mutex> imageLock(g_userImagesMutex);
+                            auto it = g_userImages.find(oldImageName);
+                            if (it != g_userImages.end() && g_userImages.find(img.name) == g_userImages.end()) {
+                                auto node = g_userImages.extract(it);
+                                node.key() = img.name;
+                                g_userImages.insert(std::move(node));
+                            }
+                        }
                     }
                 } else {
                     img.name = oldImageName;

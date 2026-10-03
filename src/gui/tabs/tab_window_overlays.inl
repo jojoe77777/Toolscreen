@@ -62,6 +62,16 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.window_overlays"))) {
                         for (auto& mode : g_config.modes) {
                             RenameModeSource(mode, ModeSourceType::WindowOverlay, oldOverlayName, overlay.name);
                         }
+                        // Render and capture look overlays up by name; re-key the cache entry so it stays visible.
+                        {
+                            std::lock_guard<std::mutex> cacheLock(g_windowOverlayCacheMutex);
+                            auto it = g_windowOverlayCache.find(oldOverlayName);
+                            if (it != g_windowOverlayCache.end() && g_windowOverlayCache.find(overlay.name) == g_windowOverlayCache.end()) {
+                                auto node = g_windowOverlayCache.extract(it);
+                                node.key() = overlay.name;
+                                g_windowOverlayCache.insert(std::move(node));
+                            }
+                        }
                     }
                 } else {
                     overlay.name = oldOverlayName;
