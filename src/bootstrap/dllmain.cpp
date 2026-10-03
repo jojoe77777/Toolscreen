@@ -1442,6 +1442,11 @@ using SDLGETWINDOWSIZE = bool (*)(void* window, int* w, int* h);
 static SDLPUSHEVENT sdlPushEventProc = nullptr;
 static SDLGETWINDOWID sdlGetWindowIdProc = nullptr;
 static SDLGETWINDOWSIZE sdlGetWindowSizeProc = nullptr;
+using SDLEVENTFILTER = bool (*)(void* userdata, void* event);
+using SDLSETEVENTFILTER = void (*)(SDLEVENTFILTER filter, void* userdata);
+using SDLGETEVENTFILTER = bool (*)(SDLEVENTFILTER* filter, void** userdata);
+static SDLEVENTFILTER g_previousSdlEventFilter = nullptr;
+static void* g_previousSdlEventFilterUserdata = nullptr;
 static bool ApplySdlRelativeMouseMode_Impl(SDLSETWINDOWRELATIVEMOUSEMODE next, void* window, bool enabled);
 
 struct SdlWindowState {
@@ -2939,6 +2944,52 @@ bool hkSdlSetWindowRelativeMouseMode(void* window, bool enabled) {
     return ApplySdlRelativeMouseMode_Impl(oSdlSetWindowRelativeMouseMode, window, enabled);
 }
 
+// While the settings GUI is open the game must not see input. For GLFW that
+// happens in the window procedure, but SDL3's relative mouse mode reads raw
+// input on its own thread and never touches the game window's messages. Drop
+// input at the SDL event queue instead, which every SDL input path feeds.
+// Releases still pass so keys and buttons held when the GUI opens do not stick.
+static bool ShouldBlockSdlEventWhileGuiOpen(uint32_t type) {
+    switch (type) {
+    case 0x300: // SDL_EVENT_KEY_DOWN
+    case 0x302: // SDL_EVENT_TEXT_EDITING
+    case 0x303: // SDL_EVENT_TEXT_INPUT
+    case 0x307: // SDL_EVENT_TEXT_EDITING_CANDIDATES
+    case 0x400: // SDL_EVENT_MOUSE_MOTION
+    case 0x401: // SDL_EVENT_MOUSE_BUTTON_DOWN
+    case 0x403: // SDL_EVENT_MOUSE_WHEEL
+        return true;
+    default:
+        return false;
+    }
+}
+
+// Runs on whichever thread queues the event, including SDL's raw input thread.
+static bool ToolscreenSdlEventFilter(void* userdata, void* event) {
+    if (event && g_showGui.load(std::memory_order_acquire) &&
+        ShouldBlockSdlEventWhileGuiOpen(*static_cast<const uint32_t*>(event))) {
+        return false;
+    }
+    return g_previousSdlEventFilter ? g_previousSdlEventFilter(g_previousSdlEventFilterUserdata, event) : true;
+}
+
+static void InstallSdlGuiInputFilter(HMODULE sdl) {
+    const auto setEventFilter = reinterpret_cast<SDLSETEVENTFILTER>(GetProcAddress(sdl, "SDL_SetEventFilter"));
+    const auto getEventFilter = reinterpret_cast<SDLGETEVENTFILTER>(GetProcAddress(sdl, "SDL_GetEventFilter"));
+    if (!setEventFilter) {
+        Log("[WINDOW] SDL3 has no SDL_SetEventFilter; game input will not be blocked behind the settings GUI.");
+        return;
+    }
+    // Chain any filter the game already installed.
+    SDLEVENTFILTER previous = nullptr;
+    void* previousUserdata = nullptr;
+    if (getEventFilter && getEventFilter(&previous, &previousUserdata) && previous != &ToolscreenSdlEventFilter) {
+        g_previousSdlEventFilter = previous;
+        g_previousSdlEventFilterUserdata = previousUserdata;
+    }
+    setEventFilter(&ToolscreenSdlEventFilter, nullptr);
+}
+
 static bool TryInstallSdlHooks(HMODULE sdl) {
     if (!sdl || g_sdlHooksInstalled.load(std::memory_order_acquire)) return g_sdlHooksInstalled.load(std::memory_order_acquire);
     std::lock_guard<std::mutex> lock(g_sdlHookInstallMutex);
@@ -2983,6 +3034,7 @@ static bool TryInstallSdlHooks(HMODULE sdl) {
     if (g_minHookEnabled.load(std::memory_order_acquire)) {
         MH_EnableHook(MH_ALL_HOOKS);
     }
+    InstallSdlGuiInputFilter(sdl);
     g_sdlHooksInstalled.store(true, std::memory_order_release);
     LogCategory("init", "[WINDOW] Installed SDL3 window lifecycle and relative-mouse hooks.");
     return true;
