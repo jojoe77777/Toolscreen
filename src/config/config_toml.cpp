@@ -3515,16 +3515,8 @@ bool SerializeConfigToTomlString(const Config& config, std::string& outToml) {
 
 bool SaveConfigToTomlFile(const Config& config, const std::wstring& path) {
     try {
-        // Do not pass UTF-8 narrow strings to std::ofstream.
-        // Use std::filesystem::path so the wide Win32 APIs are used under the hood.
-        std::ofstream file(std::filesystem::path(path), std::ios::binary | std::ios::trunc);
-        if (!file.is_open()) { return false; }
-        if (!WriteConfigTomlDocument(file, config)) {
-            return false;
-        }
-
-        file.close();
-        return file.good();
+        // Write through a temp file so a crash mid-write cannot leave a truncated config behind.
+        return WriteFileAtomically(path, [&config](std::ostream& out) { return WriteConfigTomlDocument(out, config); });
     } catch (const std::exception& e) {
         Log("ERROR: Failed to save config to TOML: " + std::string(e.what()));
         return false;

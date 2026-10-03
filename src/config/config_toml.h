@@ -2,6 +2,8 @@
 
 
 #include "third_party/toml.hpp"
+#include <functional>
+#include <ostream>
 #include <string>
 #include <vector>
 
@@ -106,6 +108,10 @@ void KeyRebindsConfigFromToml(const toml::table& tbl, KeyRebindsConfig& cfg);
 void AppearanceConfigFromToml(const toml::table& tbl, AppearanceConfig& cfg);
 void ConfigFromToml(const toml::table& tbl, Config& config);
 
+
+// Writes to a temp file next to `path`, then replaces `path` with it. On failure the temp file is
+// removed and `path` is left untouched.
+bool WriteFileAtomically(const std::wstring& path, const std::function<bool(std::ostream&)>& writeContents);
 
 bool SaveConfigToTomlFile(const Config& config, const std::wstring& path);
 

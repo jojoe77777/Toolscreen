@@ -223,43 +223,18 @@ static bool SaveConfigAtomically(const Config& config, const std::wstring& path)
     std::error_code dirError;
     std::filesystem::create_directories(std::filesystem::path(path).parent_path(), dirError);
 
-    const std::wstring tempPath = MakeTempSiblingPath(path, L".tmp-");
-    if (!SaveConfigToTomlFile(config, tempPath)) {
-        std::error_code cleanupError;
-        std::filesystem::remove(std::filesystem::path(tempPath), cleanupError);
-        return false;
-    }
-
-    if (!ReplacePathAtomically(tempPath, path)) {
-        std::error_code cleanupError;
-        std::filesystem::remove(std::filesystem::path(tempPath), cleanupError);
-        return false;
-    }
-
-    return true;
+    // SaveConfigToTomlFile already writes through a temp file and replaces `path` atomically.
+    return SaveConfigToTomlFile(config, path);
 }
 
 static bool WriteTomlTableAtomically(const toml::table& tbl, const std::wstring& path) {
     std::error_code dirError;
     std::filesystem::create_directories(std::filesystem::path(path).parent_path(), dirError);
 
-    const std::wstring tempPath = MakeTempSiblingPath(path, L".tmp-");
-    {
-        std::ofstream out(std::filesystem::path(tempPath), std::ios::binary | std::ios::trunc);
-        if (!out.is_open()) {
-            return false;
-        }
+    return ::WriteFileAtomically(path, [&tbl](std::ostream& out) {
         out << tbl;
-        out.close();
-    }
-
-    if (!ReplacePathAtomically(tempPath, path)) {
-        std::error_code cleanupError;
-        std::filesystem::remove(std::filesystem::path(tempPath), cleanupError);
-        return false;
-    }
-
-    return true;
+        return true;
+    });
 }
 
 static ProfileMetadata* FindProfileMetadataLocked(const std::string& name) {
@@ -495,6 +470,41 @@ static bool SaveProfileSnapshotLocked(const std::string& name, const Config& con
 }
 
 } // namespace
+
+bool WriteFileAtomically(const std::wstring& path, const std::function<bool(std::ostream&)>& writeContents) {
+    const std::wstring tempPath = MakeTempSiblingPath(path, L".tmp-");
+    const auto removeTempFile = [&tempPath]() {
+        std::error_code cleanupError;
+        std::filesystem::remove(std::filesystem::path(tempPath), cleanupError);
+    };
+
+    try {
+        // Do not pass UTF-8 narrow strings to std::ofstream.
+        // Use std::filesystem::path so the wide Win32 APIs are used under the hood.
+        std::ofstream out(std::filesystem::path(tempPath), std::ios::binary | std::ios::trunc);
+        if (!out.is_open()) {
+            return false;
+        }
+
+        const bool wroteContents = writeContents(out);
+        out.close();
+        // A short write (e.g. disk full) must not replace the existing file.
+        if (!wroteContents || !out.good()) {
+            removeTempFile();
+            return false;
+        }
+    } catch (...) {
+        removeTempFile();
+        throw;
+    }
+
+    if (!ReplacePathAtomically(tempPath, path)) {
+        removeTempFile();
+        return false;
+    }
+
+    return true;
+}
 
 bool IsValidProfileName(const std::string& name) {
     if (name.empty()) return false;

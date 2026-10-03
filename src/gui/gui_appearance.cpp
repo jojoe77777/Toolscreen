@@ -437,13 +437,14 @@ void SaveTheme() {
         }
         tbl.insert_or_assign("customColors", colorsTbl);
 
-        std::ofstream o(std::filesystem::path(themePath), std::ios::binary | std::ios::trunc);
-        if (!o.is_open()) {
-            Log("ERROR: Failed to open theme.toml for writing.");
+        // Write through a temp file so a crash mid-write cannot leave a truncated theme.toml behind.
+        if (!WriteFileAtomically(themePath, [&tbl](std::ostream& o) {
+                o << tbl;
+                return true;
+            })) {
+            Log("ERROR: Failed to write theme.toml.");
             return;
         }
-        o << tbl;
-        o.close();
         Log("Saved theme to theme.toml: " + g_config.appearance.theme);
     } catch (const std::exception& e) { Log("ERROR: Failed to save theme: " + std::string(e.what())); }
 }
