@@ -591,6 +591,9 @@ void LoadConfig() {
         normalizeConfigFontPaths(g_config, g_toolscreenPath);
         Log("Loaded config from TOML file.");
 
+        // Freshly loaded config is clean; the repair/migration steps below re-mark it dirty so their fixes get saved.
+        g_configIsDirty = false;
+
         int screenWidth = GetCachedWindowWidth();
         int screenHeight = GetCachedWindowHeight();
         if (screenWidth < 1) screenWidth = 1;
@@ -820,7 +823,6 @@ void LoadConfig() {
             initialMode = g_currentModeId;
         }
         WriteCurrentModeToFile(initialMode);
-        g_configIsDirty = false;
         g_configLoadFailed = false;
         {
             std::lock_guard<std::mutex> lock(g_configErrorMutex);
