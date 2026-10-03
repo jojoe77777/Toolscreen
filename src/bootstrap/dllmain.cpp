@@ -1436,6 +1436,12 @@ static SDLGETWINDOWFLAGS sdlGetWindowFlagsProc = nullptr;
 static SDLSETWINDOWRELATIVEMOUSEMODE oSdlSetWindowRelativeMouseMode = nullptr;
 static SDLGETWINDOWRELATIVEMOUSEMODE sdlGetWindowRelativeMouseModeProc = nullptr;
 static std::atomic<SDLGLGETCURRENTWINDOW> sdlGlGetCurrentWindowProc{ nullptr };
+using SDLPUSHEVENT = bool (*)(void* event);
+using SDLGETWINDOWID = uint32_t (*)(void* window);
+using SDLGETWINDOWSIZE = bool (*)(void* window, int* w, int* h);
+static SDLPUSHEVENT sdlPushEventProc = nullptr;
+static SDLGETWINDOWID sdlGetWindowIdProc = nullptr;
+static SDLGETWINDOWSIZE sdlGetWindowSizeProc = nullptr;
 static bool ApplySdlRelativeMouseMode_Impl(SDLSETWINDOWRELATIVEMOUSEMODE next, void* window, bool enabled);
 
 struct SdlWindowState {
@@ -2116,34 +2122,37 @@ static bool ShouldRetargetMinecraftBlitFramebuffer(GLint readFBO, GLint drawFBO)
     return drawFBO == 0 && readFBO != 0 && (establishedBlitPath || IsMinecraft26_2FinalOrNewer(g_gameVersion));
 }
 
-static bool GetNamedFramebufferColorAttachmentSize(GLuint framebuffer, int& outWidth, int& outHeight) {
-    struct AttachmentSizeCache {
-        HGLRC context = nullptr;
-        GLuint framebuffer = 0;
-        GLuint texture = 0;
-        uint64_t configVersion = 0;
-        int width = 0;
-        int height = 0;
-    };
-    thread_local AttachmentSizeCache cache;
+static bool GetNamedFramebufferColorAttachmentSize(GLuint framebuffer, int& outWidth, int& outHeight);
 
+// Minecraft 26.2+ presents its main target with source rectangles clamped to the
+// physical window: 26.2 copies the window-sized corner, 26.3 copies
+// min(window, texture) per axis. Once Toolscreen has resized that target to the
+// mode, sample all of it so the mode-sized frame is scaled into its presentation
+// rectangle instead of being cropped.
+static void ExpandMinecraftPresentSourceRect(GLuint readFramebuffer, GLint& srcX0, GLint& srcY0, GLint& srcX1, GLint& srcY1) {
+    if (!IsMinecraft26_2FinalOrNewer(g_gameVersion)) return;
+    if (srcX0 != 0 || srcY0 != 0 || srcX1 <= 0 || srcY1 <= 0) return;
+    int attachmentWidth = 0;
+    int attachmentHeight = 0;
+    if (GetNamedFramebufferColorAttachmentSize(readFramebuffer, attachmentWidth, attachmentHeight)) {
+        srcX1 = attachmentWidth;
+        srcY1 = attachmentHeight;
+    }
+}
+
+// Queried every call: Minecraft 26.x deletes and recreates its main target on
+// resize, and drivers commonly hand the new texture the old name, so a cache
+// keyed on the texture name returns the previous size after a mode switch.
+static bool GetNamedFramebufferColorAttachmentSize(GLuint framebuffer, int& outWidth, int& outHeight) {
     outWidth = 0;
     outHeight = 0;
+    // Minecraft falls back to bind+glBlitFramebuffer without ARB_direct_state_access.
+    if (!glGetNamedFramebufferAttachmentParameteriv || !glGetTextureLevelParameteriv) { return false; }
 
     GLint attachmentName = 0;
     glGetNamedFramebufferAttachmentParameteriv(framebuffer, GL_COLOR_ATTACHMENT0,
                                                 GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &attachmentName);
     if (attachmentName <= 0) { return false; }
-
-    const HGLRC context = wglGetCurrentContext();
-    const uint64_t configVersion = g_configSnapshotVersion.load(std::memory_order_acquire);
-    if (cache.context == context && cache.framebuffer == framebuffer &&
-        cache.texture == static_cast<GLuint>(attachmentName) && cache.configVersion == configVersion &&
-        cache.width > 0 && cache.height > 0) {
-        outWidth = cache.width;
-        outHeight = cache.height;
-        return true;
-    }
 
     GLint attachmentType = GL_NONE;
     glGetNamedFramebufferAttachmentParameteriv(framebuffer, GL_COLOR_ATTACHMENT0,
@@ -2160,12 +2169,6 @@ static bool GetNamedFramebufferColorAttachmentSize(GLuint framebuffer, int& outW
     glGetTextureLevelParameteriv(static_cast<GLuint>(attachmentName), attachmentLevel, GL_TEXTURE_HEIGHT, &textureHeight);
     if (textureWidth <= 0 || textureHeight <= 0) { return false; }
 
-    cache.context = context;
-    cache.framebuffer = framebuffer;
-    cache.texture = static_cast<GLuint>(attachmentName);
-    cache.configVersion = configVersion;
-    cache.width = textureWidth;
-    cache.height = textureHeight;
     outWidth = textureWidth;
     outHeight = textureHeight;
     return true;
@@ -2201,6 +2204,7 @@ static inline void BlitFramebufferHook_Impl(PFNGLBLITFRAMEBUFFERPROC_HOOK next,
         int resolvedDstX1 = 0;
         int resolvedDstY1 = 0;
         if (ResolvePresentedGameBlitRect(resolvedDstX0, resolvedDstY0, resolvedDstX1, resolvedDstY1)) {
+            ExpandMinecraftPresentSourceRect(static_cast<GLuint>(readFBO), srcX0, srcY0, srcX1, srcY1);
             next(srcX0, srcY0, srcX1, srcY1, resolvedDstX0, resolvedDstY0, resolvedDstX1, resolvedDstY1, mask, filter);
             return;
         }
@@ -2947,6 +2951,9 @@ static bool TryInstallSdlHooks(HMODULE sdl) {
         reinterpret_cast<SDLGETWINDOWRELATIVEMOUSEMODE>(GetProcAddress(sdl, "SDL_GetWindowRelativeMouseMode"));
     sdlGlGetCurrentWindowProc.store(reinterpret_cast<SDLGLGETCURRENTWINDOW>(GetProcAddress(sdl, "SDL_GL_GetCurrentWindow")),
                                     std::memory_order_release);
+    sdlPushEventProc = reinterpret_cast<SDLPUSHEVENT>(GetProcAddress(sdl, "SDL_PushEvent"));
+    sdlGetWindowIdProc = reinterpret_cast<SDLGETWINDOWID>(GetProcAddress(sdl, "SDL_GetWindowID"));
+    sdlGetWindowSizeProc = reinterpret_cast<SDLGETWINDOWSIZE>(GetProcAddress(sdl, "SDL_GetWindowSize"));
 
     if (!sdlGetWindowPropertiesProc || !sdlGetPointerPropertyProc) {
         LogCategory("init", "[WINDOW] SDL3 loaded without the Win32 window-property API; waiting for a compatible SDL3 module.");
@@ -3038,6 +3045,99 @@ static void AdoptExistingSdlWindow(HMODULE sdl, HWND hwnd) {
         }
     }
     if (sdlFree) sdlFree(windows);
+}
+
+// SDL3 has no WM_SIZE handling: it learns sizes from GetClientRect on
+// WM_WINDOWPOSCHANGED, and Minecraft 26.x sets its framebuffer size only from
+// SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED. Faking GetClientRect would also change
+// SDL_GetWindowSizeInPixels, which Minecraft uses to size the swapchain, and a
+// Vulkan swapchain must match the real window. So queue the window events
+// directly: the swapchain stays physical while the game renders at the mode size.
+static constexpr uint32_t SDL_EVENT_WINDOW_RESIZED_TYPE = 0x206;
+static constexpr uint32_t SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED_TYPE = 0x207;
+
+// Layout of SDL3's SDL_WindowEvent inside the 128-byte SDL_Event union.
+union SdlWindowEventCompat {
+    struct {
+        uint32_t type;
+        uint32_t reserved;
+        uint64_t timestamp;
+        uint32_t windowID;
+        int32_t data1;
+        int32_t data2;
+    } window;
+    uint8_t padding[128];
+};
+
+// Must run on the SDL window's thread (the subclassed window procedure).
+bool PushSdlGameWindowResize(HWND hwnd, int width, int height, int clientWidth, int clientHeight) {
+    if (!sdlPushEventProc || !sdlGetWindowIdProc || width <= 0 || height <= 0) return false;
+
+    void* window = nullptr;
+    HWND trackedHwnd = NULL;
+    uint64_t generation = 0;
+    bool noApi = false;
+    if (!GetTrackedSdlWindow(window, trackedHwnd, generation, noApi) || trackedHwnd != hwnd) return false;
+
+    // Minecraft's borderless fullscreen window is one pixel wider than the
+    // monitor, and Window.onFramebufferResize subtracts that pixel again.
+    int padding = 0;
+    if ((GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_CAPTION) == 0) {
+        MONITORINFO monitorInfo{ sizeof(monitorInfo) };
+        if (GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &monitorInfo) &&
+            clientWidth == monitorInfo.rcMonitor.right - monitorInfo.rcMonitor.left + 1 &&
+            clientHeight == monitorInfo.rcMonitor.bottom - monitorInfo.rcMonitor.top) {
+            padding = 1;
+        }
+    }
+
+    // SDL_EVENT_WINDOW_RESIZED carries the logical size Minecraft uses to map
+    // mouse coordinates; scale the mode size by the window's pixel density.
+    int logicalWidth = width;
+    int logicalHeight = height;
+    int windowWidth = 0;
+    int windowHeight = 0;
+    if (sdlGetWindowSizeProc && sdlGetWindowSizeProc(window, &windowWidth, &windowHeight) && windowWidth > 0 && windowHeight > 0 &&
+        clientWidth > 0 && clientHeight > 0) {
+        logicalWidth = (std::max)(1, static_cast<int>(std::lround(static_cast<double>(width) * windowWidth / clientWidth)));
+        logicalHeight = (std::max)(1, static_cast<int>(std::lround(static_cast<double>(height) * windowHeight / clientHeight)));
+    }
+
+    // Every framebuffer event makes Minecraft reconfigure its surface (a full
+    // Vulkan swapchain rebuild), so skip repeats that change nothing.
+    struct LastPush {
+        uint64_t generation = 0;
+        int width = 0, height = 0, clientWidth = 0, clientHeight = 0;
+    };
+    static LastPush s_lastPush;
+    if (s_lastPush.generation == generation && s_lastPush.width == width && s_lastPush.height == height &&
+        s_lastPush.clientWidth == clientWidth && s_lastPush.clientHeight == clientHeight) {
+        return true;
+    }
+
+    const uint32_t windowId = sdlGetWindowIdProc(window);
+    if (windowId == 0) return false;
+
+    SdlWindowEventCompat event{};
+    event.window.type = SDL_EVENT_WINDOW_RESIZED_TYPE;
+    event.window.windowID = windowId;
+    event.window.data1 = logicalWidth;
+    event.window.data2 = logicalHeight;
+    const bool resizedQueued = sdlPushEventProc(&event);
+
+    event = {};
+    event.window.type = SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED_TYPE;
+    event.window.windowID = windowId;
+    event.window.data1 = width + padding;
+    event.window.data2 = height;
+    const bool pixelSizeQueued = sdlPushEventProc(&event);
+
+    if (!resizedQueued || !pixelSizeQueued) {
+        Log("[WINDOW] Failed to queue SDL resize events for " + std::to_string(width) + "x" + std::to_string(height) + ".");
+        return false;
+    }
+    s_lastPush = { generation, width, height, clientWidth, clientHeight };
+    return true;
 }
 
 // Top-level window classes that belong to the game itself: GLFW (LWJGL 3),
@@ -3440,20 +3540,7 @@ void WINAPI hkglBlitNamedFramebuffer(GLuint readFramebuffer, GLuint drawFramebuf
     int resolvedDstX1 = 0;
     int resolvedDstY1 = 0;
     if (ResolvePresentedGameBlitRect(resolvedDstX0, resolvedDstY0, resolvedDstX1, resolvedDstY1)) {
-        // Minecraft 26.2's DSA presenter keeps using the physical window size for
-        // both blit rectangles after Toolscreen resizes the offscreen render target.
-        // Sample the complete color attachment so the synthetic-resolution frame is
-        // scaled into the mode's presentation rectangle instead of showing only its
-        // lower-left physical-window-sized portion.
-        if (use26_2Path && srcX0 == dstX0 && srcY0 == dstY0 && srcX1 == dstX1 && srcY1 == dstY1 &&
-            srcX0 == 0 && srcY0 == 0 && srcX1 > 0 && srcY1 > 0) {
-            int attachmentWidth = 0;
-            int attachmentHeight = 0;
-            if (GetNamedFramebufferColorAttachmentSize(readFramebuffer, attachmentWidth, attachmentHeight)) {
-                srcX1 = attachmentWidth;
-                srcY1 = attachmentHeight;
-            }
-        }
+        ExpandMinecraftPresentSourceRect(readFramebuffer, srcX0, srcY0, srcX1, srcY1);
         return oglBlitNamedFramebuffer(readFramebuffer, drawFramebuffer, srcX0, srcY0, srcX1, srcY1, resolvedDstX0, resolvedDstY0,
                                        resolvedDstX1, resolvedDstY1, mask, filter);
     }

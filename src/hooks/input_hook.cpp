@@ -2193,6 +2193,45 @@ InputHandlerResult HandleActivate(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lP
     return { false, 0 };
 }
 
+bool PushSdlGameWindowResize(HWND hwnd, int width, int height, int clientWidth, int clientHeight);
+
+// Minecraft 26.x runs on SDL3, which ignores WM_SIZE. Translate both
+// Toolscreen's posted mode-size WM_SIZE and the OS WM_SIZE that follows a real
+// resize into SDL window events carrying the mode size. Non-SDL windows are
+// rejected inside PushSdlGameWindowResize.
+static void ForwardWmSizeToSdlWindow(HWND hWnd, WPARAM wParam, LPARAM lParam, const std::string& currentModeId) {
+    if (wParam == SIZE_MINIMIZED || !IsResolutionChangeSupported(g_gameVersion)) { return; }
+
+    const int msgW = LOWORD(lParam);
+    const int msgH = HIWORD(lParam);
+    int liveClientW = 0;
+    int liveClientH = 0;
+    if (msgW <= 0 || msgH <= 0 || !TryGetClientSize(hWnd, liveClientW, liveClientH)) { return; }
+
+    int targetW = msgW;
+    int targetH = msgH;
+    if (msgW == liveClientW && msgH == liveClientH) {
+        // A real resize: SDL has just queued the physical size, so follow it
+        // with the current mode's size (mirrors HandleWmSizeModeDimensions).
+        auto cfgSnap = GetConfigSnapshot();
+        const ModeConfig* mode = cfgSnap ? GetModeFromSnapshotOrFallback(*cfgSnap, currentModeId) : nullptr;
+        if (!mode || mode->width <= 0 || mode->height <= 0) { return; }
+        if (EqualsIgnoreCase(mode->id, "Fullscreen")) {
+            targetW = ResolveModeDisplayWidth(*mode, liveClientW, liveClientH);
+            targetH = ResolveModeDisplayHeight(*mode, liveClientW, liveClientH);
+        } else {
+            targetW = mode->width;
+            targetH = mode->height;
+        }
+        if (targetW <= 0 || targetH <= 0) { return; }
+        RememberRequestedWindowClientResize(targetW, targetH);
+    }
+
+    if (PushSdlGameWindowResize(hWnd, targetW, targetH, liveClientW, liveClientH)) {
+        InvalidateTrackedGameTextureId(false, false);
+    }
+}
+
 InputHandlerResult HandleWmSizeModeDimensions(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, const std::string& currentModeId) {
     if (uMsg != WM_SIZE) { return { false, 0 }; }
     PROFILE_SCOPE("HandleWmSizeModeDimensions");
@@ -5786,6 +5825,7 @@ LRESULT CALLBACK SubclassedWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
 
     if (uMsg == WM_SIZE) {
         const std::string currentModeId = g_modeIdBuffers[g_currentModeIdIndex.load(std::memory_order_acquire)];
+        ForwardWmSizeToSdlWindow(hWnd, wParam, lParam, currentModeId);
         result = HandleWmSizeModeDimensions(hWnd, uMsg, wParam, lParam, currentModeId);
         if (result.consumed) return result.result;
     }
