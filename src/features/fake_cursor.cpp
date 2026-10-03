@@ -5,6 +5,7 @@
 #include "render/render_backend.h"
 #include <deque>
 #include <filesystem>
+#include <optional>
 #include <set>
 #include <shared_mutex>
 #include <string>
@@ -29,6 +30,36 @@ static void DestroyCursorOrIcon(HCURSOR handle, UINT loadType) {
         DestroyCursor(handle);
     }
 }
+
+namespace {
+// Saves and restores the pixel-store state we override on the game's GL context.
+struct CursorPixelStoreStateGuard {
+    GLint unpackAlignment = 4;
+    GLint unpackRowLength = 0;
+    GLint unpackSkipRows = 0;
+    GLint unpackSkipPixels = 0;
+    GLint packAlignment = 4;
+
+    CursorPixelStoreStateGuard() {
+        glGetIntegerv(GL_UNPACK_ALIGNMENT, &unpackAlignment);
+        glGetIntegerv(GL_UNPACK_ROW_LENGTH, &unpackRowLength);
+        glGetIntegerv(GL_UNPACK_SKIP_ROWS, &unpackSkipRows);
+        glGetIntegerv(GL_UNPACK_SKIP_PIXELS, &unpackSkipPixels);
+        glGetIntegerv(GL_PACK_ALIGNMENT, &packAlignment);
+    }
+
+    ~CursorPixelStoreStateGuard() {
+        glPixelStorei(GL_UNPACK_ALIGNMENT, unpackAlignment);
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, unpackRowLength);
+        glPixelStorei(GL_UNPACK_SKIP_ROWS, unpackSkipRows);
+        glPixelStorei(GL_UNPACK_SKIP_PIXELS, unpackSkipPixels);
+        glPixelStorei(GL_PACK_ALIGNMENT, packAlignment);
+    }
+
+    CursorPixelStoreStateGuard(const CursorPixelStoreStateGuard&) = delete;
+    CursorPixelStoreStateGuard& operator=(const CursorPixelStoreStateGuard&) = delete;
+};
+} // namespace
 
 struct CursorDef {
     std::string name;
@@ -411,7 +442,9 @@ static bool LoadSingleCursor(const std::wstring& path, UINT loadType, int size, 
 
     const bool createOpenGLTexture =
         GetRenderBackend() != RenderBackend::Vulkan;
+    std::optional<CursorPixelStoreStateGuard> pixelStoreGuard;
     if (createOpenGLTexture) {
+        pixelStoreGuard.emplace();
         glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
         glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
         glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
@@ -805,7 +838,9 @@ static bool CreateTextureFromHandle(HCURSOR hCursor, CursorData& outData) {
 
     const bool createOpenGLTexture =
         GetRenderBackend() != RenderBackend::Vulkan;
+    std::optional<CursorPixelStoreStateGuard> pixelStoreGuard;
     if (createOpenGLTexture) {
+        pixelStoreGuard.emplace();
         glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
         glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
         glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
