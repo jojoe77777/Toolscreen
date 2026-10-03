@@ -1320,7 +1320,6 @@ void DrawOverlayBorder(float nx1, float ny1, float nx2, float ny2, float borderW
     glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(allBorders), allBorders);
     glDrawArrays(GL_TRIANGLES, 0, 24);
 
-                g_vboCapacityBytes = 0;
     if (drawCorners) {
         float cornerSize = borderWidth * 2.5f;
         float cornerSizeH = borderHeight * 2.5f;
