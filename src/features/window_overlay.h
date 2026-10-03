@@ -225,7 +225,7 @@ bool ForwardMouseToWindowOverlay(UINT uMsg, int screenX, int screenY, WPARAM wPa
 
 bool ForwardKeyboardToWindowOverlay(UINT uMsg, WPARAM wParam, LPARAM lParam);
 
-extern std::map<std::string, std::unique_ptr<WindowOverlayCacheEntry>> g_windowOverlayCache;
+extern std::map<std::string, std::shared_ptr<WindowOverlayCacheEntry>> g_windowOverlayCache;
 extern std::mutex g_windowOverlayCacheMutex;
 
 extern std::atomic<std::vector<WindowInfo>*> g_windowListCache;

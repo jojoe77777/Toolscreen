@@ -21,7 +21,7 @@
 #endif
 
 // Global variables for window overlay cache and thread management
-std::map<std::string, std::unique_ptr<WindowOverlayCacheEntry>> g_windowOverlayCache;
+std::map<std::string, std::shared_ptr<WindowOverlayCacheEntry>> g_windowOverlayCache;
 std::mutex g_windowOverlayCacheMutex;
 
 std::atomic<bool> g_stopWindowCaptureThread{ false };
@@ -196,7 +196,7 @@ static void LoadWindowOverlay_Internal(const std::string& overlayId, const Windo
         return;
     }
 
-    auto entry = std::make_unique<WindowOverlayCacheEntry>();
+    auto entry = std::make_shared<WindowOverlayCacheEntry>();
     entry->windowTitle = config.windowTitle;
     entry->windowClass = config.windowClass;
     entry->executableName = config.executableName;
@@ -295,11 +295,11 @@ void UpdateAllWindowOverlays() {
 void UpdateWindowOverlayFPS(const std::string& overlayId, int newFPS) {
     // LOCK-FREE: fps is atomic, so we just need to get the entry pointer safely
     // We use a very brief lock just to get the pointer, then release immediately
-    WindowOverlayCacheEntry* entry = nullptr;
+    std::shared_ptr<WindowOverlayCacheEntry> entry;
     {
         std::lock_guard<std::mutex> lock(g_windowOverlayCacheMutex);
         auto it = g_windowOverlayCache.find(overlayId);
-        if (it != g_windowOverlayCache.end()) { entry = it->second.get(); }
+        if (it != g_windowOverlayCache.end()) { entry = it->second; }
     }
     // Lock released - now we can safely access atomic members
 
@@ -316,11 +316,11 @@ void UpdateWindowOverlayFPS(const std::string& overlayId, int newFPS) {
 void UpdateWindowOverlaySearchInterval(const std::string& overlayId, int newSearchInterval) {
     // LOCK-FREE: searchInterval is atomic, so we just need to get the entry pointer safely
     // We use a very brief lock just to get the pointer, then release immediately
-    WindowOverlayCacheEntry* entry = nullptr;
+    std::shared_ptr<WindowOverlayCacheEntry> entry;
     {
         std::lock_guard<std::mutex> lock(g_windowOverlayCacheMutex);
         auto it = g_windowOverlayCache.find(overlayId);
-        if (it != g_windowOverlayCache.end()) { entry = it->second.get(); }
+        if (it != g_windowOverlayCache.end()) { entry = it->second; }
     }
     // Lock released - now we can safely access atomic members
 
@@ -668,7 +668,7 @@ bool StageWindowOverlayTestFrame(const WindowOverlayConfig& config, const std::v
     std::lock_guard<std::mutex> cacheLock(g_windowOverlayCacheMutex);
     auto& entrySlot = g_windowOverlayCache[config.name];
     if (!entrySlot) {
-        entrySlot = std::make_unique<WindowOverlayCacheEntry>();
+        entrySlot = std::make_shared<WindowOverlayCacheEntry>();
     }
 
     WindowOverlayCacheEntry& entry = *entrySlot;
@@ -1253,19 +1253,18 @@ void WindowCaptureThreadFunc() {
 
                     try {
                         // Get entry pointer with minimal lock duration
-                        WindowOverlayCacheEntry* entry = nullptr;
+                        std::shared_ptr<WindowOverlayCacheEntry> entry;
                         {
                             std::lock_guard<std::mutex> cacheLock(g_windowOverlayCacheMutex);
                             auto it = g_windowOverlayCache.find(overlayId);
-                            if (it != g_windowOverlayCache.end()) { entry = it->second.get(); }
+                            if (it != g_windowOverlayCache.end()) { entry = it->second; }
                         }
                         // Lock released - now we can capture without blocking GUI thread
 
                         if (entry) {
                             // Capture without holding the cache mutex
                             // The entry's own captureMutex protects against concurrent modifications
-                            // Note: Entry deletion is only done from GUI thread via RemoveWindowOverlayFromCache,
-                            // and the capture thread checks for null before each capture
+                            // The shared_ptr copy keeps the entry alive even if it is erased from the cache meanwhile
                             CaptureWindowContent(*entry, config);
                         }
                     } catch (const std::exception& e) {
