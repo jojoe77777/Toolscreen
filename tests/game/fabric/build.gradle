@@ -1,0 +1,23 @@
+// Dev-client build for unobfuscated Minecraft versions (26.x), used by the in-game Toolscreen tests.
+// The run script copies this over fabric-example-mod's build.gradle; the project has no mod sources.
+plugins {
+	id 'net.fabricmc.fabric-loom' version "${loom_version}"
+}
+
+loom {
+	runs {
+		client {
+			// Toolscreen reads the game version from this property when no launcher metadata is available.
+			vmArg "-Dtoolscreen.minecraftVersion=${project.minecraft_version}"
+			// 26.x picks its renderer from options.txt and resets it after unclean exits; force it instead.
+			if (project.hasProperty("graphicsBackend")) {
+				programArgs "--graphicsBackend", project.property("graphicsBackend").toString()
+			}
+		}
+	}
+}
+
+dependencies {
+	minecraft "com.mojang:minecraft:${project.minecraft_version}"
+	implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+}

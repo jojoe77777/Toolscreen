@@ -1,4 +1,5 @@
 #include "vulkan_hooks.h"
+#include "testing/game_test_mode.h"
 
 #include "MinHook.h"
 #include "common/profiler.h"
@@ -726,6 +727,7 @@ VKAPI_ATTR VkResult VKAPI_CALL hkQueuePresentKHR(VkQueue queue, const VkPresentI
     const DeviceDispatch* d = FindDevice(snapshot, queueIt->second.device);
     if (!d || !d->queuePresentKHR) return VK_ERROR_EXTENSION_NOT_PRESENT;
     if (!RendererHooksReady()) return d->queuePresentKHR(queue, presentInfo);
+    GameTest::OnRenderThreadFrame();
 
     // Call the renderer before forwarding to the next layer.  When OBS is
     // injected, the stored dispatch function remains its vkQueuePresentKHR

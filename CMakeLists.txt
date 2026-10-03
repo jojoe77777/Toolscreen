@@ -348,6 +348,7 @@ set(TOOLSCREEN_MODULE_DIRS
     render/vulkan
     render/vulkan/layer
     runtime
+    testing
     third_party
 )
 
@@ -1623,6 +1624,35 @@ foreach(test_case IN LISTS TOOLSCREEN_EXPRESSION_PARSER_TEST_CASES)
         COMMAND $<TARGET_FILE:toolscreen_expression_parser_tests> --run ${test_case}
     )
 endforeach()
+
+# Injects DLLs into a running game the same way EasyInjectBundled does; used by scripts/game_tests/run_game_tests.ps1.
+add_executable(toolscreen_game_test_injector tests/game/injector/game_test_injector.cpp)
+target_compile_definitions(toolscreen_game_test_injector PRIVATE UNICODE _UNICODE NOMINMAX)
+toolscreen_configure_target_outputs(toolscreen_game_test_injector)
+
+# In-game tests against real Minecraft dev clients (see tests/game/README.md). They are named
+# toolscreen_integration_* so CI's ctest run skips them; run locally with:
+#   ctest --preset debug -R toolscreen_integration_game --output-on-failure
+find_program(TOOLSCREEN_POWERSHELL_EXECUTABLE NAMES powershell pwsh)
+if(TOOLSCREEN_POWERSHELL_EXECUTABLE)
+    foreach(game_test_spec IN ITEMS "1.16.1:opengl" "26.3:opengl" "26.3:vulkan")
+        string(REPLACE ":" ";" game_test_parts "${game_test_spec}")
+        list(GET game_test_parts 0 game_test_version)
+        list(GET game_test_parts 1 game_test_backend)
+        string(REPLACE "." "_" game_test_version_id "${game_test_version}")
+        add_test(
+            NAME toolscreen_integration_game_${game_test_version_id}_${game_test_backend}
+            COMMAND ${TOOLSCREEN_POWERSHELL_EXECUTABLE} -NoProfile -ExecutionPolicy Bypass
+                -File "${CMAKE_CURRENT_SOURCE_DIR}/scripts/game_tests/run_game_tests.ps1"
+                -MinecraftVersion ${game_test_version} -GraphicsBackend ${game_test_backend} -Configuration $<CONFIG>
+                -BuildDir "${CMAKE_BINARY_DIR}"
+        )
+        set_tests_properties(toolscreen_integration_game_${game_test_version_id}_${game_test_backend} PROPERTIES
+            TIMEOUT 1800
+            RUN_SERIAL TRUE
+        )
+    endforeach()
+endif()
 
 add_executable(toolscreen_base64_tests tests/base64_tests.cpp)
 target_include_directories(toolscreen_base64_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/liblogger)

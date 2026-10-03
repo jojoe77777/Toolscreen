@@ -3,6 +3,7 @@
 #include "gui/gui.h"
 #include "gui/imgui_cache.h"
 #include "hooks/input_hook.h"
+#include "testing/game_test_mode.h"
 #include "runtime/logic_thread.h"
 #include "render/mirror_thread.h"
 #include "render/obs_thread.h"
@@ -3795,6 +3796,7 @@ static BOOL SwapBuffersHook_Impl(WGLSWAPBUFFERS next, HDC hDc) {
     if (s_swapBuffersHookDepth > 1) {
         return next(hDc);
     }
+    GameTest::OnRenderThreadFrame();
 
     auto startTime = std::chrono::high_resolution_clock::now();
     _set_se_translator(SEHTranslator);
@@ -4543,6 +4545,7 @@ static void InstallGameWindowHooks(HWND gameWindow) {
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
     if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hModule);
+        GameTest::InitializeFromEnvironment();
         GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)DllMain,
                            &g_hModule);
 
@@ -4729,6 +4732,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             const HWND gameWindow = WaitForStableGameWindow();
             if (!gameWindow) return;
             InstallGameWindowHooks(gameWindow);
+            GameTest::StartRunner(gameWindow);
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             while (!g_stopHookCompat.load(std::memory_order_acquire) && !g_isShuttingDown.load(std::memory_order_acquire)) {
                 HookChain::RefreshAllThirdPartyHookChains();
@@ -4754,6 +4758,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 
         g_isShuttingDown = true;
         Log("DLL Detached. Performing minimal cleanup...");
+        GameTest::Shutdown();
 
         if (g_highResTimer) {
             CloseHandle(g_highResTimer);
