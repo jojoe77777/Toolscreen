@@ -691,6 +691,11 @@ bool TryCreateAndEnableHook(void* target, void* detour, void** outOriginal, cons
         Log(std::string("ERROR: Failed to create ") + (what ? what : "(hook)") + " hook (status " + std::to_string((int)st) + ")");
         return false;
     }
+    // MH_ERROR_ALREADY_CREATED leaves outOriginal untouched, so it only counts as success when it already holds a trampoline.
+    if (st == MH_ERROR_ALREADY_CREATED && outOriginal && *outOriginal == nullptr) {
+        Log(std::string("ERROR: ") + (what ? what : "(hook)") + " hook already exists but no trampoline is available");
+        return false;
+    }
 
     st = MH_EnableHook(target);
     if (st != MH_OK && st != MH_ERROR_ENABLED) {
