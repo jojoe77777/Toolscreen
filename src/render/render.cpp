@@ -5075,12 +5075,14 @@ static bool RenderSameThreadOverlayPass(const SameThreadOverlayState& request, c
     static int s_cachedEyeZoomSlideOutScreenH = 0;
     static std::vector<MirrorConfig> s_cachedEyeZoomSlideOutMirrors;
     static const Config* s_cachedTransitionSlideOutConfig = nullptr;
+    static uint64_t s_cachedTransitionSlideOutConfigVersion = 0;
     static std::string s_cachedTransitionSlideOutFromModeId;
     static std::string s_cachedTransitionSlideOutTargetModeId;
     static int s_cachedTransitionSlideOutScreenW = 0;
     static int s_cachedTransitionSlideOutScreenH = 0;
     static std::vector<MirrorConfig> s_cachedTransitionSlideOutMirrors;
     static const Config* s_cachedSameThreadCaptureConfig = nullptr;
+    static uint64_t s_cachedSameThreadCaptureConfigVersion = 0;
     static std::string s_cachedSameThreadCaptureModeId;
     static int s_cachedSameThreadCaptureScreenW = 0;
     static int s_cachedSameThreadCaptureScreenH = 0;
@@ -5179,7 +5181,8 @@ static bool RenderSameThreadOverlayPass(const SameThreadOverlayState& request, c
 
     if (!request.isRawWindowedMode && !request.isTransitioningFromEyeZoom && request.fromSlideMirrorsIn && !request.fromModeId.empty() &&
         request.mirrorSlideProgress < 1.0f && !request.skipAnimation) {
-        if (s_cachedTransitionSlideOutConfig != &cfg || s_cachedTransitionSlideOutFromModeId != request.fromModeId ||
+        if (s_cachedTransitionSlideOutConfig != &cfg || s_cachedTransitionSlideOutConfigVersion != cfgVersion ||
+            s_cachedTransitionSlideOutFromModeId != request.fromModeId ||
             s_cachedTransitionSlideOutTargetModeId != request.modeId ||
             s_cachedTransitionSlideOutScreenW != resolvedSourceScreenW ||
             s_cachedTransitionSlideOutScreenH != resolvedSourceScreenH) {
@@ -5206,6 +5209,7 @@ static bool RenderSameThreadOverlayPass(const SameThreadOverlayState& request, c
             }
 
             s_cachedTransitionSlideOutConfig = &cfg;
+            s_cachedTransitionSlideOutConfigVersion = cfgVersion;
             s_cachedTransitionSlideOutFromModeId = request.fromModeId;
             s_cachedTransitionSlideOutTargetModeId = request.modeId;
             s_cachedTransitionSlideOutScreenW = resolvedSourceScreenW;
@@ -5313,7 +5317,8 @@ static bool RenderSameThreadOverlayPass(const SameThreadOverlayState& request, c
         int sourceH = 0;
         const bool hasEyeZoomSlideOutMirrors = !eyeZoomSlideOutMirrors->empty();
         const bool hasTransitionSlideOutMirrors = !transitionSlideOutMirrors->empty();
-        if (s_cachedSameThreadCaptureConfig != &cfg || s_cachedSameThreadCaptureModeId != request.modeId ||
+        if (s_cachedSameThreadCaptureConfig != &cfg || s_cachedSameThreadCaptureConfigVersion != cfgVersion ||
+            s_cachedSameThreadCaptureModeId != request.modeId ||
             s_cachedSameThreadCaptureScreenW != resolvedTargetScreenW ||
             s_cachedSameThreadCaptureScreenH != resolvedTargetScreenH) {
             PROFILE_SCOPE_CAT("Build Same-Thread Capture Configs", "Rendering");
@@ -5321,6 +5326,7 @@ static bool RenderSameThreadOverlayPass(const SameThreadOverlayState& request, c
             BuildThreadedMirrorConfigs(mirrorsForCapture, s_cachedSameThreadCaptureConfigs);
 
             s_cachedSameThreadCaptureConfig = &cfg;
+            s_cachedSameThreadCaptureConfigVersion = cfgVersion;
             s_cachedSameThreadCaptureModeId = request.modeId;
             s_cachedSameThreadCaptureScreenW = resolvedTargetScreenW;
             s_cachedSameThreadCaptureScreenH = resolvedTargetScreenH;
