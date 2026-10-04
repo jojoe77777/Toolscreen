@@ -36,7 +36,8 @@ param(
     [ValidateSet("", "plain", "log_lock")]
     [string]$ExitMode = "",
     [int]$ExitTimeoutSeconds = 30,
-    # File copied to toolscreen\config.toml before launch, e.g. a deliberately broken config.
+    # Seeds the toolscreen folder before launch: a file is copied to toolscreen\config.toml, a folder's contents
+    # (config.toml, backups\, profiles\...) are copied into toolscreen\.
     [string]$ConfigFixture = "",
     [switch]$KeepGameOpen
 )
@@ -157,7 +158,13 @@ Stop-LeftoverGames
 # %USERPROFILE%\.config\toolscreen, so tests never touch the developer's real config.
 if (Test-Path $ToolscreenDir) { Remove-Item -Recurse -Force $ToolscreenDir }
 New-Item -ItemType Directory -Force -Path $ToolscreenDir | Out-Null
-if ($ConfigFixture) { Copy-Item -Force $ConfigFixture (Join-Path $ToolscreenDir "config.toml") }
+if ($ConfigFixture) {
+    if (Test-Path -PathType Container $ConfigFixture) {
+        Copy-Item -Recurse -Force (Join-Path $ConfigFixture "*") $ToolscreenDir
+    } else {
+        Copy-Item -Force $ConfigFixture (Join-Path $ToolscreenDir "config.toml")
+    }
+}
 
 # Stage the payload the way EasyInjectBundled extracts it: Toolscreen.dll beside liblogger and the layer JSON.
 New-Item -ItemType Directory -Force -Path $StageDir | Out-Null

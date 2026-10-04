@@ -162,6 +162,7 @@ const auto& GetTestCaseDefinitions() {
         {"config-load-recover-from-bak", &RunConfigLoadRecoverFromBakTest},
         {"config-load-recover-from-snapshot", &RunConfigLoadRecoverFromSnapshotTest},
         {"config-load-empty-file-reset-to-defaults", &RunConfigLoadEmptyFileResetToDefaultsTest},
+        {"config-load-binary-garbage-reset-to-defaults", &RunConfigLoadBinaryGarbageResetToDefaultsTest},
         {"config-load-invalid-without-backup-kept-in-place", &RunConfigLoadInvalidWithoutBackupKeptInPlaceTest},
         {"config-load-snapshot-dedup", &RunConfigLoadSnapshotDedupTest},
         {"config-load-stale-temp-files-removed", &RunConfigLoadStaleTempFilesRemovedTest},

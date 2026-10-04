@@ -36,6 +36,7 @@
 uint64_t GetObsPassImGuiFramesReusedForTests();
 bool ReadPublishedObsComposePixelForTests(int x, int y, unsigned char outRgba[4]);
 void GetPublishedObsComposeSizeForTests(int& width, int& height);
+extern std::atomic<bool> g_configLoaded;
 
 namespace ToolscreenVulkanLayerTest {
 bool GetTrackedDevice(VkDevice& device, PFN_vkGetDeviceProcAddr& layerGdpa, PFN_vkGetDeviceProcAddr& nextGdpa);
@@ -721,6 +722,29 @@ void TestConfigLoadErrorScreen() {
     Require(errorScreenDrawn, "The config error screen was not drawn.");
 }
 
+// Needs a damaged config.toml next to a good backup, e.g.
+// run_game_tests.ps1 -ConfigFixture tests/game/fixtures/corrupt_config_with_backup (whose backup sets fpsLimit = 77).
+void TestConfigRecoveredFromBackup() {
+    const std::vector<ConfigRecoveryNotice> notices = GetConfigRecoveryNotices();
+    const auto configNotice = std::find_if(notices.begin(), notices.end(), [](const ConfigRecoveryNotice& n) { return n.fileName == "config.toml"; });
+    if (configNotice == notices.end()) Skip("config.toml was not restored this launch; this test needs a corrupt config fixture.");
+
+    Require(!configNotice->restoredFrom.empty(), "config.toml was moved aside but no backup was restored.");
+    Require(!g_configLoadFailed.load(std::memory_order_acquire), "The config error screen showed although a backup was restored.");
+    Require(g_configLoaded.load(std::memory_order_acquire), "The restored config was not marked as loaded.");
+
+    const auto snapshot = GetConfigSnapshot();
+    Require(snapshot != nullptr, "No config snapshot was published after the restore.");
+    Require(snapshot->fpsLimit == 77, "The running config does not hold the backup's values (fpsLimit is " +
+                                          std::to_string(snapshot->fpsLimit) + ", expected 77).");
+
+    Config onDisk;
+    Require(LoadConfigFromTomlFile(g_toolscreenPath + L"\\config.toml", onDisk) && onDisk.fpsLimit == 77,
+            "The backup was not written back to config.toml.");
+    Require(std::filesystem::exists(std::filesystem::path(g_toolscreenPath) / Utf8ToWide(configNotice->movedAsideAs)),
+            "The damaged config.toml was not kept next to the restored file.");
+}
+
 struct TestCase {
     const char* name;
     void (*fn)();
@@ -743,6 +767,7 @@ const TestCase kTests[] = {
     { "vulkan.streaming_texture_lifetime", &TestVulkanStreamingTextureLifetime },
     { "config.save_round_trip", &TestConfigSaveRoundTrip },
     { "config.load_error_screen", &TestConfigLoadErrorScreen },
+    { "config.recovered_from_backup", &TestConfigRecoveredFromBackup },
 };
 
 bool MatchesFilter(const std::string& name) {

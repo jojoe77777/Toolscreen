@@ -2324,3 +2324,18 @@ void RunConfigLoadStaleTempFilesRemovedTest(TestRunMode runMode = TestRunMode::A
     Expect(!std::filesystem::exists(staleTemp), "Temp files left by an interrupted save should be removed on load.");
     Expect(std::filesystem::exists(freshTemp), "Recent temp files may belong to another instance's save and must be kept.");
 }
+
+void RunConfigLoadBinaryGarbageResetToDefaultsTest(TestRunMode runMode = TestRunMode::Automated) {
+    ClearConfigRecoveryNotices();
+    RunConfigLoadCase("config_load_binary_garbage_reset_to_defaults",
+                      []() { WriteRawBytesToDisk(GetCurrentConfigPath(), std::string("\xff\xfe\x13\x8bgarbage\xc3", 12)); },
+                      []() {
+                          ExpectConfigLoadSucceeded("config-load-binary-garbage-reset-to-defaults");
+                          Expect(!g_config.modes.empty(), "A binary config.toml with no backup should be replaced by the default config.");
+                          Expect(FileNamesWithPrefix(std::filesystem::path(g_toolscreenPath), "config.toml.corrupt-").size() == 1,
+                                 "The binary config.toml should be moved aside, not deleted.");
+                          ExpectSingleRecoveryNotice("config-load-binary-garbage-reset-to-defaults", false);
+                      },
+                      runMode);
+    ClearConfigRecoveryNotices();
+}

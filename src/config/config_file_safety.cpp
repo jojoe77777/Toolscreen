@@ -156,9 +156,67 @@ bool IsBlank(const std::string& source) {
     return std::all_of(source.begin(), source.end(), [](unsigned char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; });
 }
 
-// Blank files and NUL bytes come from torn writes or disk damage, not from a person editing the file.
+bool IsValidUtf8(const std::string& source) {
+    size_t i = 0;
+    while (i < source.size()) {
+        const unsigned char lead = static_cast<unsigned char>(source[i]);
+        size_t length = 0;
+        unsigned int codePoint = 0;
+        if (lead < 0x80) {
+            ++i;
+            continue;
+        } else if ((lead & 0xE0) == 0xC0) {
+            length = 2;
+            codePoint = lead & 0x1F;
+        } else if ((lead & 0xF0) == 0xE0) {
+            length = 3;
+            codePoint = lead & 0x0F;
+        } else if ((lead & 0xF8) == 0xF0) {
+            length = 4;
+            codePoint = lead & 0x07;
+        } else {
+            return false;
+        }
+        if (i + length > source.size()) return false;
+        for (size_t k = 1; k < length; ++k) {
+            const unsigned char next = static_cast<unsigned char>(source[i + k]);
+            if ((next & 0xC0) != 0x80) return false;
+            codePoint = (codePoint << 6) | (next & 0x3F);
+        }
+        // Reject overlong encodings, UTF-16 surrogates and values past U+10FFFF.
+        static const unsigned int kMinimumForLength[] = { 0, 0, 0x80, 0x800, 0x10000 };
+        if (codePoint < kMinimumForLength[length] || codePoint > 0x10FFFF || (codePoint >= 0xD800 && codePoint <= 0xDFFF)) {
+            return false;
+        }
+        i += length;
+    }
+    return true;
+}
+
+// Returns why `source` cannot be a file anyone wrote by hand, or an empty string when it is plausible text.
+// Empty files, NUL bytes, invalid UTF-8 and binary control bytes come from torn writes, disk damage or other
+// programs, never from a person editing the file, so they are safe to replace without asking.
+std::string DescribeDiskDamage(const std::string& source) {
+    if (IsBlank(source)) {
+        return "file is empty";
+    }
+    if (source.find('\0') != std::string::npos) {
+        return "file contains NUL bytes";
+    }
+    if (!IsValidUtf8(source)) {
+        return "file is not valid UTF-8 text";
+    }
+    const bool hasControlBytes = std::any_of(source.begin(), source.end(), [](unsigned char c) {
+        return (c < 0x20 && c != '\t' && c != '\r' && c != '\n') || c == 0x7F;
+    });
+    if (hasControlBytes) {
+        return "file contains binary data";
+    }
+    return std::string();
+}
+
 bool LooksLikeDiskDamage(const std::string& source) {
-    return IsBlank(source) || source.find('\0') != std::string::npos;
+    return !DescribeDiskDamage(source).empty();
 }
 
 std::wstring FileNameOf(const std::wstring& path) {
@@ -210,12 +268,8 @@ void AddRecoveryNotice(ConfigRecoveryNotice notice) {
 }
 
 bool TryAccept(const TomlSourceAcceptor& accept, const std::string& source, std::string& error) {
-    if (IsBlank(source)) {
-        error = "file is empty";
-        return false;
-    }
-    if (source.find('\0') != std::string::npos) {
-        error = "file contains NUL bytes";
+    if (std::string damage = DescribeDiskDamage(source); !damage.empty()) {
+        error = std::move(damage);
         return false;
     }
     try {
@@ -388,7 +442,7 @@ TomlFileLoadStatus LoadTomlFileWithRecovery(const std::wstring& path, const std:
     }
 
     if (LooksLikeDiskDamage(source)) {
-        // Nothing in an empty or NUL-filled file is worth keeping in place; let the caller start fresh.
+        // Nothing in an empty or binary file is worth keeping in place; let the caller start fresh.
         const std::wstring movedAside = MoveDamagedFileAside(path);
         if (!movedAside.empty()) {
             Log("WARNING: No usable backup for " + displayName + "; moved the damaged file aside as " + DisplayNameFor(movedAside) + ".");

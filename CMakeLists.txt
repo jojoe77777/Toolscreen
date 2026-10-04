@@ -1240,6 +1240,7 @@ set(TOOLSCREEN_GUI_INTEGRATION_TEST_CASES
     config-load-recover-from-bak
     config-load-recover-from-snapshot
     config-load-empty-file-reset-to-defaults
+    config-load-binary-garbage-reset-to-defaults
     config-load-invalid-without-backup-kept-in-place
     config-load-snapshot-dedup
     config-load-stale-temp-files-removed
@@ -1693,6 +1694,19 @@ if(TOOLSCREEN_POWERSHELL_EXECUTABLE)
             -ConfigFixture "${CMAKE_CURRENT_SOURCE_DIR}/tests/game/fixtures/broken_config.toml"
     )
     set_tests_properties(toolscreen_integration_game_1_16_1_config_error PROPERTIES
+        TIMEOUT 1800
+        RUN_SERIAL TRUE
+    )
+    # Start with a corrupt config.toml beside a good launch snapshot, and require a silent restore.
+    add_test(
+        NAME toolscreen_integration_game_1_16_1_config_restore
+        COMMAND ${TOOLSCREEN_POWERSHELL_EXECUTABLE} -NoProfile -ExecutionPolicy Bypass
+            -File "${CMAKE_CURRENT_SOURCE_DIR}/scripts/game_tests/run_game_tests.ps1"
+            -MinecraftVersion 1.16.1 -Configuration $<CONFIG> -BuildDir "${CMAKE_BINARY_DIR}"
+            -Filter "startup.,render.frames_hooked,config.recovered_from_backup"
+            -ConfigFixture "${CMAKE_CURRENT_SOURCE_DIR}/tests/game/fixtures/corrupt_config_with_backup"
+    )
+    set_tests_properties(toolscreen_integration_game_1_16_1_config_restore PROPERTIES
         TIMEOUT 1800
         RUN_SERIAL TRUE
     )

@@ -26,15 +26,15 @@ using TomlSourceAcceptor = std::function<bool(const std::string& source, std::st
 enum class TomlFileLoadStatus {
     Loaded,        // `path` was intact.
     Recovered,     // `path` was damaged; a backup was accepted and written back to `path`.
-    Missing,       // `path` does not exist, or held unreadable bytes that were moved aside with no backup to restore.
+    Missing,       // `path` does not exist, or was blank or binary with no usable backup and has been moved aside.
     Unrecoverable, // `path` holds content `accept` rejected and no backup was usable; `path` is left untouched.
 };
 
-// Reads `path` and passes its contents to `accept`. A file that is blank, contains NUL bytes, or that `accept`
-// rejects counts as damaged: it is renamed to `<name>.corrupt-<timestamp>` and `<path>.bak`, then each of
-// `extraBackups` in order, is offered to `accept`. The first accepted backup is restored to `path`.
-// A damaged file that still holds text (most often a hand-edit typo) stays in place when no backup works, so the
-// user can fix it.
+// Reads `path` and passes its contents to `accept`. A file that is blank, binary (NUL or control bytes, invalid
+// UTF-8), or that `accept` rejects counts as damaged: it is renamed to `<name>.corrupt-<timestamp>` and
+// `<path>.bak`, then each of `extraBackups` in order, is offered to `accept`. The first accepted backup is restored
+// to `path`. With no usable backup, a blank or binary file is moved aside and reported as Missing, while a file
+// that still holds readable text (most often a hand-edit typo) stays in place so the user can fix it.
 TomlFileLoadStatus LoadTomlFileWithRecovery(const std::wstring& path, const std::vector<std::wstring>& extraBackups,
                                             const TomlSourceAcceptor& accept, std::string* outError = nullptr);
 

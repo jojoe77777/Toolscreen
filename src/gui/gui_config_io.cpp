@@ -560,7 +560,7 @@ void LoadConfig() {
         TomlFileLoadStatus loadStatus =
             LoadConfigFromTomlFileWithRecovery(configPath, g_config, ListConfigBackupsNewestFirst(), &loadError);
         if (loadStatus == TomlFileLoadStatus::Missing) {
-            // The file was unreadable (empty or NUL-filled) with no usable backup, and has been moved aside.
+            // The file was empty or binary with no usable backup, and has been moved aside.
             Log("config.toml was damaged beyond recovery. Writing a default config file.");
             g_config = Config();
             WriteDefaultConfig(configPath);
