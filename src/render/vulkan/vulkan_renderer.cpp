@@ -259,11 +259,17 @@ struct StreamingTextureSlot {
     int width = 0;
     int height = 0;
     uint64_t uploadedGeneration = 0;
+    // Overlay frame in which this slot was last drawn; slots idle for kStreamingSlotIdleFrames are retired.
+    uint64_t lastUsedOverlayFrame = 0;
 };
 
 struct StreamingTexture {
     std::unordered_map<VkImage, StreamingTextureSlot> slots;
 };
+
+// Streaming slots are keyed by destination image. OBS composition images are recreated on resize and overlays
+// can be deleted, so a slot that has not been drawn for this many overlay frames is retired rather than kept.
+constexpr uint64_t kStreamingSlotIdleFrames = 300;
 
 struct ObsCompositionSlot {
     MirrorCopyImage image;
@@ -414,6 +420,10 @@ struct RendererState {
     std::unordered_map<std::string, SampledImage*> frameResolvedMirrorSamples;
     std::vector<RetiredTextureAsset> retiredTextureAssets;
     std::unordered_map<std::string, StreamingTexture> streamingTextures;
+    // Streaming frames the interactive pass prepared this overlay frame, by key, so the OBS pass draws the same
+    // upload instead of uploading again into a slot keyed by its composition image.
+    std::unordered_map<std::string, std::pair<TextureFrame*, uint64_t>> frameResolvedStreamingFrames;
+    uint64_t overlayFrameCounter = 0;
     std::array<ObsCompositionSlot, kObsCompositionSlotCount> obsCompositionSlots{};
     uint32_t nextObsCompositionSlot = 0;
     uint32_t publishedObsCompositionSlot = UINT32_MAX;
@@ -2523,14 +2533,50 @@ TextureFrame* ResolveTextureFrame(TextureAsset& asset, bool linear) {
     return &frame;
 }
 
-void DestroyStreamingTextureSlot(StreamingTextureSlot& slot) {
-    TextureAsset temporary;
-    temporary.frames.push_back(std::move(slot.frame));
-    temporary.stagingBuffer = slot.stagingBuffer;
-    temporary.stagingMemory = slot.stagingMemory;
-    temporary.stagingMapped = slot.stagingMapped;
-    DestroyTextureAsset(temporary);
+TextureAsset TakeStreamingTextureSlotAsAsset(StreamingTextureSlot& slot) {
+    TextureAsset asset;
+    asset.frames.push_back(std::move(slot.frame));
+    asset.stagingBuffer = slot.stagingBuffer;
+    asset.stagingMemory = slot.stagingMemory;
+    asset.stagingMapped = slot.stagingMapped;
     slot = {};
+    return asset;
+}
+
+// Destroys a slot immediately. Only for slots no submitted frame can reference (creation failures, shutdown).
+void DestroyStreamingTextureSlot(StreamingTextureSlot& slot) {
+    TextureAsset asset = TakeStreamingTextureSlotAsAsset(slot);
+    DestroyTextureAsset(asset);
+}
+
+// Retires a slot that in-flight frames may still sample or copy from; HarvestTimestamps destroys it once
+// every frame pending now has completed on the GPU.
+void RetireStreamingTextureSlot(StreamingTextureSlot& slot) {
+    RetiredTextureAsset retired;
+    retired.asset = TakeStreamingTextureSlotAsAsset(slot);
+    retired.pendingFrameMask = PendingTimestampFrameMask();
+    if (retired.pendingFrameMask == 0) {
+        DestroyTextureAsset(retired.asset);
+    } else {
+        g_state.retiredTextureAssets.push_back(std::move(retired));
+    }
+}
+
+// Called once per interactive overlay frame, before any streaming texture is prepared.
+void RetireIdleStreamingTextureSlots() {
+    ++g_state.overlayFrameCounter;
+    for (auto textureIt = g_state.streamingTextures.begin(); textureIt != g_state.streamingTextures.end();) {
+        auto& slots = textureIt->second.slots;
+        for (auto slotIt = slots.begin(); slotIt != slots.end();) {
+            if (g_state.overlayFrameCounter - slotIt->second.lastUsedOverlayFrame > kStreamingSlotIdleFrames) {
+                RetireStreamingTextureSlot(slotIt->second);
+                slotIt = slots.erase(slotIt);
+            } else {
+                ++slotIt;
+            }
+        }
+        textureIt = slots.empty() ? g_state.streamingTextures.erase(textureIt) : std::next(textureIt);
+    }
 }
 
 bool CreateStreamingTextureSlot(
@@ -2590,11 +2636,20 @@ TextureFrame* PrepareStreamingTexture(
     if (!frameSlot || !pixels || width <= 0 || height <= 0 || generation == 0) {
         return nullptr;
     }
+    if (g_obsCompositionPass) {
+        auto resolved = g_state.frameResolvedStreamingFrames.find(key);
+        if (resolved != g_state.frameResolvedStreamingFrames.end() && resolved->second.second == generation) {
+            if (linear) EnsureLinearDescriptor(*resolved->second.first);
+            return resolved->second.first;
+        }
+    }
     StreamingTexture& texture = g_state.streamingTextures[key];
     StreamingTextureSlot& slot = texture.slots[frameSlot];
+    slot.lastUsedOverlayFrame = g_state.overlayFrameCounter;
     if (!slot.frame.sampled.image || slot.width != width || slot.height != height) {
-        if (slot.frame.sampled.image) DestroyStreamingTextureSlot(slot);
+        if (slot.frame.sampled.image) RetireStreamingTextureSlot(slot);
         if (!CreateStreamingTextureSlot(width, height, slot)) return nullptr;
+        slot.lastUsedOverlayFrame = g_state.overlayFrameCounter;
     }
 
     if (slot.uploadedGeneration != generation) {
@@ -2633,6 +2688,7 @@ TextureFrame* PrepareStreamingTexture(
         slot.uploadedGeneration = generation;
     }
     if (linear) EnsureLinearDescriptor(slot.frame);
+    if (!g_obsCompositionPass) g_state.frameResolvedStreamingFrames[key] = { &slot.frame, generation };
     return &slot.frame;
 }
 
@@ -5788,6 +5844,8 @@ void GenerateImGui(const VulkanRenderer::FinalBlitContext& context, SampledImage
     if (!obsPass) {
         g_state.frameResolvedTextureFrames.clear();
         g_state.frameResolvedMirrorSamples.clear();
+        g_state.frameResolvedStreamingFrames.clear();
+        RetireIdleStreamingTextureSlots();
     }
     g_activeFrameContext = &context;
     // The game-window context is the only input-owning ImGui context.  The OBS
@@ -6999,6 +7057,21 @@ FrameTrackingStats GetFrameTrackingStats() {
     return stats;
 }
 
+StreamingTextureStats GetStreamingTextureStats(const std::string& keyPrefix) {
+    StreamingTextureStats stats;
+    for (const auto& [key, texture] : g_state.streamingTextures) {
+        if (key.rfind(keyPrefix, 0) != 0) continue;
+        ++stats.keys;
+        stats.slots += texture.slots.size();
+        for (const auto& [image, slot] : texture.slots) {
+            (void)image;
+            if (slot.width > stats.largestWidth) stats.largestWidth = slot.width;
+        }
+    }
+    stats.retiredAwaitingGpu = g_state.retiredTextureAssets.size();
+    return stats;
+}
+
 void SetFrameTrackingProbeEnabled(bool enabled) { g_frameTrackingProbeEnabled.store(enabled, std::memory_order_relaxed); }
 
 bool GetColorPickerFrame(uintptr_t& textureId, int& width, int& height) {
@@ -7219,7 +7292,7 @@ void OnSwapchainDestroyed(VkDevice device, VkSwapchainKHR, const std::vector<VkI
         for (auto& [key, texture] : g_state.streamingTextures) {
             auto slot = texture.slots.find(image);
             if (slot != texture.slots.end()) {
-                DestroyStreamingTextureSlot(slot->second);
+                RetireStreamingTextureSlot(slot->second);
                 texture.slots.erase(slot);
             }
         }

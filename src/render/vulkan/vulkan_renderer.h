@@ -52,6 +52,16 @@ struct FrameTrackingStats {
 };
 FrameTrackingStats GetFrameTrackingStats();
 void SetFrameTrackingProbeEnabled(bool enabled);
+
+// Streaming-texture cache counts for keys starting with keyPrefix (e.g. "window:"). Render thread only.
+struct StreamingTextureStats {
+    size_t keys = 0;
+    size_t slots = 0;
+    int largestWidth = 0;
+    // Texture resources (of any kind) retired and waiting for in-flight frames to finish.
+    size_t retiredAwaitingGpu = 0;
+};
+StreamingTextureStats GetStreamingTextureStats(const std::string& keyPrefix);
 // The color picker uses the current source descriptor for its live GPU
 // preview. Pixel selection is a one-texel asynchronous transfer; results are
 // exposed only after the frame's completion query becomes available.
