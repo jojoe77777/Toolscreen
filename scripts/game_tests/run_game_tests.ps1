@@ -9,7 +9,7 @@ Runs Toolscreen's in-game tests against a real Minecraft dev client.
 4. Waits for the DLL to write its JSON-lines results, stops the game, and reports.
 
 Build the DLL and injector first:
-  cmake --build --preset debug --target Toolscreen toolscreen_game_test_injector
+  cmake --build --preset debug --target Toolscreen toolscreen_game_test_injector toolscreen_game_test_overlay
 
 .EXAMPLE
 pwsh scripts/game_tests/run_game_tests.ps1 -MinecraftVersion 1.16.1
@@ -91,7 +91,7 @@ if (-not $injectorExe) {
 }
 foreach ($required in @($toolscreenDll, $loggerDll, $layerJson, $injectorExe)) {
     if (-not (Test-Path $required)) {
-        throw "Missing $required. Build first: cmake --build --preset $($Configuration.ToLowerInvariant()) --target Toolscreen toolscreen_game_test_injector"
+        throw "Missing $required. Build first: cmake --build --preset $($Configuration.ToLowerInvariant()) --target Toolscreen toolscreen_game_test_injector toolscreen_game_test_overlay"
     }
 }
 
@@ -145,6 +145,12 @@ New-Item -ItemType Directory -Force -Path $StageDir | Out-Null
 Copy-Item -Force $loggerDll (Join-Path $StageDir "liblogger_x64.dll")
 Copy-Item -Force $toolscreenDll (Join-Path $StageDir "Toolscreen.dll")
 Copy-Item -Force $layerJson (Join-Path $StageDir "VK_LAYER_TOOLSCREEN_obs_redirect.json")
+# Two copies of the stand-in overlay, so the hook-chain test can unload one and chain behind a distinct second one.
+$overlayDll = Join-Path $BinDir "toolscreen_game_test_overlay.dll"
+if (Test-Path $overlayDll) {
+    Copy-Item -Force $overlayDll (Join-Path $StageDir "game_test_overlay_a.dll")
+    Copy-Item -Force $overlayDll (Join-Path $StageDir "game_test_overlay_b.dll")
+}
 $toolscreenPdb = Join-Path $BinDir "Toolscreen.pdb"
 if (Test-Path $toolscreenPdb) { Copy-Item -Force $toolscreenPdb (Join-Path $StageDir "Toolscreen.pdb") }
 

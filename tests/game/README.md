@@ -23,7 +23,7 @@ Toolscreen keeps its config and logs in `out/game-tests/<version>/run/toolscreen
 Build the DLL and the injector first:
 
 ```bash
-cmake --build --preset debug --target Toolscreen toolscreen_game_test_injector
+cmake --build --preset debug --target Toolscreen toolscreen_game_test_injector toolscreen_game_test_overlay
 ```
 
 Then run one client:

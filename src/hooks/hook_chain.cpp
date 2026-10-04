@@ -755,6 +755,10 @@ std::string DescribeAddressWithOwner(const void* addr) {
     return ss.str();
 }
 
+void* GetThirdPartyWglSwapBuffersHookTarget() {
+    return g_wglSwapBuffersThirdPartyHookTarget.load(std::memory_order_acquire);
+}
+
 void RefreshAllThirdPartyHookChains() {
     std::lock_guard<std::mutex> lock(g_wglSwapBuffersThirdPartyHookMutex);
 

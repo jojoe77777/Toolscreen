@@ -1630,6 +1630,13 @@ add_executable(toolscreen_game_test_injector tests/game/injector/game_test_injec
 target_compile_definitions(toolscreen_game_test_injector PRIVATE UNICODE _UNICODE NOMINMAX)
 toolscreen_configure_target_outputs(toolscreen_game_test_injector)
 
+# Stand-in third-party overlay that detours wglSwapBuffers with its own MinHook, for the hook-chain game test.
+add_library(toolscreen_game_test_overlay SHARED tests/game/overlay/game_test_overlay.cpp)
+target_compile_definitions(toolscreen_game_test_overlay PRIVATE UNICODE _UNICODE NOMINMAX)
+target_link_libraries(toolscreen_game_test_overlay PRIVATE Toolscreen::minhook ntdll)
+set_target_properties(toolscreen_game_test_overlay PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+toolscreen_configure_target_outputs(toolscreen_game_test_overlay)
+
 # In-game tests against real Minecraft dev clients (see tests/game/README.md). They are named
 # toolscreen_integration_* so CI's ctest run skips them; run locally with:
 #   ctest --preset debug -R toolscreen_integration_game --output-on-failure

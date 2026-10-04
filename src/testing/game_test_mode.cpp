@@ -4,6 +4,7 @@
 #include "common/utils.h"
 #include "config/config_toml.h"
 #include "gui/gui.h"
+#include "hooks/hook_chain.h"
 #include "hooks/input_hook.h"
 #include "render/render_backend.h"
 #include "version.h"
@@ -381,6 +382,91 @@ void TestConfigSaveRoundTrip() {
     Require(hasMode, "The saved profile " + activeProfile + " does not contain the test mode.");
 }
 
+// Loads a copy of tests/game/overlay (staged beside Toolscreen.dll), which detours wglSwapBuffers the way a
+// third-party overlay does, and returns its module.
+struct TestOverlay {
+    HMODULE module = NULL;
+    void* detour = nullptr;
+    LONG(*callCount)() = nullptr;
+    BOOL(*remove)() = nullptr;
+};
+
+TestOverlay LoadTestOverlay(const wchar_t* fileName) {
+    HMODULE self = NULL;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       reinterpret_cast<LPCWSTR>(&LoadTestOverlay), &self);
+    wchar_t selfPath[MAX_PATH] = {};
+    GetModuleFileNameW(self, selfPath, MAX_PATH);
+    const std::filesystem::path overlayPath = std::filesystem::path(selfPath).parent_path() / fileName;
+    if (!std::filesystem::exists(overlayPath)) Skip("Test overlay " + WideToUtf8(overlayPath.wstring()) + " is not staged.");
+
+    TestOverlay overlay;
+    overlay.module = LoadLibraryW(overlayPath.c_str());
+    Require(overlay.module != NULL, "Could not load " + WideToUtf8(overlayPath.wstring()) + ".");
+    overlay.detour = reinterpret_cast<void*>(GetProcAddress(overlay.module, "GameTestOverlaySwapBuffers"));
+    overlay.callCount = reinterpret_cast<LONG (*)()>(GetProcAddress(overlay.module, "GameTestOverlayCallCount"));
+    overlay.remove = reinterpret_cast<BOOL (*)()>(GetProcAddress(overlay.module, "GameTestOverlayRemove"));
+    auto install = reinterpret_cast<BOOL (*)()>(GetProcAddress(overlay.module, "GameTestOverlayInstall"));
+    Require(overlay.detour && overlay.callCount && overlay.remove && install, "The test overlay is missing exports.");
+    Require(install() != FALSE, "The test overlay could not hook wglSwapBuffers.");
+    return overlay;
+}
+
+// Unhooks the overlay, lets any frame already inside it finish, then unloads it.
+void UnloadTestOverlay(TestOverlay& overlay) {
+    if (!overlay.module) return;
+    overlay.remove();
+    WaitForFrames(10, std::chrono::seconds(5));
+    FreeLibrary(overlay.module);
+    overlay = {};
+}
+
+void RequireChainedThrough(TestOverlay& overlay, const char* label) {
+    const bool chained = WaitUntil([&] { return HookChain::GetThirdPartyWglSwapBuffersHookTarget() == overlay.detour; },
+                                   std::chrono::seconds(10));
+    Require(chained, std::string("Toolscreen did not chain behind ") + label + " (chained target: " +
+                         HookChain::DescribeAddressWithOwner(HookChain::GetThirdPartyWglSwapBuffersHookTarget()) + ").");
+
+    const LONG overlayCallsBefore = overlay.callCount();
+    Require(WaitForFrames(20, std::chrono::seconds(10)), std::string("Toolscreen stopped rendering frames while chained behind ") + label + ".");
+    Require(overlay.callCount() > overlayCallsBefore, std::string("Frames stopped reaching ") + label + " after Toolscreen chained behind it.");
+}
+
+void TestThirdPartySwapBuffersChain() {
+    WaitUntil([] { return GetRenderBackend() != RenderBackend::Unknown; }, std::chrono::seconds(20));
+    if (GetRenderBackend() != RenderBackend::OpenGL) Skip("wglSwapBuffers hook chaining only applies to OpenGL.");
+    Require(HookChain::GetThirdPartyWglSwapBuffersHookTarget() == nullptr, "Toolscreen is already chained behind another overlay.");
+
+    TestOverlay first = LoadTestOverlay(L"game_test_overlay_a.dll");
+    struct UnloadOnExit {
+        TestOverlay& overlay;
+        ~UnloadOnExit() { UnloadTestOverlay(overlay); }
+    } unloadFirst{ first };
+    RequireChainedThrough(first, "the first overlay");
+    const void* firstDetour = first.detour;
+
+    // The overlay goes away: Toolscreen must notice its target is stale and drop the chain.
+    const auto unloadAndRequireUnchained = [](TestOverlay& overlay, const char* label) {
+        UnloadTestOverlay(overlay);
+        Require(WaitUntil([] { return HookChain::GetThirdPartyWglSwapBuffersHookTarget() == nullptr; }, std::chrono::seconds(10)),
+                std::string("Toolscreen kept chaining through ") + label + " after it unloaded.");
+        Require(WaitForFrames(20, std::chrono::seconds(10)), std::string("Toolscreen stopped rendering after ") + label + " unloaded.");
+    };
+    unloadAndRequireUnchained(first, "the first overlay");
+
+    // The same overlay reloads. Windows maps the same file back at its old base, where MinHook still holds
+    // the dead module's hook entry; Toolscreen must chain behind the fresh code anyway.
+    TestOverlay reloaded = LoadTestOverlay(L"game_test_overlay_a.dll");
+    UnloadOnExit unloadReloaded{ reloaded };
+    RequireChainedThrough(reloaded, reloaded.detour == firstDetour ? "the reloaded overlay (same address)" : "the reloaded overlay");
+    unloadAndRequireUnchained(reloaded, "the reloaded overlay");
+
+    // A different overlay arrives, exercising a reinstall that reuses Toolscreen's trampoline slot.
+    TestOverlay second = LoadTestOverlay(L"game_test_overlay_b.dll");
+    UnloadOnExit unloadSecond{ second };
+    RequireChainedThrough(second, "a second overlay");
+}
+
 struct TestCase {
     const char* name;
     void (*fn)();
@@ -396,6 +482,7 @@ const TestCase kTests[] = {
     { "input.hotkey_switches_mode", &TestHotkeySwitchesMode },
     { "input.low_level_hook_dedicated_thread", &TestLowLevelHookOnDedicatedThread },
     { "gui.toggle_renders_imgui", &TestGuiToggleRendersImGui },
+    { "hooks.third_party_swap_chain", &TestThirdPartySwapBuffersChain },
     { "config.save_round_trip", &TestConfigSaveRoundTrip },
 };
 
