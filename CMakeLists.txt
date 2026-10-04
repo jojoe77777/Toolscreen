@@ -1670,19 +1670,27 @@ if(TOOLSCREEN_POWERSHELL_EXECUTABLE)
         )
     endforeach()
     # Close the game normally (so DLL_PROCESS_DETACH runs) and require a clean, prompt exit, including when a
-    # thread that process exit kills was holding the log file lock.
-    foreach(game_test_exit_mode IN ITEMS plain log_lock)
-        add_test(
-            NAME toolscreen_integration_game_1_16_1_exit_${game_test_exit_mode}
-            COMMAND ${TOOLSCREEN_POWERSHELL_EXECUTABLE} -NoProfile -ExecutionPolicy Bypass
-                -File "${CMAKE_CURRENT_SOURCE_DIR}/scripts/game_tests/run_game_tests.ps1"
-                -MinecraftVersion 1.16.1 -Configuration $<CONFIG> -BuildDir "${CMAKE_BINARY_DIR}"
-                -Filter startup.version -ExitMode ${game_test_exit_mode}
-        )
-        set_tests_properties(toolscreen_integration_game_1_16_1_exit_${game_test_exit_mode} PROPERTIES
-            TIMEOUT 1800
-            RUN_SERIAL TRUE
-        )
+    # thread that process exit kills was holding the log file lock. Runs on every in-game client.
+    foreach(game_test_spec IN ITEMS "1.16.1:opengl" "26.3:opengl" "26.3:vulkan")
+        string(REPLACE ":" ";" game_test_parts "${game_test_spec}")
+        list(GET game_test_parts 0 game_test_version)
+        list(GET game_test_parts 1 game_test_backend)
+        string(REPLACE "." "_" game_test_version_id "${game_test_version}")
+        foreach(game_test_exit_mode IN ITEMS plain log_lock)
+            set(game_test_name toolscreen_integration_game_${game_test_version_id}_${game_test_backend}_exit_${game_test_exit_mode})
+            add_test(
+                NAME ${game_test_name}
+                COMMAND ${TOOLSCREEN_POWERSHELL_EXECUTABLE} -NoProfile -ExecutionPolicy Bypass
+                    -File "${CMAKE_CURRENT_SOURCE_DIR}/scripts/game_tests/run_game_tests.ps1"
+                    -MinecraftVersion ${game_test_version} -GraphicsBackend ${game_test_backend} -Configuration $<CONFIG>
+                    -BuildDir "${CMAKE_BINARY_DIR}"
+                    -Filter startup.version -ExitMode ${game_test_exit_mode}
+            )
+            set_tests_properties(${game_test_name} PROPERTIES
+                TIMEOUT 1800
+                RUN_SERIAL TRUE
+            )
+        endforeach()
     endforeach()
     # Config fixtures, run on every in-game client:
     #   config_error   - a config.toml that cannot be loaded or restored must show the error screen.
