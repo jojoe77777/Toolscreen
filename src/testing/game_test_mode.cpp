@@ -11,6 +11,9 @@
 
 #include "imgui.h"
 
+#define VK_NO_PROTOTYPES
+#include <vulkan/vulkan.h>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -25,6 +28,10 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+namespace ToolscreenVulkanLayerTest {
+bool GetTrackedDevice(VkDevice& device, PFN_vkGetDeviceProcAddr& layerGdpa, PFN_vkGetDeviceProcAddr& nextGdpa);
+}
 
 namespace GameTest {
 namespace {
@@ -467,6 +474,48 @@ void TestThirdPartySwapBuffersChain() {
     RequireChainedThrough(second, "a second overlay");
 }
 
+// While one thread blocks in vkWaitForFences through Toolscreen's Vulkan layer, another thread's call through
+// the layer must not queue behind it (the layer used to hold its global mutex across the wait).
+void TestVulkanLayerWaitDoesNotBlockOtherCalls() {
+    WaitUntil([] { return GetRenderBackend() != RenderBackend::Unknown; }, std::chrono::seconds(20));
+    if (GetRenderBackend() != RenderBackend::Vulkan) Skip("Toolscreen's Vulkan layer only runs on the Vulkan backend.");
+
+    VkDevice device = VK_NULL_HANDLE;
+    PFN_vkGetDeviceProcAddr layerGdpa = nullptr;
+    PFN_vkGetDeviceProcAddr nextGdpa = nullptr;
+    if (!ToolscreenVulkanLayerTest::GetTrackedDevice(device, layerGdpa, nextGdpa)) {
+        Skip("Toolscreen's Vulkan layer is not tracking a device in this process.");
+    }
+    auto createFence = reinterpret_cast<PFN_vkCreateFence>(nextGdpa(device, "vkCreateFence"));
+    auto layerWait = reinterpret_cast<PFN_vkWaitForFences>(layerGdpa(device, "vkWaitForFences"));
+    auto layerDestroyFence = reinterpret_cast<PFN_vkDestroyFence>(layerGdpa(device, "vkDestroyFence"));
+    Require(createFence && layerWait && layerDestroyFence, "Could not resolve the fence functions.");
+
+    VkFenceCreateInfo fenceInfo{ VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+    VkFence neverSignalled = VK_NULL_HANDLE;
+    VkFence other = VK_NULL_HANDLE;
+    Require(createFence(device, &fenceInfo, nullptr, &neverSignalled) == VK_SUCCESS &&
+                createFence(device, &fenceInfo, nullptr, &other) == VK_SUCCESS,
+            "Could not create test fences.");
+
+    constexpr uint64_t kWaitNs = 2'000'000'000ull;
+    std::atomic<VkResult> waitResult{ VK_SUCCESS };
+    std::thread waiter([&] { waitResult = layerWait(device, 1, &neverSignalled, VK_TRUE, kWaitNs); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+
+    const auto start = std::chrono::steady_clock::now();
+    layerDestroyFence(device, other, nullptr);
+    const auto blockedMs =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+
+    waiter.join();
+    layerDestroyFence(device, neverSignalled, nullptr);
+
+    Require(waitResult.load() == VK_TIMEOUT, "vkWaitForFences on an unsignalled fence did not time out.");
+    Require(blockedMs < 500, "vkDestroyFence through the layer was blocked for " + std::to_string(blockedMs) +
+                                 " ms behind another thread's vkWaitForFences.");
+}
+
 struct TestCase {
     const char* name;
     void (*fn)();
@@ -483,6 +532,7 @@ const TestCase kTests[] = {
     { "input.low_level_hook_dedicated_thread", &TestLowLevelHookOnDedicatedThread },
     { "gui.toggle_renders_imgui", &TestGuiToggleRendersImGui },
     { "hooks.third_party_swap_chain", &TestThirdPartySwapBuffersChain },
+    { "vulkan.layer_wait_does_not_block_other_calls", &TestVulkanLayerWaitDoesNotBlockOtherCalls },
     { "config.save_round_trip", &TestConfigSaveRoundTrip },
 };
 

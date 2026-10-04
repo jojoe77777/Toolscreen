@@ -1012,6 +1012,26 @@ VKAPI_ATTR void VKAPI_CALL LayerFreeCommandBuffers(
 
 }  // namespace
 
+namespace ToolscreenVulkanLayerTest {
+
+// For the in-game tests: a device this layer tracks, the layer's own device proc-address entry (so calls go
+// through the layer's hooks), and the next layer's entry (so calls bypass them).
+bool GetTrackedDevice(VkDevice& device, PFN_vkGetDeviceProcAddr& layerGdpa, PFN_vkGetDeviceProcAddr& nextGdpa) {
+    std::lock_guard lock(g_mutex);
+    for (const auto& [key, state] : g_devices) {
+        (void)key;
+        if (state.device && state.gdpa) {
+            device = state.device;
+            layerGdpa = LayerGetDeviceProcAddr;
+            nextGdpa = state.gdpa;
+            return true;
+        }
+    }
+    return false;
+}
+
+}  // namespace ToolscreenVulkanLayerTest
+
 extern "C" {
 
 PFN_vkGetDeviceProcAddr VKAPI_CALL
