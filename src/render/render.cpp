@@ -4749,6 +4749,8 @@ struct SameThreadOverlayState {
     float overlayOpacity = 1.0f;
 
     bool excludeOnlyOnMyScreen = false;
+    // The OBS/virtual-camera compose pass, which runs after the screen pass in the same swap.
+    bool isObsPass = false;
     bool skipAnimation = false;
     bool relativeStretching = false;
 
@@ -4967,6 +4969,58 @@ RECT NormalizeDragRect(POINT a, POINT b) {
 }
 }  // namespace
 
+// The screen pass's ImGui frame from the current swap. The OBS pass shows the same ImGui content minus the
+// performance overlay, profiler and texture grid, so when none of those were drawn it can submit this frame's
+// draw data instead of running a second NewFrame (and the whole settings GUI) on the same context.
+struct ScreenPassImGuiFrame {
+    uint64_t frameTag = 0;
+    int imguiFrameCount = -1;
+    bool shouldRenderGui = false;
+    bool showEyeZoom = false;
+    bool renderNinjabrainOverlay = false;
+    bool drewObsExcludedContent = false;
+};
+static ScreenPassImGuiFrame s_screenPassImGuiFrame;
+static std::atomic<uint64_t> s_obsPassImGuiFramesReused{ 0 };
+
+static bool CanReuseScreenPassImGuiFrameForObs(const SameThreadOverlayState& request, bool renderNinjabrainOverlay) {
+    const ScreenPassImGuiFrame& screen = s_screenPassImGuiFrame;
+    if (!request.isObsPass || screen.frameTag == 0 || screen.frameTag != request.mirrorCaptureFrameTag) return false;
+    if (!ImGui::GetCurrentContext() || ImGui::GetFrameCount() != screen.imguiFrameCount) return false;
+    const ImDrawData* drawData = ImGui::GetDrawData();
+    if (!drawData || !drawData->Valid) return false;
+    return !screen.drewObsExcludedContent && screen.shouldRenderGui == request.shouldRenderGui &&
+           screen.showEyeZoom == request.showEyeZoom && screen.renderNinjabrainOverlay == renderNinjabrainOverlay;
+}
+
+uint64_t GetObsPassImGuiFramesReusedForTests() { return s_obsPassImGuiFramesReused.load(std::memory_order_relaxed); }
+
+// Reads one RGBA pixel from the most recently composed OBS texture. Render thread only.
+bool ReadPublishedObsComposePixelForTests(int x, int y, unsigned char outRgba[4]) {
+    const int index = (g_sameThreadObsComposeWriteIndex + SAME_THREAD_OBS_BUFFER_COUNT - 1) % SAME_THREAD_OBS_BUFFER_COUNT;
+    if (index < 0 || index >= SAME_THREAD_OBS_BUFFER_COUNT || g_sameThreadObsComposeFBOs[index] == 0) return false;
+    if (x < 0 || y < 0 || x >= g_sameThreadObsComposeW || y >= g_sameThreadObsComposeH) return false;
+    GLint previousReadFramebuffer = 0;
+    GLint previousPackBuffer = 0;
+    GLint previousPackAlignment = 4;
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previousReadFramebuffer);
+    glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &previousPackBuffer);
+    glGetIntegerv(GL_PACK_ALIGNMENT, &previousPackAlignment);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, g_sameThreadObsComposeFBOs[index]);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(x, y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, outRgba);
+    glPixelStorei(GL_PACK_ALIGNMENT, previousPackAlignment);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, static_cast<GLuint>(previousPackBuffer));
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(previousReadFramebuffer));
+    return true;
+}
+
+void GetPublishedObsComposeSizeForTests(int& width, int& height) {
+    width = g_sameThreadObsComposeW;
+    height = g_sameThreadObsComposeH;
+}
+
 static void RenderSameThreadImGui(const SameThreadOverlayState& request, bool renderNinjabrainOverlay) {
     const bool shouldRenderAnyImGui = request.shouldRenderGui || request.showPerformanceOverlay || request.showProfiler ||
                                       request.showTextureGrid || request.showEyeZoom || renderNinjabrainOverlay;
@@ -4978,6 +5032,13 @@ static void RenderSameThreadImGui(const SameThreadOverlayState& request, bool re
 
     HWND hwnd = g_minecraftHwnd.load();
     if (!hwnd) return;
+
+    if (CanReuseScreenPassImGuiFrameForObs(request, renderNinjabrainOverlay)) {
+        PROFILE_SCOPE_CAT("ImGui Reuse Screen Frame For OBS", "ImGui");
+        RenderImGuiWithStateProtection(true);
+        s_obsPassImGuiFramesReused.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
     {
         PROFILE_SCOPE_CAT("ImGui Setup", "ImGui");
 
@@ -5063,6 +5124,18 @@ static void RenderSameThreadImGui(const SameThreadOverlayState& request, bool re
     {
         PROFILE_SCOPE_CAT("ImGui Build Draw Data", "ImGui");
         ImGui::Render();
+    }
+    if (request.isObsPass) {
+        // This frame replaced the screen pass's draw data.
+        s_screenPassImGuiFrame = {};
+    } else {
+        s_screenPassImGuiFrame.frameTag = request.mirrorCaptureFrameTag;
+        s_screenPassImGuiFrame.imguiFrameCount = ImGui::GetFrameCount();
+        s_screenPassImGuiFrame.shouldRenderGui = request.shouldRenderGui;
+        s_screenPassImGuiFrame.showEyeZoom = request.showEyeZoom;
+        s_screenPassImGuiFrame.renderNinjabrainOverlay = renderNinjabrainOverlay;
+        s_screenPassImGuiFrame.drewObsExcludedContent =
+            request.showPerformanceOverlay || request.showProfiler || request.showTextureGrid;
     }
     {
         PROFILE_SCOPE_CAT("ImGui Submit Draw Data", "ImGui");
@@ -6165,6 +6238,7 @@ bool RenderSameThreadObsFrame(const ModeConfig* modeToRender, const GLState& s, 
             request.isAnimating = isAnimating;
             request.overlayOpacity = 1.0f;
             request.excludeOnlyOnMyScreen = true;
+            request.isObsPass = true;
             request.skipAnimation = skipAnimation;
             request.relativeStretching = modeToRender->relativeStretching;
 
