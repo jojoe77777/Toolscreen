@@ -1368,6 +1368,8 @@ float ComputeGuiScaleFactorFromCachedWindowSize();
 void ConfigureImGuiFontsAndStyleForCurrentContext(float scaleFactor);
 void SaveConfig();
 void SaveConfigImmediate();
+// processExiting: called from DLL_PROCESS_DETACH at process exit, when every other thread is already gone.
+void SaveConfigImmediate(bool processExiting);
 bool WaitForConfigSaveIdle(int timeoutMs = 3000);
 void ApplyAppearanceConfig();
 void SaveTheme();

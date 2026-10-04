@@ -356,13 +356,17 @@ void SaveConfig() {
     }
 }
 
-void SaveConfigImmediate() {
+void SaveConfigImmediate() { SaveConfigImmediate(false); }
+
+void SaveConfigImmediate(bool processExiting) {
     PROFILE_SCOPE_CAT("Config Save (Immediate)", "IO Operations");
 
     // Persist a theme colour edit that never saw its end-of-interaction flush (e.g. GUI closed mid-drag).
     FlushDeferredThemeSave();
 
-    if (s_isConfigSaving.load()) {
+    // At process exit any background save thread has already been terminated, so there is nothing to wait for
+    // (saves write a temp file and rename it, so an interrupted save cannot corrupt config.toml).
+    if (s_isConfigSaving.load() && !processExiting) {
         Log("SaveConfigImmediate: Waiting for background save to complete...");
         if (!WaitForConfigSaveIdle(3000)) {
             Log("SaveConfigImmediate: Timed out waiting for background save. Proceeding anyway.");

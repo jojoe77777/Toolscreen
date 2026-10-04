@@ -138,13 +138,13 @@ std::string FormatStackTraceWithSymbols(void** stack, USHORT frames, int skipFra
 void SignalHandler(int sig) {
     if (sig == SIGABRT) {
         Log("!!! SIGABRT SIGNAL RECEIVED - ABNORMAL TERMINATION !!!");
-        FlushLogs();
+        FlushLogsBestEffort(500);
 
         // Capture stack trace
         void* stack[64];
         USHORT frames = CaptureStackBackTrace(1, 64, stack, NULL);
         Log(FormatStackTraceWithSymbols(stack, frames));
-        FlushLogs(); // Force flush after stack trace
+        FlushLogsBestEffort(500); // Force flush after stack trace
     }
 
     signal(sig, SIG_DFL);
@@ -192,13 +192,13 @@ extern "C" void abort() {
     }
 
     Log(contextSs.str());
-    FlushLogs();
+    FlushLogsBestEffort(500);
 
     // Capture stack trace at abort point
     void* stack[64];
     USHORT frames = CaptureStackBackTrace(1, 64, stack, NULL);
     Log(FormatStackTraceWithSymbols(stack, frames));
-    FlushLogs(); // Force flush after stack trace
+    FlushLogsBestEffort(500); // Force flush after stack trace
 
     signal(SIGABRT, SIG_DFL);
     raise(SIGABRT);
@@ -1073,7 +1073,7 @@ static std::thread g_logThread;
 static std::atomic<bool> g_logThreadRunning{ false };
 
 static void LogThreadMain();
-static void WriteLogsToFile();
+static void WriteLogsToFile(int lockTimeoutMs = -1);
 
 static void ProcessPendingLogArchives() {
     std::vector<std::wstring> pendingArchives;
@@ -1126,15 +1126,25 @@ static void LogThreadMain() {
     ProcessPendingLogArchives();
 }
 
-// Internal: Write all pending log entries to file (called by background thread or FlushLogs)
-static void WriteLogsToFile() {
+// Internal: Write all pending log entries to file (called by background thread or FlushLogs).
+// With a lock timeout, gives up (leaving entries queued) instead of waiting longer for the file lock.
+static void WriteLogsToFile(int lockTimeoutMs) {
     size_t readPos = g_logReadIndex.load(std::memory_order_relaxed);
     size_t claimPos = g_logClaimIndex.load(std::memory_order_acquire);
 
     if (readPos == claimPos) return;
 
     // Lock only during actual file I/O (not during Log() calls)
-    std::lock_guard<std::mutex> lock(g_logFileMutex);
+    std::unique_lock<std::mutex> lock(g_logFileMutex, std::defer_lock);
+    if (lockTimeoutMs < 0) {
+        lock.lock();
+    } else {
+        const ULONGLONG deadline = GetTickCount64() + static_cast<ULONGLONG>(lockTimeoutMs);
+        while (!lock.try_lock()) {
+            if (GetTickCount64() >= deadline) return;
+            Sleep(5);
+        }
+    }
     if (!logFile.is_open()) return;
 
     while (readPos != claimPos) {
@@ -1157,6 +1167,10 @@ static void WriteLogsToFile() {
 }
 
 void FlushLogs() { WriteLogsToFile(); }
+
+// For crash handlers and process exit, where the thread holding the log file lock may have been terminated:
+// an SRW-lock-backed std::mutex owned by a dead thread is never released, so never wait on it indefinitely.
+void FlushLogsBestEffort(int lockTimeoutMs) { WriteLogsToFile(lockTimeoutMs); }
 
 void LogCategory(const char* category, const std::string& message) {
     bool enabled = false;
@@ -1302,12 +1316,12 @@ void LogException(const std::string& context, DWORD exceptionCode, EXCEPTION_POI
     const uint64_t lastFlush = s_lastFlushMs.load(std::memory_order_relaxed);
     if (lastFlush == 0 || (nowMs - lastFlush) >= kFlushMinIntervalMs) {
         s_lastFlushMs.store(nowMs, std::memory_order_relaxed);
-        FlushLogs();
+        FlushLogsBestEffort(500);
     }
 }
 
 LONG WINAPI CustomUnhandledExceptionFilter(EXCEPTION_POINTERS* exceptionInfo) {
-    FlushLogs();
+    FlushLogsBestEffort(500);
 
     std::cerr << "[Toolscreen] EXCEPTION FILTER TRIGGERED" << std::endl;
     std::cerr.flush();
@@ -1388,7 +1402,7 @@ LONG WINAPI CustomUnhandledExceptionFilter(EXCEPTION_POINTERS* exceptionInfo) {
 
     Log("=== END EXCEPTION DETAILS ===");
 
-    FlushLogs();
+    FlushLogsBestEffort(500);
 
     std::cerr << "[Toolscreen] EXCEPTION LOGGED - Check log file" << std::endl;
     std::cerr.flush();

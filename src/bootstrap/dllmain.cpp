@@ -4775,8 +4775,19 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 
         RestoreKeyRepeatSettings();
 
-        SaveConfigImmediate();
+        // lpReserved is non-NULL when the process is exiting (not a FreeLibrary). By then Windows has terminated
+        // every other thread, possibly while one held a lock, so only do what still matters: restore the system
+        // settings above, save the config and flush the log without waiting on locks a dead thread may own.
+        const bool processExiting = lpReserved != nullptr;
+        SaveConfigImmediate(processExiting);
         Log("Config saved.");
+
+        if (processExiting) {
+            Log("DLL cleanup complete (process exit).");
+            FlushLogsBestEffort(500);
+            ReleaseLatestLogSession(g_logSession);
+            return TRUE;
+        }
 
         // Stop monitoring threads
         g_stopMonitoring = true;

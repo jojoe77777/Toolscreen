@@ -352,6 +352,8 @@ std::string SanitizePathForDisplay(const std::string& path);
 std::wstring SanitizePathForDisplay(const std::wstring& path);
 std::string FileNameForDisplay(const std::string& path);
 std::wstring GetToolscreenPath();
+// Flushes queued log lines, giving up if the log file lock is not free within lockTimeoutMs.
+void FlushLogsBestEffort(int lockTimeoutMs);
 
 bool CompressFileToGzip(const std::wstring& srcPath, const std::wstring& dstPath);
 
