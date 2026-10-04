@@ -1684,10 +1684,10 @@ if(TOOLSCREEN_POWERSHELL_EXECUTABLE)
             RUN_SERIAL TRUE
         )
     endforeach()
-    # Config fixtures, run on one client per backend:
+    # Config fixtures, run on every in-game client:
     #   config_error   - a config.toml that cannot be loaded or restored must show the error screen.
     #   config_restore - a corrupt config.toml beside a good launch snapshot must be restored silently.
-    foreach(game_test_spec IN ITEMS "1.16.1:opengl" "26.3:vulkan")
+    foreach(game_test_spec IN ITEMS "1.16.1:opengl" "26.3:opengl" "26.3:vulkan")
         string(REPLACE ":" ";" game_test_parts "${game_test_spec}")
         list(GET game_test_parts 0 game_test_version)
         list(GET game_test_parts 1 game_test_backend)
