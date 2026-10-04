@@ -7,6 +7,7 @@
 #include "hooks/hook_chain.h"
 #include "hooks/input_hook.h"
 #include "render/render_backend.h"
+#include "render/vulkan/vulkan_renderer.h"
 #include "version.h"
 
 #include "imgui.h"
@@ -516,6 +517,32 @@ void TestVulkanLayerWaitDoesNotBlockOtherCalls() {
                                  " ms behind another thread's vkWaitForFences.");
 }
 
+// Overlay frames must only count as finished once the GPU has run them, and every frame must get a tracking
+// slot; otherwise retired textures, fonts and mirror snapshots can be destroyed while still in use.
+void TestVulkanFrameCompletionTracking() {
+    WaitUntil([] { return GetRenderBackend() != RenderBackend::Unknown; }, std::chrono::seconds(20));
+    if (GetRenderBackend() != RenderBackend::Vulkan) Skip("GPU frame-completion tracking is part of the Vulkan renderer.");
+    Require(WaitUntil([] { return VulkanRenderer::GetFrameTrackingStats().completedFrames > 0; }, std::chrono::seconds(20)),
+            "No overlay frame was ever reported complete.");
+
+    VulkanRenderer::SetFrameTrackingProbeEnabled(true);
+    const VulkanRenderer::FrameTrackingStats before = VulkanRenderer::GetFrameTrackingStats();
+    const bool rendered = WaitForFrames(120, std::chrono::seconds(30));
+    const VulkanRenderer::FrameTrackingStats after = VulkanRenderer::GetFrameTrackingStats();
+    VulkanRenderer::SetFrameTrackingProbeEnabled(false);
+    Require(rendered, "Fewer than 120 frames were rendered.");
+
+    const uint64_t completed = after.completedFrames - before.completedFrames;
+    const uint64_t early = after.earlyAvailabilityFrames - before.earlyAvailabilityFrames;
+    const uint64_t untracked = after.untrackedFrames - before.untrackedFrames;
+    Log("[GAME TEST] Vulkan frame tracking over 120 frames: completed=" + std::to_string(completed) +
+        " heldBackFromEarlyAvailability=" + std::to_string(early) + " untracked=" + std::to_string(untracked) +
+        " presentProbeStaleAvailability=" + std::to_string(after.probeStaleAvailability - before.probeStaleAvailability) + "/" +
+        std::to_string(after.probeSamples - before.probeSamples));
+    Require(completed >= 60, "Only " + std::to_string(completed) + " of 120 overlay frames were reported complete.");
+    Require(untracked == 0, std::to_string(untracked) + " overlay frames had no free tracking slot.");
+}
+
 struct TestCase {
     const char* name;
     void (*fn)();
@@ -533,6 +560,7 @@ const TestCase kTests[] = {
     { "gui.toggle_renders_imgui", &TestGuiToggleRendersImGui },
     { "hooks.third_party_swap_chain", &TestThirdPartySwapBuffersChain },
     { "vulkan.layer_wait_does_not_block_other_calls", &TestVulkanLayerWaitDoesNotBlockOtherCalls },
+    { "vulkan.frame_completion_tracking", &TestVulkanFrameCompletionTracking },
     { "config.save_round_trip", &TestConfigSaveRoundTrip },
 };
 
