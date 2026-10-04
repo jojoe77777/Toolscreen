@@ -438,8 +438,8 @@ void SaveTheme() {
         }
         tbl.insert_or_assign("customColors", colorsTbl);
 
-        // Write through a temp file so a crash mid-write cannot leave a truncated theme.toml behind.
-        if (!WriteFileAtomically(themePath, [&tbl](std::ostream& o) {
+        // Validated, flushed temp-file write that keeps the previous theme as theme.toml.bak.
+        if (!WriteTomlFileSafely(themePath, [&tbl](std::ostream& o) {
                 o << tbl;
                 return true;
             })) {
@@ -465,24 +465,19 @@ void LoadTheme() {
     }
 
     std::wstring themePath = g_toolscreenPath + L"\\theme.toml";
-    std::ifstream testFile(std::filesystem::path(themePath), std::ios::binary);
-    if (!testFile.good()) {
-        Log("theme.toml not found, using default theme.");
-        return;
-    }
     try {
         toml::table tbl;
-#if TOML_EXCEPTIONS
-        tbl = toml::parse(testFile, themePath);
-#else
-        toml::parse_result result = toml::parse(testFile, themePath);
-        if (!result) {
-            const auto& err = result.error();
-            Log("ERROR: Failed to parse theme.toml: " + std::string(err.description()));
+        std::string loadError;
+        const auto parseTheme = [&tbl](const std::string& source, std::string& error) { return ParseTomlSource(source, tbl, error); };
+        const TomlFileLoadStatus status = LoadTomlFileWithRecovery(themePath, {}, parseTheme, &loadError);
+        if (status == TomlFileLoadStatus::Missing) {
+            Log("theme.toml not found, using default theme.");
             return;
         }
-        tbl = std::move(result).table();
-#endif
+        if (status == TomlFileLoadStatus::Unrecoverable) {
+            Log("ERROR: Failed to parse theme.toml: " + loadError);
+            return;
+        }
         const bool cleanedThemeCustomColors = SanitizeAppearanceCustomColorsTable(tbl, "customColors");
         if (tbl.contains("theme")) {
             std::string themeName = tbl["theme"].value_or<std::string>("Dark");

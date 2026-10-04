@@ -5,6 +5,7 @@
 #include "common/profiler.h"
 #include "common/utils.h"
 #include "config/config_migration.h"
+#include "config/config_file_safety.h"
 #include "config/config_toml.h"
 #include "render/render.h"
 #include "render/mirror_thread.h"
@@ -541,7 +542,8 @@ void LoadConfig() {
         }
     }
 
-    BackupConfigFile();
+    RemoveStaleConfigTempFiles(g_toolscreenPath);
+    RemoveStaleConfigTempFiles(g_toolscreenPath + L"\\profiles");
     ExtractBundledFontAssets(std::filesystem::path(g_toolscreenPath), &LoadConfig);
     LoadSystemFontAssets();
 
@@ -553,23 +555,24 @@ void LoadConfig() {
             g_hotkeyTimestamps.clear();
         }
 
-        std::ifstream in(std::filesystem::path(configPath), std::ios::binary);
-        if (!in.is_open()) {
-            throw std::runtime_error("Failed to open config.toml for reading.");
+        // A damaged config.toml is restored from config.toml.bak, then from the newest intact launch snapshot.
+        std::string loadError;
+        TomlFileLoadStatus loadStatus =
+            LoadConfigFromTomlFileWithRecovery(configPath, g_config, ListConfigBackupsNewestFirst(), &loadError);
+        if (loadStatus == TomlFileLoadStatus::Missing) {
+            // The file was unreadable (empty or NUL-filled) with no usable backup, and has been moved aside.
+            Log("config.toml was damaged beyond recovery. Writing a default config file.");
+            g_config = Config();
+            WriteDefaultConfig(configPath);
+            loadStatus = LoadConfigFromTomlFileWithRecovery(configPath, g_config, {}, &loadError);
+            if (loadStatus == TomlFileLoadStatus::Missing) {
+                throw std::runtime_error("Could not create a default config.toml.");
+            }
         }
-
-        toml::table tbl;
-#if TOML_EXCEPTIONS
-        tbl = toml::parse(in, configPath);
-#else
-        toml::parse_result result = toml::parse(in, configPath);
-        if (!result) {
-            const auto& err = result.error();
-            throw std::runtime_error(std::string(err.description()));
+        if (loadStatus == TomlFileLoadStatus::Unrecoverable) {
+            throw std::runtime_error(loadError);
         }
-        tbl = std::move(result).table();
-#endif
-        ConfigFromToml(tbl, g_config);
+        BackupConfigFile();
         g_sharedConfig = g_config;
 
         MigrateToProfiles();

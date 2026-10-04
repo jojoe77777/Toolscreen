@@ -3415,27 +3415,7 @@ bool RepairLegacyArrayOfTablesConflicts(const std::string& source, std::string& 
 }
 
 bool ParseTomlTableFromString(const std::string& source, toml::table& tbl, std::string& errorDescription) {
-#if TOML_EXCEPTIONS
-    try {
-        tbl = toml::parse(source);
-        return true;
-    } catch (const toml::parse_error& e) {
-        errorDescription = e.what();
-        return false;
-    } catch (const std::exception& e) {
-        errorDescription = e.what();
-        return false;
-    }
-#else
-    toml::parse_result result = toml::parse(source);
-    if (!result) {
-        errorDescription = std::string(result.error().description());
-        return false;
-    }
-
-    tbl = std::move(result).table();
-    return true;
-#endif
+    return ParseTomlSource(source, tbl, errorDescription);
 }
 
 bool WriteConfigTomlDocument(std::ostream& out, const Config& config) {
@@ -3515,58 +3495,80 @@ bool SerializeConfigToTomlString(const Config& config, std::string& outToml) {
 
 bool SaveConfigToTomlFile(const Config& config, const std::wstring& path) {
     try {
-        // Write through a temp file so a crash mid-write cannot leave a truncated config behind.
-        return WriteFileAtomically(path, [&config](std::ostream& out) { return WriteConfigTomlDocument(out, config); });
+        // Validated, flushed temp-file write that keeps the previous version as <path>.bak.
+        return WriteTomlFileSafely(path, [&config](std::ostream& out) { return WriteConfigTomlDocument(out, config); });
     } catch (const std::exception& e) {
         Log("ERROR: Failed to save config to TOML: " + std::string(e.what()));
         return false;
     }
 }
 
-bool LoadConfigFromTomlFile(const std::wstring& path, Config& config) {
-    try {
-        std::ifstream in(std::filesystem::path(path), std::ios::binary);
-        if (!in.is_open()) {
-            Log("ERROR: Failed to open config for reading: " + WideToUtf8(path));
-            return false;
-        }
+TomlFileLoadStatus LoadConfigFromTomlFileWithRecovery(const std::wstring& path, Config& config,
+                                                      const std::vector<std::wstring>& extraBackups, std::string* outError) {
+    Config loaded;
+    bool repairedLegacyArrayConflict = false;
+    bool cleanedAppearanceCustomColors = false;
 
-        std::ostringstream buffer;
-        buffer << in.rdbuf();
-
+    const auto parseConfig = [&](const std::string& source, std::string& error) {
         toml::table tbl;
-        std::string parseError;
-        const std::string source = buffer.str();
-        bool repairedLegacyArrayConflict = false;
-        if (!ParseTomlTableFromString(source, tbl, parseError)) {
+        repairedLegacyArrayConflict = false;
+        if (!ParseTomlTableFromString(source, tbl, error)) {
             std::string repairedSource;
-            if (parseError.find("cannot redefine existing array") != std::string::npos &&
-                RepairLegacyArrayOfTablesConflicts(source, repairedSource) &&
-                ParseTomlTableFromString(repairedSource, tbl, parseError)) {
-                repairedLegacyArrayConflict = true;
-                Log("WARNING: Repaired legacy TOML array-of-tables conflict while loading: " + WideToUtf8(path));
-            } else {
-                Log("ERROR: TOML parse error: " + parseError);
+            if (error.find("cannot redefine existing array") == std::string::npos ||
+                !RepairLegacyArrayOfTablesConflicts(source, repairedSource) ||
+                !ParseTomlTableFromString(repairedSource, tbl, error)) {
                 return false;
             }
+            repairedLegacyArrayConflict = true;
         }
 
-        const bool cleanedAppearanceCustomColors = SanitizeConfigAppearanceCustomColors(tbl);
+        cleanedAppearanceCustomColors = SanitizeConfigAppearanceCustomColors(tbl);
 
-        ConfigFromToml(tbl, config);
-
-        if (cleanedAppearanceCustomColors || repairedLegacyArrayConflict) {
-            if (!SaveConfigToTomlFile(config, path)) {
-                Log("WARNING: Failed to persist sanitized config/profile TOML after load: " + WideToUtf8(path));
-            } else if (cleanedAppearanceCustomColors) {
-                Log("WARNING: Removed invalid appearance.customColors entries while loading: " + WideToUtf8(path));
-            }
-        }
+        // Convert into a scratch copy so a rejected file leaves no partial state behind.
+        loaded = config;
+        ConfigFromToml(tbl, loaded);
         return true;
+    };
+
+    std::string loadError;
+    TomlFileLoadStatus status = TomlFileLoadStatus::Unrecoverable;
+    try {
+        status = LoadTomlFileWithRecovery(path, extraBackups, parseConfig, &loadError);
     } catch (const std::exception& e) {
-        Log("ERROR: Failed to load config from TOML: " + std::string(e.what()));
+        loadError = e.what();
+    }
+
+    if (status == TomlFileLoadStatus::Unrecoverable) {
+        Log("ERROR: Failed to load " + WideToUtf8(path) + ": " + loadError);
+        if (outError) *outError = loadError;
+        return status;
+    }
+    if (status == TomlFileLoadStatus::Missing) {
+        return status;
+    }
+
+    config = std::move(loaded);
+
+    if (repairedLegacyArrayConflict) {
+        Log("WARNING: Repaired legacy TOML array-of-tables conflict while loading: " + WideToUtf8(path));
+    }
+    if (cleanedAppearanceCustomColors || repairedLegacyArrayConflict) {
+        if (!SaveConfigToTomlFile(config, path)) {
+            Log("WARNING: Failed to persist sanitized config/profile TOML after load: " + WideToUtf8(path));
+        } else if (cleanedAppearanceCustomColors) {
+            Log("WARNING: Removed invalid appearance.customColors entries while loading: " + WideToUtf8(path));
+        }
+    }
+    return status;
+}
+
+bool LoadConfigFromTomlFile(const std::wstring& path, Config& config) {
+    const TomlFileLoadStatus status = LoadConfigFromTomlFileWithRecovery(path, config, {}, nullptr);
+    if (status == TomlFileLoadStatus::Missing) {
+        Log("ERROR: Failed to open config for reading: " + WideToUtf8(path));
         return false;
     }
+    return status != TomlFileLoadStatus::Unrecoverable;
 }
 
 

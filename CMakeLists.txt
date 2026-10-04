@@ -1237,6 +1237,12 @@ set(TOOLSCREEN_GUI_INTEGRATION_TEST_CASES
     fullscreen-relative-gui-publish-preserves-recalculated-size
     config-load-preemptive-sync-existing-mode
     config-load-thin-min-width-enforced
+    config-load-recover-from-bak
+    config-load-recover-from-snapshot
+    config-load-empty-file-reset-to-defaults
+    config-load-invalid-without-backup-kept-in-place
+    config-load-snapshot-dedup
+    config-load-stale-temp-files-removed
     config-load-browser-overlay-defaults
     config-load-window-overlay-defaults
     config-load-image-defaults
@@ -1313,6 +1319,9 @@ set(TOOLSCREEN_GUI_INTEGRATION_TEST_CASES
     profile-selective-switch-shared-fallback
     profile-case-insensitive-collisions
     profile-recover-missing-metadata
+    profile-recover-damaged-profile-file
+    profile-recover-damaged-metadata
+    profile-backup-follows-rename-and-delete
     profile-async-save-skip-deleted-profile
     profile-switch-ninjabrain-async-stop
     profile-switch-ninjabrain-async-restart

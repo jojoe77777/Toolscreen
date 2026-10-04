@@ -1203,6 +1203,91 @@ void RunProfileRecoverMissingMetadataTest(TestRunMode runMode = TestRunMode::Aut
     Expect(g_profilesConfig.activeProfile == kDefaultProfileName, "Recovered metadata should fall back to the Default active profile.");
 }
 
+void RunProfileRecoverDamagedProfileFileTest(TestRunMode runMode = TestRunMode::Automated) {
+    (void)runMode;
+    ResetProfileTestState("profile_recover_damaged_profile_file");
+    ClearConfigRecoveryNotices();
+
+    Expect(CreateNewProfile("Recoverable"), "CreateNewProfile should create the profile under test.");
+    Config first = g_config;
+    first.fpsLimit = 77;
+    Expect(SaveProfileSnapshot("Recoverable", first), "First profile save should succeed.");
+    Config second = g_config;
+    second.fpsLimit = 88;
+    Expect(SaveProfileSnapshot("Recoverable", second), "Second profile save should succeed.");
+
+    const std::filesystem::path profilePath = GetProfilesDirectoryForTests() / "Recoverable.toml";
+    Expect(std::filesystem::exists(profilePath.wstring() + L".bak"), "Saving over a profile should keep its previous version as .bak.");
+    {
+        std::ofstream out(profilePath, std::ios::binary | std::ios::trunc);
+        out << "[[modes]\nid = ";
+    }
+
+    Expect(LoadProfile("Recoverable"), "LoadProfile should restore a damaged profile from its .bak.");
+    Expect(g_config.fpsLimit == 77, "The restored profile should carry the values from its last good save.");
+    Expect(LoadProfileConfigForTests("Recoverable").fpsLimit == 77, "The restored profile should be written back to disk.");
+
+    const std::vector<ConfigRecoveryNotice> notices = GetConfigRecoveryNotices();
+    Expect(notices.size() == 1 && notices[0].restoredFrom == "Recoverable.toml.bak",
+           "Restoring a profile should record a notice naming its backup.");
+    ClearConfigRecoveryNotices();
+}
+
+void RunProfileRecoverDamagedMetadataTest(TestRunMode runMode = TestRunMode::Automated) {
+    (void)runMode;
+    ResetProfileTestState("profile_recover_damaged_metadata");
+    ClearConfigRecoveryNotices();
+
+    Expect(CreateNewProfile("Colored"), "CreateNewProfile should create the colored profile.");
+    const float color[3] = { 0.25f, 0.5f, 0.75f };
+    Expect(UpdateProfileMetadata("Colored", "Colored", color, ProfileSectionSelection{}),
+           "UpdateProfileMetadata should store the profile color.");
+    Expect(CreateNewProfile("Later"), "CreateNewProfile should rewrite profiles.toml after the colored save.");
+
+    const std::filesystem::path metadataPath = GetProfilesMetadataPathForTests();
+    {
+        std::ofstream out(metadataPath, std::ios::binary | std::ios::trunc);
+        out << std::string(64, '\0');
+    }
+
+    g_profilesConfig = ProfilesConfig();
+    LoadConfig();
+    ExpectConfigLoadSucceeded("profile_recover_damaged_metadata reload");
+
+    bool foundColored = false;
+    for (const auto& pm : g_profilesConfig.profiles) {
+        if (pm.name == "Colored") {
+            foundColored = true;
+            Expect(pm.color[0] == color[0] && pm.color[1] == color[1] && pm.color[2] == color[2],
+                   "Profile colors should survive a damaged profiles.toml through its .bak.");
+        }
+    }
+    Expect(foundColored, "The colored profile should still be tracked after recovery.");
+    ExpectProfilesMetadataMatchesDisk({ kDefaultProfileName, "Colored", "Later" }, "profile_recover_damaged_metadata");
+    ClearConfigRecoveryNotices();
+}
+
+void RunProfileBackupFollowsRenameAndDeleteTest(TestRunMode runMode = TestRunMode::Automated) {
+    (void)runMode;
+    ResetProfileTestState("profile_backup_follows_rename_and_delete");
+
+    Expect(CreateNewProfile("Before"), "CreateNewProfile should create the profile to rename.");
+    Expect(SaveProfileSnapshot("Before", g_config), "A second save should produce a .bak for the profile.");
+    Config changed = g_config;
+    changed.fpsLimit = 42;
+    Expect(SaveProfileSnapshot("Before", changed), "A changed save should keep the previous version as .bak.");
+
+    const std::filesystem::path profilesDir = GetProfilesDirectoryForTests();
+    Expect(std::filesystem::exists(profilesDir / "Before.toml.bak"), "The profile should have a .bak before renaming.");
+
+    Expect(RenameProfile("Before", "After"), "RenameProfile should succeed.");
+    Expect(!std::filesystem::exists(profilesDir / "Before.toml.bak"), "Renaming should not leave the old .bak behind.");
+    Expect(std::filesystem::exists(profilesDir / "After.toml.bak"), "Renaming should carry the .bak to the new name.");
+
+    DeleteProfile("After");
+    Expect(!std::filesystem::exists(profilesDir / "After.toml.bak"), "Deleting a profile should remove its .bak.");
+}
+
 void RunProfileAsyncSaveSkipDeletedProfileTest(TestRunMode runMode = TestRunMode::Automated) {
     (void)runMode;
     ResetProfileTestState("profile_async_save_skip_deleted_profile");

@@ -2160,3 +2160,167 @@ void RunConfigModeSourceHelpersTest(TestRunMode /*runMode*/ = TestRunMode::Autom
     Expect(!RenameModeSource(mode, ModeSourceType::Mirror, "NoSuchName", "Anything"),
            "RenameModeSource of a missing entry should return false.");
 }
+
+std::vector<std::string> FileNamesWithPrefix(const std::filesystem::path& directory, std::string_view prefix) {
+    std::vector<std::string> matches;
+    if (!std::filesystem::exists(directory)) {
+        return matches;
+    }
+    for (const auto& fileName : ListDirectoryFileNamesSorted(directory)) {
+        if (fileName.rfind(prefix, 0) == 0) {
+            matches.push_back(fileName);
+        }
+    }
+    return matches;
+}
+
+void WriteRawBytesToDisk(const std::filesystem::path& path, std::string_view bytes) {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    Expect(out.is_open(), "Failed to open " + path.string() + " for a raw write.");
+    out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    out.close();
+}
+
+void ExpectSingleRecoveryNotice(const std::string& context, bool expectRestored) {
+    const std::vector<ConfigRecoveryNotice> notices = GetConfigRecoveryNotices();
+    Expect(notices.size() == 1, context + " should record exactly one recovery notice.");
+    Expect(notices[0].fileName == "config.toml", context + " should name config.toml in the recovery notice.");
+    Expect(notices[0].restoredFrom.empty() != expectRestored, context + " recorded the wrong restore source.");
+    Expect(notices[0].movedAsideAs.rfind("config.toml.corrupt-", 0) == 0, context + " should name the moved-aside copy.");
+}
+
+void RunConfigLoadRecoverFromBakTest(TestRunMode runMode = TestRunMode::Automated) {
+    ClearConfigRecoveryNotices();
+    RunConfigLoadCase("config_load_recover_from_bak",
+                      []() {
+                          Config config;
+                          config.fpsLimit = 123;
+                          WriteConfigFixtureToDisk(config);
+                          config.fpsLimit = 456;
+                          WriteConfigFixtureToDisk(config);
+
+                          const std::filesystem::path backupPath = GetCurrentConfigPath().wstring() + L".bak";
+                          Expect(std::filesystem::exists(backupPath), "Saving over an intact config.toml should keep it as config.toml.bak.");
+
+                          WriteRawConfigTomlToDisk("configVersion = 4\n[[modes]]\nid = \"Fullscreen\"\nwidth =\n");
+                      },
+                      []() {
+                          ExpectConfigLoadSucceeded("config-load-recover-from-bak");
+                          Expect(g_config.fpsLimit == 123, "A damaged config.toml should be restored from config.toml.bak.");
+
+                          const std::filesystem::path root(g_toolscreenPath);
+                          Expect(FileNamesWithPrefix(root, "config.toml.corrupt-").size() == 1,
+                                 "The damaged config.toml should be kept next to the restored file.");
+
+                          Config onDisk;
+                          Expect(LoadConfigFromTomlFile(GetCurrentConfigPath().wstring(), onDisk) && onDisk.fpsLimit == 123,
+                                 "The restored contents should be written back to config.toml.");
+                          ExpectSingleRecoveryNotice("config-load-recover-from-bak", true);
+                      },
+                      runMode);
+    ClearConfigRecoveryNotices();
+}
+
+void RunConfigLoadRecoverFromSnapshotTest(TestRunMode runMode = TestRunMode::Automated) {
+    ClearConfigRecoveryNotices();
+    RunConfigLoadCase("config_load_recover_from_snapshot",
+                      []() {
+                          const std::filesystem::path root(g_toolscreenPath);
+                          const std::filesystem::path backupsDir = root / "backups";
+                          std::filesystem::create_directories(backupsDir);
+
+                          Config older;
+                          older.fpsLimit = 111;
+                          Expect(SaveConfigToTomlFile(older, (backupsDir / "config_1000.toml").wstring()), "Failed to write older snapshot.");
+                          Config newer;
+                          newer.fpsLimit = 222;
+                          Expect(SaveConfigToTomlFile(newer, (backupsDir / "config_2000.toml").wstring()), "Failed to write newer snapshot.");
+                          // The newest snapshot is damaged too, so recovery must skip it.
+                          WriteRawBytesToDisk(backupsDir / "config_3000.toml", "fpsLimit = \n");
+
+                          WriteRawBytesToDisk(GetCurrentConfigPath(), std::string(512, '\0'));
+                      },
+                      []() {
+                          ExpectConfigLoadSucceeded("config-load-recover-from-snapshot");
+                          Expect(g_config.fpsLimit == 222, "A damaged config.toml should be restored from the newest intact snapshot.");
+                          ExpectSingleRecoveryNotice("config-load-recover-from-snapshot", true);
+                          Expect(GetConfigRecoveryNotices()[0].restoredFrom == "config_2000.toml",
+                                 "The recovery notice should name the snapshot that was used.");
+                      },
+                      runMode);
+    ClearConfigRecoveryNotices();
+}
+
+void RunConfigLoadEmptyFileResetToDefaultsTest(TestRunMode runMode = TestRunMode::Automated) {
+    ClearConfigRecoveryNotices();
+    RunConfigLoadCase("config_load_empty_file_reset_to_defaults",
+                      []() { WriteRawBytesToDisk(GetCurrentConfigPath(), ""); },
+                      []() {
+                          ExpectConfigLoadSucceeded("config-load-empty-file-reset-to-defaults");
+                          Expect(!g_config.modes.empty(), "An empty config.toml with no backup should be replaced by the default config.");
+
+                          std::error_code error;
+                          Expect(std::filesystem::file_size(GetCurrentConfigPath(), error) > 0 && !error,
+                                 "A fresh default config.toml should be written in place of the empty file.");
+                          Expect(FileNamesWithPrefix(std::filesystem::path(g_toolscreenPath), "config.toml.corrupt-").size() == 1,
+                                 "The empty config.toml should be moved aside, not deleted.");
+                          ExpectSingleRecoveryNotice("config-load-empty-file-reset-to-defaults", false);
+                      },
+                      runMode);
+    ClearConfigRecoveryNotices();
+}
+
+void RunConfigLoadInvalidWithoutBackupKeptInPlaceTest(TestRunMode runMode = TestRunMode::Automated) {
+    (void)runMode;
+    const std::filesystem::path root = PrepareCaseDirectory("config_load_invalid_without_backup_kept_in_place");
+    ResetGlobalTestState(root);
+    ClearConfigRecoveryNotices();
+
+    const std::string brokenToml = "configVersion = 4\n[[modes]]\nid = \"Fullscreen\"\nwidth =\n";
+    WriteRawConfigTomlToDisk(brokenToml);
+    LoadConfig();
+
+    Expect(g_configLoadFailed.load(std::memory_order_acquire), "Invalid TOML with no backup should still report a load error.");
+    {
+        std::lock_guard<std::mutex> lock(g_configErrorMutex);
+        Expect(g_configLoadError.find("line ") != std::string::npos, "The load error should point at the broken line.");
+    }
+
+    std::ifstream in(GetCurrentConfigPath(), std::ios::binary);
+    const std::string onDisk((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    Expect(onDisk == brokenToml, "A hand-editable config.toml with no backup must stay in place so the user can fix it.");
+    Expect(FileNamesWithPrefix(root, "config.toml.corrupt-").empty(), "Nothing should be moved aside when nothing was restored.");
+    Expect(FileNamesWithPrefix(root / "backups", "config_").empty(), "An invalid config.toml must not be snapshotted.");
+    Expect(GetConfigRecoveryNotices().empty(), "No recovery notice should be recorded when nothing was recovered.");
+}
+
+void RunConfigLoadSnapshotDedupTest(TestRunMode runMode = TestRunMode::Automated) {
+    (void)runMode;
+    const std::filesystem::path root = PrepareCaseDirectory("config_load_snapshot_dedup");
+    ResetGlobalTestState(root);
+
+    LoadConfig();
+    ExpectConfigLoadSucceeded("config-load-snapshot-dedup first load");
+    ReloadConfigFromDisk();
+    ExpectConfigLoadSucceeded("config-load-snapshot-dedup second load");
+
+    Expect(FileNamesWithPrefix(root / "backups", "config_").size() == 1,
+           "Reloading an unchanged config.toml should not add a duplicate snapshot.");
+}
+
+void RunConfigLoadStaleTempFilesRemovedTest(TestRunMode runMode = TestRunMode::Automated) {
+    (void)runMode;
+    const std::filesystem::path root = PrepareCaseDirectory("config_load_stale_temp_files_removed");
+    ResetGlobalTestState(root);
+
+    const std::filesystem::path staleTemp = root / "config.toml.tmp-1234-5678";
+    const std::filesystem::path freshTemp = root / "config.toml.tmp-1234-9999";
+    WriteRawBytesToDisk(staleTemp, "partial");
+    WriteRawBytesToDisk(freshTemp, "in progress");
+    std::filesystem::last_write_time(staleTemp, std::filesystem::file_time_type::clock::now() - std::chrono::hours(1));
+
+    LoadConfig();
+    ExpectConfigLoadSucceeded("config-load-stale-temp-files-removed");
+    Expect(!std::filesystem::exists(staleTemp), "Temp files left by an interrupted save should be removed on load.");
+    Expect(std::filesystem::exists(freshTemp), "Recent temp files may belong to another instance's save and must be kept.");
+}

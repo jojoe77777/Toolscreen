@@ -1,3 +1,4 @@
+#include "config_file_safety.h"
 #include "config_migration.h"
 #include "config_toml.h"
 #include "common/i18n.h"
@@ -110,85 +111,6 @@ static ProfileSectionSelection ProfileSectionsFromToml(const toml::node* node) {
     return sections;
 }
 
-static std::wstring MakeTempSiblingPath(const std::wstring& finalPath, const wchar_t* suffix) {
-    const std::filesystem::path final(finalPath);
-    const std::wstring filename = final.filename().wstring();
-    return (final.parent_path() /
-            (filename + suffix + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64())))
-        .wstring();
-}
-
-static bool IsTransientProfileFileError(const DWORD errorCode) {
-    return errorCode == ERROR_ACCESS_DENIED ||
-           errorCode == ERROR_LOCK_VIOLATION ||
-           errorCode == ERROR_SHARING_VIOLATION;
-}
-
-template <typename Operation>
-static bool RetryProfileFileOperation(Operation&& operation) {
-    constexpr int kMaxAttempts = 60;
-    constexpr DWORD kRetryDelayMs = 5;
-
-    DWORD lastError = ERROR_SUCCESS;
-    for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
-        if (operation()) {
-            return true;
-        }
-
-        lastError = GetLastError();
-        if (!IsTransientProfileFileError(lastError) || attempt == (kMaxAttempts - 1)) {
-            SetLastError(lastError);
-            return false;
-        }
-
-        Sleep(kRetryDelayMs);
-    }
-
-    SetLastError(lastError);
-    return false;
-}
-
-static bool DeletePathIfPresentWithRetries(const std::wstring& path) {
-    return RetryProfileFileOperation([&]() {
-        if (DeleteFileW(path.c_str())) {
-            return true;
-        }
-
-        const DWORD errorCode = GetLastError();
-        if (errorCode == ERROR_FILE_NOT_FOUND || errorCode == ERROR_PATH_NOT_FOUND) {
-            SetLastError(ERROR_SUCCESS);
-            return true;
-        }
-
-        SetLastError(errorCode);
-        return false;
-    });
-}
-
-static bool MovePathWithRetries(const std::wstring& fromPath, const std::wstring& toPath, const DWORD flags) {
-    return RetryProfileFileOperation([&]() {
-        return MoveFileExW(fromPath.c_str(), toPath.c_str(), flags | MOVEFILE_WRITE_THROUGH);
-    });
-}
-
-static bool ReplacePathAtomically(const std::wstring& tempPath, const std::wstring& finalPath) {
-    if (MovePathWithRetries(tempPath, finalPath, MOVEFILE_REPLACE_EXISTING)) {
-        return true;
-    }
-
-    if (!DeletePathIfPresentWithRetries(finalPath)) {
-        return false;
-    }
-
-    if (MovePathWithRetries(tempPath, finalPath, 0)) {
-        return true;
-    }
-
-    std::error_code cleanupError;
-    std::filesystem::remove(std::filesystem::path(tempPath), cleanupError);
-    return false;
-}
-
 static bool RenamePathReplacingExisting(const std::wstring& fromPath, const std::wstring& toPath) {
     if (fromPath == toPath) {
         return true;
@@ -223,7 +145,7 @@ static bool SaveConfigAtomically(const Config& config, const std::wstring& path)
     std::error_code dirError;
     std::filesystem::create_directories(std::filesystem::path(path).parent_path(), dirError);
 
-    // SaveConfigToTomlFile already writes through a temp file and replaces `path` atomically.
+    // SaveConfigToTomlFile already writes through a temp file, keeps a .bak, and replaces `path` atomically.
     return SaveConfigToTomlFile(config, path);
 }
 
@@ -231,7 +153,7 @@ static bool WriteTomlTableAtomically(const toml::table& tbl, const std::wstring&
     std::error_code dirError;
     std::filesystem::create_directories(std::filesystem::path(path).parent_path(), dirError);
 
-    return ::WriteFileAtomically(path, [&tbl](std::ostream& out) {
+    return WriteTomlFileSafely(path, [&tbl](std::ostream& out) {
         out << tbl;
         return true;
     });
@@ -319,20 +241,15 @@ static std::vector<std::string> ListProfilesOnDiskLocked() {
 static bool LoadProfilesConfigLocked() {
     g_profilesConfig = ProfilesConfig();
 
-    const std::wstring path = GetProfilesConfigPath();
-    if (!std::filesystem::exists(std::filesystem::path(path))) {
-        return false;
-    }
-
-    try {
-        std::ifstream file(std::filesystem::path(path), std::ios::binary);
-        if (!file.is_open()) {
+    ProfilesConfig loaded;
+    const auto parseProfilesConfig = [&loaded](const std::string& source, std::string& error) {
+        toml::table tbl;
+        if (!ParseTomlSource(source, tbl, error)) {
             return false;
         }
 
-        auto tbl = toml::parse(file);
-        g_profilesConfig.activeProfile = tbl["activeProfile"].value_or(std::string(kDefaultProfileName));
-
+        loaded = ProfilesConfig();
+        loaded.activeProfile = tbl["activeProfile"].value_or(std::string(kDefaultProfileName));
         if (auto arr = tbl["profile"].as_array()) {
             for (const auto& elem : *arr) {
                 if (auto t = elem.as_table()) {
@@ -344,17 +261,27 @@ static bool LoadProfilesConfigLocked() {
                         pm.color[2] = (*colorArr)[2].value_or(kDefaultProfileColor[2]);
                     }
                     pm.sections = ProfileSectionsFromToml((*t).get("sections"));
-                    if (!pm.name.empty() && !ProfileNameExistsLocked(pm.name)) {
-                        g_profilesConfig.profiles.push_back(pm);
+                    const bool duplicate = std::any_of(loaded.profiles.begin(), loaded.profiles.end(),
+                                                       [&](const ProfileMetadata& other) { return ProfileNamesEqual(other.name, pm.name); });
+                    if (!pm.name.empty() && !duplicate) {
+                        loaded.profiles.push_back(pm);
                     }
                 }
             }
         }
-    } catch (...) {
-        g_profilesConfig = ProfilesConfig();
+        return true;
+    };
+
+    std::string loadError;
+    const TomlFileLoadStatus status = LoadTomlFileWithRecovery(GetProfilesConfigPath(), {}, parseProfilesConfig, &loadError);
+    if (status != TomlFileLoadStatus::Loaded && status != TomlFileLoadStatus::Recovered) {
+        if (status == TomlFileLoadStatus::Unrecoverable) {
+            Log("WARNING: profiles.toml could not be loaded (" + loadError + "); profile list will be rebuilt from the profiles folder.");
+        }
         return false;
     }
 
+    g_profilesConfig = std::move(loaded);
     return true;
 }
 
@@ -470,41 +397,6 @@ static bool SaveProfileSnapshotLocked(const std::string& name, const Config& con
 }
 
 } // namespace
-
-bool WriteFileAtomically(const std::wstring& path, const std::function<bool(std::ostream&)>& writeContents) {
-    const std::wstring tempPath = MakeTempSiblingPath(path, L".tmp-");
-    const auto removeTempFile = [&tempPath]() {
-        std::error_code cleanupError;
-        std::filesystem::remove(std::filesystem::path(tempPath), cleanupError);
-    };
-
-    try {
-        // Do not pass UTF-8 narrow strings to std::ofstream.
-        // Use std::filesystem::path so the wide Win32 APIs are used under the hood.
-        std::ofstream out(std::filesystem::path(tempPath), std::ios::binary | std::ios::trunc);
-        if (!out.is_open()) {
-            return false;
-        }
-
-        const bool wroteContents = writeContents(out);
-        out.close();
-        // A short write (e.g. disk full) must not replace the existing file.
-        if (!wroteContents || !out.good()) {
-            removeTempFile();
-            return false;
-        }
-    } catch (...) {
-        removeTempFile();
-        throw;
-    }
-
-    if (!ReplacePathAtomically(tempPath, path)) {
-        removeTempFile();
-        return false;
-    }
-
-    return true;
-}
 
 bool IsValidProfileName(const std::string& name) {
     if (name.empty()) return false;
@@ -929,6 +821,8 @@ void DeleteProfile(const std::string& name) {
 
     try {
         std::filesystem::remove(std::filesystem::path(GetProfilePath(trackedName)));
+        std::error_code backupError;
+        std::filesystem::remove(std::filesystem::path(GetTomlBackupPath(GetProfilePath(trackedName))), backupError);
     } catch (const std::exception& e) {
         g_profilesConfig.profiles = previousProfiles;
         SaveProfilesConfigLocked();
@@ -996,6 +890,20 @@ bool UpdateProfileMetadata(const std::string& currentName, const std::string& ne
         g_profilesConfig.activeProfile = previousActiveProfile;
         SaveProfilesConfigLocked();
         return false;
+    }
+
+    if (renameRequested) {
+        // Keep the profile's backup with it. A stale .bak left under the old name could otherwise be restored into
+        // an unrelated profile created later with that name.
+        const std::wstring oldBackup = GetTomlBackupPath(GetProfilePath(previousMetadata.name));
+        const std::wstring newBackup = GetTomlBackupPath(GetProfilePath(newName));
+        std::error_code backupError;
+        if (!std::filesystem::exists(std::filesystem::path(oldBackup), backupError)) {
+            std::filesystem::remove(std::filesystem::path(newBackup), backupError);
+        } else if (!RenamePathReplacingExisting(oldBackup, newBackup)) {
+            std::filesystem::remove(std::filesystem::path(oldBackup), backupError);
+            std::filesystem::remove(std::filesystem::path(newBackup), backupError);
+        }
     }
 
     if (wasActive && sectionsChanged) {

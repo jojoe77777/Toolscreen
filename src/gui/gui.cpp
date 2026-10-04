@@ -3495,6 +3495,21 @@ void RenderSettingsGUI() {
 
         ImGui::Separator();
 
+        if (const std::vector<ConfigRecoveryNotice> recoveryNotices = GetConfigRecoveryNotices(); !recoveryNotices.empty()) {
+            const ImVec4 warningColor(1.0f, 0.75f, 0.3f, 1.0f);
+            for (const auto& notice : recoveryNotices) {
+                ImGui::PushStyleColor(ImGuiCol_Text, warningColor);
+                if (!notice.restoredFrom.empty()) {
+                    ImGui::TextWrapped("%s", tr("config.recovery_restored", notice.fileName, notice.restoredFrom, notice.movedAsideAs).c_str());
+                } else {
+                    ImGui::TextWrapped("%s", tr("config.recovery_reset", notice.fileName, notice.movedAsideAs).c_str());
+                }
+                ImGui::PopStyleColor();
+            }
+            if (ImGui::SmallButton(trc("config.recovery_dismiss"))) { ClearConfigRecoveryNotices(); }
+            ImGui::Separator();
+        }
+
         bool wantImageDrag = false;
         bool wantWindowOverlayDrag = false;
         bool wantBrowserOverlayDrag = false;
