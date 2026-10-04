@@ -4786,6 +4786,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             Log("DLL cleanup complete (process exit).");
             FlushLogsBestEffort(500);
             ReleaseLatestLogSession(g_logSession);
+            GameTest::RecordDetachComplete();
             return TRUE;
         }
 

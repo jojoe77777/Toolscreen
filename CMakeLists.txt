@@ -1659,6 +1659,21 @@ if(TOOLSCREEN_POWERSHELL_EXECUTABLE)
             RUN_SERIAL TRUE
         )
     endforeach()
+    # Close the game normally (so DLL_PROCESS_DETACH runs) and require a clean, prompt exit, including when a
+    # thread that process exit kills was holding the log file lock.
+    foreach(game_test_exit_mode IN ITEMS plain log_lock)
+        add_test(
+            NAME toolscreen_integration_game_1_16_1_exit_${game_test_exit_mode}
+            COMMAND ${TOOLSCREEN_POWERSHELL_EXECUTABLE} -NoProfile -ExecutionPolicy Bypass
+                -File "${CMAKE_CURRENT_SOURCE_DIR}/scripts/game_tests/run_game_tests.ps1"
+                -MinecraftVersion 1.16.1 -Configuration $<CONFIG> -BuildDir "${CMAKE_BINARY_DIR}"
+                -Filter startup.version -ExitMode ${game_test_exit_mode}
+        )
+        set_tests_properties(toolscreen_integration_game_1_16_1_exit_${game_test_exit_mode} PROPERTIES
+            TIMEOUT 1800
+            RUN_SERIAL TRUE
+        )
+    endforeach()
 endif()
 
 add_executable(toolscreen_base64_tests tests/base64_tests.cpp)

@@ -31,6 +31,11 @@ param(
     [string]$Filter = "",
     [int]$LaunchTimeoutSeconds = 900,
     [int]$TestTimeoutSeconds = 300,
+    # After the tests, close the game normally (instead of killing it) and require it to exit, which runs
+    # Toolscreen's DLL_PROCESS_DETACH. "log_lock" first leaves the log file lock held by a thread exit will kill.
+    [ValidateSet("", "plain", "log_lock")]
+    [string]$ExitMode = "",
+    [int]$ExitTimeoutSeconds = 30,
     [switch]$KeepGameOpen
 )
 
@@ -166,6 +171,8 @@ $toolscreenPdb = Join-Path $BinDir "Toolscreen.pdb"
 if (Test-Path $toolscreenPdb) { Copy-IfChanged $toolscreenPdb (Join-Path $StageDir "Toolscreen.pdb") }
 
 Remove-Item -Force -ErrorAction SilentlyContinue $ResultsPath
+# JVM fatal-error reports from earlier runs; a normal exit must not add one.
+Get-ChildItem -Path $RunDir -Filter "hs_err_pid*.log" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
 
 # ---- Launch ------------------------------------------------------------------------------------------
 
@@ -176,6 +183,7 @@ $env:TOOLSCREEN_GAME_TEST_EXPECTED_VERSION = $MinecraftVersion
 $env:TOOLSCREEN_GAME_TEST_EXPECTED_BACKEND = $ExpectedBackend
 $env:TOOLSCREEN_GAME_TEST_TOOLSCREEN_DIR = $ToolscreenDir
 $env:TOOLSCREEN_GAME_TEST_FILTER = $Filter
+$env:TOOLSCREEN_GAME_TEST_EXIT = $ExitMode
 
 $gradle = Start-Process -FilePath "cmd.exe" -WorkingDirectory $ProjectDir -PassThru -WindowStyle Hidden `
     -ArgumentList "/c", "`"`"$(Join-Path $ProjectDir 'gradlew.bat')`" $gradleArgs > `"$GradleLog`" 2>&1`""
@@ -206,6 +214,32 @@ try {
             $done = [bool](Select-String -Path $ResultsPath -Pattern '"event":"done"' -SimpleMatch -Quiet)
         }
         if (-not $done) { Start-Sleep -Milliseconds 250 }
+    }
+
+    if ($ExitMode) {
+        Write-Step "Waiting for the game to exit normally ($ExitMode)"
+        $deadline = (Get-Date).AddSeconds($ExitTimeoutSeconds)
+        while ((Get-Process -Id $gamePid -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 250 }
+        $exited = -not (Get-Process -Id $gamePid -ErrorAction SilentlyContinue)
+        if (-not $exited) {
+            # Record what the stuck JVM is doing before it gets killed.
+            $jcmd = Join-Path $JavaHome "bin\jcmd.exe"
+            if (Test-Path $jcmd) { & $jcmd $gamePid Thread.print *> (Join-Path $ProjectDir "exit-hang-threads.txt") }
+        }
+        Start-Sleep -Milliseconds 500
+        $crashReports = @(Get-ChildItem -Path $RunDir -Filter "hs_err_pid*.log" -ErrorAction SilentlyContinue)
+        # Detach records its completion in the results file without the log lock, which a terminated thread may hold.
+        $detachCompleted = [bool](Select-String -Path $ResultsPath -Pattern '"event":"detached"' -SimpleMatch -Quiet)
+        $problem = if (-not $exited) { "The game did not exit within $ExitTimeoutSeconds s after a normal close." }
+                   elseif ($crashReports.Count -gt 0) { "The JVM wrote a fatal error report on exit: $($crashReports[0].FullName)" }
+                   else { "" }
+        # Not a failure: if ExitProcess killed a thread while it held a critical section the detaching thread then
+        # needs (the process heap, a CRT stream), Windows ends the process at once by design.
+        $note = if (-not $problem -and -not $detachCompleted) { "Exited cleanly, but Windows ended the process before Toolscreen's detach finished." } else { "" }
+        $exitEntry = @{ event = "test"; name = "lifecycle.process_exit_$ExitMode"; durationMs = 0
+                        status = $(if ($problem) { "fail" } else { "pass" })
+                        message = $(if ($problem) { $problem } else { $note }) }
+        Add-Content -Path $ResultsPath -Value ($exitEntry | ConvertTo-Json -Compress)
     }
     $exitCode = 0
 }

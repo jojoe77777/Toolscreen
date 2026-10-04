@@ -61,6 +61,9 @@ std::mutex s_renderTasksMutex;
 std::deque<std::function<void()>> s_renderTasks;
 
 std::atomic<bool> s_forceSharedObsFrame{ false };
+// TOOLSCREEN_GAME_TEST_EXIT: after the tests, close the game normally so DLL_PROCESS_DETACH runs.
+// "plain" just closes it; "log_lock" first leaves g_logFileMutex held by a thread that process exit will kill.
+std::string s_exitMode;
 std::thread s_runnerThread;
 std::atomic<bool> s_stopRequested{ false };
 HWND s_gameWindow = NULL;
@@ -728,6 +731,37 @@ bool MatchesFilter(const std::string& name) {
     return std::any_of(s_filters.begin(), s_filters.end(), [&](const std::string& filter) { return name.find(filter) != std::string::npos; });
 }
 
+// Closes the game the way the user would, so the process exits normally and DLL_PROCESS_DETACH runs.
+void RequestGameExit() {
+    if (s_exitMode == "log_lock") {
+        // A thread that holds the log file lock when ExitProcess terminates it, as the log thread does while it
+        // writes. Detach must not wait on that lock.
+        std::thread([] {
+            g_logFileMutex.lock();
+            for (;;) Sleep(INFINITE);
+        }).detach();
+        Sleep(100);
+    }
+    // Let the game finish starting up, then close its current top-level window (the handle Toolscreen first
+    // subclassed may have been replaced). Keep asking until the process goes away.
+    WaitForFrames(60, std::chrono::seconds(20));
+    AppendResultLine("{\"event\":\"exit-requested\",\"mode\":\"" + JsonEscape(s_exitMode) + "\"}");
+    for (int attempt = 0; attempt < 30; ++attempt) {
+        HWND target = NULL;
+        EnumWindows(
+            [](HWND hwnd, LPARAM param) -> BOOL {
+                DWORD pid = 0;
+                GetWindowThreadProcessId(hwnd, &pid);
+                if (pid != GetCurrentProcessId() || !IsWindowVisible(hwnd) || GetWindow(hwnd, GW_OWNER) != NULL) return TRUE;
+                *reinterpret_cast<HWND*>(param) = hwnd;
+                return FALSE;
+            },
+            reinterpret_cast<LPARAM>(&target));
+        if (target) PostMessageW(target, WM_CLOSE, 0, 0);
+        Sleep(2000);
+    }
+}
+
 void RunAllTests() {
     AppendResultLine("{\"event\":\"start\",\"version\":\"" + JsonEscape(VersionString(g_gameVersion)) + "\"}");
     int passed = 0, failed = 0, skipped = 0;
@@ -775,6 +809,8 @@ void RunAllTests() {
 
     AppendResultLine("{\"event\":\"done\",\"passed\":" + std::to_string(passed) + ",\"failed\":" + std::to_string(failed) +
                      ",\"skipped\":" + std::to_string(skipped) + "}");
+
+    if (!s_exitMode.empty()) RequestGameExit();
 }
 
 } // namespace
@@ -784,6 +820,7 @@ void InitializeFromEnvironment() {
     if (resultsPath.empty()) return;
 
     s_resultsPath = Utf8ToWide(resultsPath);
+    s_exitMode = ToLower(ReadEnvUtf8(L"TOOLSCREEN_GAME_TEST_EXIT"));
     s_expectedVersion = ReadEnvUtf8(L"TOOLSCREEN_GAME_TEST_EXPECTED_VERSION");
     s_expectedBackend = ToLower(ReadEnvUtf8(L"TOOLSCREEN_GAME_TEST_EXPECTED_BACKEND"));
     std::stringstream filters(ReadEnvUtf8(L"TOOLSCREEN_GAME_TEST_FILTER"));
@@ -821,6 +858,17 @@ void OnRenderThreadFrame() {
         tasks.swap(s_renderTasks);
     }
     for (auto& task : tasks) { task(); }
+}
+
+void RecordDetachComplete() {
+    if (!IsEnabled()) return;
+    HANDLE file = CreateFileW(s_resultsPath.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS,
+                              FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return;
+    static const char kLine[] = "{\"event\":\"detached\"}\n";
+    DWORD written = 0;
+    WriteFile(file, kLine, static_cast<DWORD>(sizeof(kLine) - 1), &written, nullptr);
+    CloseHandle(file);
 }
 
 bool ShouldForceSharedObsFrame() { return s_forceSharedObsFrame.load(std::memory_order_relaxed); }

@@ -20,6 +20,10 @@ void OnRenderThreadFrame();
 
 void Shutdown();
 
+// Appends a "detached" event to the results file at the end of DLL_PROCESS_DETACH. Uses only Win32 file calls
+// (no heap, no locks), since at process exit other threads were terminated and may have held either.
+void RecordDetachComplete();
+
 // True while a test needs the OpenGL OBS/virtual-camera compose pass to run without OBS or a virtual camera.
 bool ShouldForceSharedObsFrame();
 
