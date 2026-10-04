@@ -435,12 +435,26 @@ static bool TryInstallThirdPartyWglSwapBuffersHook(void* jumpTarget, const char*
 
     // MinHook keeps the ppOriginal pointer it is given and writes the trampoline through it on every later
     // attach or detach, and compares it when other hooks are created, so it must outlive the hook. Guarded by
-    // g_wglSwapBuffersThirdPartyHookMutex, which every install path holds. Starting from null makes an
-    // already-created hook on a stale target fail instead of reusing that target's old trampoline.
+    // g_wglSwapBuffersThirdPartyHookMutex, which every install path holds.
     static WGLSWAPBUFFERS s_trampolineSlot = nullptr;
+    // Each install gets its own MinHook identity. A stale target's entry stays in MinHook after its module
+    // unloads (removing it would restore bytes into memory that may now belong to another module), so an
+    // overlay that reloads at the same address would otherwise hit MH_ERROR_ALREADY_CREATED and never be
+    // chained again. The old entry is never enabled, disabled or removed afterwards, so it stays dormant.
+    static ULONG_PTR s_nextHookIdent = 0x54534800;
+    const ULONG_PTR hookIdent = ++s_nextHookIdent;
     s_trampolineSlot = nullptr;
-    if (!HookChain::TryCreateAndEnableHook(jumpTarget, reinterpret_cast<void*>(&hkwglSwapBuffers_ThirdParty),
-                                           reinterpret_cast<void**>(&s_trampolineSlot), what)) {
+
+    MH_STATUS st = MH_CreateHookEx(hookIdent, jumpTarget, reinterpret_cast<void*>(&hkwglSwapBuffers_ThirdParty),
+                                   reinterpret_cast<void**>(&s_trampolineSlot));
+    if (st != MH_OK) {
+        Log(std::string("ERROR: Failed to create ") + what + " hook (status " + std::to_string((int)st) + ")");
+        return false;
+    }
+    st = MH_EnableHookEx(hookIdent, jumpTarget);
+    if (st != MH_OK) {
+        MH_RemoveHookEx(hookIdent, jumpTarget);
+        Log(std::string("INFO: Skipping ") + what + " hook because MinHook could not enable it (status " + std::to_string((int)st) + ")");
         return false;
     }
     g_owglSwapBuffersThirdParty.store(s_trampolineSlot, std::memory_order_release);
@@ -697,8 +711,9 @@ bool TryCreateAndEnableHook(void* target, void* detour, void** outOriginal, cons
         return false;
     }
     // MH_ERROR_ALREADY_CREATED leaves outOriginal untouched, so it only counts as success when it already holds a trampoline.
+    // Otherwise another hook owns the target (e.g. a driver pointer that resolves to an export Toolscreen already hooks).
     if (st == MH_ERROR_ALREADY_CREATED && outOriginal && *outOriginal == nullptr) {
-        Log(std::string("ERROR: ") + (what ? what : "(hook)") + " hook already exists but no trampoline is available");
+        Log(std::string("INFO: Skipping ") + (what ? what : "(hook)") + " hook because another hook already owns the target");
         return false;
     }
 
