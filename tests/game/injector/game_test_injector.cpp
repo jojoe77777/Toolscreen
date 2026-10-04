@@ -1,5 +1,5 @@
 // Injects DLLs into a running game process the same way the EasyInjectBundled watcher does
-// (VirtualAllocEx + WriteProcessMemory + CreateRemoteThread(LoadLibraryW), 10 s wait, 100 ms gap),
+// (VirtualAllocEx + WriteProcessMemory + CreateRemoteThread(LoadLibraryW), 100 ms gap between DLLs),
 // for the in-game Toolscreen tests. Unlike the watcher it checks each remote LoadLibraryW result.
 //
 // Usage: toolscreen_game_test_injector.exe --pid <pid> --dll <path> [--dll <path> ...]
@@ -13,7 +13,9 @@
 
 namespace {
 
-constexpr DWORD kRemoteThreadTimeoutMs = 10000;
+// EasyInjectBundled waits 10 s and then ignores the result. A freshly built DLL can take longer than that to
+// load (antivirus scans it first), so wait longer here rather than report a load that is still in progress.
+constexpr DWORD kRemoteThreadTimeoutMs = 60000;
 constexpr DWORD kDelayBetweenDllsMs = 100;
 
 bool InjectDll(HANDLE process, const std::wstring& dllPath) {

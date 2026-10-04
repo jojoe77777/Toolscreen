@@ -66,6 +66,17 @@ function Stop-ProcessTree([int]$ProcessId) {
     Start-Process -FilePath "taskkill.exe" -ArgumentList "/PID", $ProcessId, "/T", "/F" -WindowStyle Hidden -Wait | Out-Null
 }
 
+# Rewriting an unchanged DLL makes antivirus rescan it on the next load, which can stall the injected
+# LoadLibraryW for many seconds, so only copy files that actually changed.
+function Copy-IfChanged([string]$Source, [string]$Destination) {
+    if (Test-Path $Destination) {
+        $src = Get-Item $Source
+        $dst = Get-Item $Destination
+        if ($src.Length -eq $dst.Length -and $src.LastWriteTimeUtc -eq $dst.LastWriteTimeUtc) { return }
+    }
+    Copy-Item -Force $Source $Destination
+}
+
 function Stop-LeftoverGames {
     foreach ($proc in @(Get-GameJavaProcesses)) {
         Write-Host "Stopping leftover game process $($proc.ProcessId)"
@@ -142,17 +153,17 @@ New-Item -ItemType Directory -Force -Path $ToolscreenDir | Out-Null
 
 # Stage the payload the way EasyInjectBundled extracts it: Toolscreen.dll beside liblogger and the layer JSON.
 New-Item -ItemType Directory -Force -Path $StageDir | Out-Null
-Copy-Item -Force $loggerDll (Join-Path $StageDir "liblogger_x64.dll")
-Copy-Item -Force $toolscreenDll (Join-Path $StageDir "Toolscreen.dll")
-Copy-Item -Force $layerJson (Join-Path $StageDir "VK_LAYER_TOOLSCREEN_obs_redirect.json")
+Copy-IfChanged $loggerDll (Join-Path $StageDir "liblogger_x64.dll")
+Copy-IfChanged $toolscreenDll (Join-Path $StageDir "Toolscreen.dll")
+Copy-IfChanged $layerJson (Join-Path $StageDir "VK_LAYER_TOOLSCREEN_obs_redirect.json")
 # Two copies of the stand-in overlay, so the hook-chain test can unload one and chain behind a distinct second one.
 $overlayDll = Join-Path $BinDir "toolscreen_game_test_overlay.dll"
 if (Test-Path $overlayDll) {
-    Copy-Item -Force $overlayDll (Join-Path $StageDir "game_test_overlay_a.dll")
-    Copy-Item -Force $overlayDll (Join-Path $StageDir "game_test_overlay_b.dll")
+    Copy-IfChanged $overlayDll (Join-Path $StageDir "game_test_overlay_a.dll")
+    Copy-IfChanged $overlayDll (Join-Path $StageDir "game_test_overlay_b.dll")
 }
 $toolscreenPdb = Join-Path $BinDir "Toolscreen.pdb"
-if (Test-Path $toolscreenPdb) { Copy-Item -Force $toolscreenPdb (Join-Path $StageDir "Toolscreen.pdb") }
+if (Test-Path $toolscreenPdb) { Copy-IfChanged $toolscreenPdb (Join-Path $StageDir "Toolscreen.pdb") }
 
 Remove-Item -Force -ErrorAction SilentlyContinue $ResultsPath
 
