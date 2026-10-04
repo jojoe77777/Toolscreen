@@ -64,6 +64,7 @@ struct DeviceState {
     PFN_vkQueueSubmit2 queueSubmit2 = nullptr;
     PFN_vkQueueSubmit2KHR queueSubmit2KHR = nullptr;
     PFN_vkWaitForFences waitForFences = nullptr;
+    PFN_vkGetFenceStatus getFenceStatus = nullptr;
     PFN_vkDestroyFence destroyFence = nullptr;
     PFN_vkCreateCommandPool createCommandPool = nullptr;
     PFN_vkDestroyCommandPool destroyCommandPool = nullptr;
@@ -199,16 +200,24 @@ void NotifyCaptureAvailability(
     }
 }
 
-void RetireFence(DeviceState& state, VkFence fence, VkResult result) {
+// Retires the reservations associated with a fence. With a limit, only the first `limit` (the ones that
+// were associated when a wait began) are retired, so a fence reset and resubmitted meanwhile keeps the rest.
+void RetireFence(DeviceState& state, VkFence fence, VkResult result, size_t limit = SIZE_MAX) {
     auto found = state.fences.find(fence);
     if (found == state.fences.end()) return;
+    std::vector<RedirectReservation>& associated = found->second;
+    const size_t count = (std::min)(limit, associated.size());
     if (auto fn = ResolveToolscreen<RedirectRetiredFn>(
             "ToolscreenVulkanObsRedirectRetired")) {
-        for (const RedirectReservation& reservation : found->second) {
-            fn(reservation.slot, reservation.serial, fence, result);
+        for (size_t index = 0; index < count; ++index) {
+            fn(associated[index].slot, associated[index].serial, fence, result);
         }
     }
-    state.fences.erase(found);
+    if (count == associated.size()) {
+        state.fences.erase(found);
+    } else {
+        associated.erase(associated.begin(), associated.begin() + static_cast<std::ptrdiff_t>(count));
+    }
 }
 
 bool IsObsCaller(const void* caller) {
@@ -451,6 +460,7 @@ VKAPI_ATTR VkResult VKAPI_CALL LayerCreateDevice(
     LOAD(queueSubmit2, PFN_vkQueueSubmit2, "vkQueueSubmit2");
     LOAD(queueSubmit2KHR, PFN_vkQueueSubmit2KHR, "vkQueueSubmit2KHR");
     LOAD(waitForFences, PFN_vkWaitForFences, "vkWaitForFences");
+    LOAD(getFenceStatus, PFN_vkGetFenceStatus, "vkGetFenceStatus");
     LOAD(destroyFence, PFN_vkDestroyFence, "vkDestroyFence");
     LOAD(createCommandPool, PFN_vkCreateCommandPool, "vkCreateCommandPool");
     LOAD(destroyCommandPool, PFN_vkDestroyCommandPool, "vkDestroyCommandPool");
@@ -867,14 +877,38 @@ VKAPI_ATTR VkResult VKAPI_CALL LayerQueueSubmit2KHR(
 VKAPI_ATTR VkResult VKAPI_CALL LayerWaitForFences(
     VkDevice device, uint32_t fenceCount, const VkFence* fences, VkBool32 waitAll,
     uint64_t timeout) {
-    std::lock_guard lock(g_mutex);
-    DeviceState* state = FindDevice(device);
-    if (!state || !state->waitForFences) return VK_ERROR_INITIALIZATION_FAILED;
-    VkResult result =
-        state->waitForFences(device, fenceCount, fences, waitAll, timeout);
+    // Never hold g_mutex across the wait itself: it can block indefinitely, and every other thread's call
+    // through this layer (submits, image and command buffer creation) would stall behind it.
+    PFN_vkWaitForFences waitForFences = nullptr;
+    std::vector<size_t> associatedAtWaitStart(fenceCount, 0);
+    {
+        std::lock_guard lock(g_mutex);
+        DeviceState* state = FindDevice(device);
+        if (!state || !state->waitForFences) return VK_ERROR_INITIALIZATION_FAILED;
+        waitForFences = state->waitForFences;
+        for (uint32_t index = 0; index < fenceCount; ++index) {
+            auto found = state->fences.find(fences[index]);
+            if (found != state->fences.end()) associatedAtWaitStart[index] = found->second.size();
+        }
+    }
+
+    VkResult result = waitForFences(device, fenceCount, fences, waitAll, timeout);
     if (result == VK_SUCCESS) {
-        for (uint32_t index = 0; index < fenceCount; ++index)
-            RetireFence(*state, fences[index], result);
+        std::lock_guard lock(g_mutex);
+        DeviceState* state = FindDevice(device);
+        if (state) {
+            for (uint32_t index = 0; index < fenceCount; ++index) {
+                // With waitAll false, success only means one fence signalled; retire just the signalled ones.
+                if (!waitAll && fenceCount > 1 &&
+                    (!state->getFenceStatus || state->getFenceStatus(device, fences[index]) != VK_SUCCESS)) {
+                    continue;
+                }
+                // A fence with nothing associated when the wait began was waited on before its OBS submit
+                // was recorded; whatever is associated now completed with it.
+                const size_t limit = associatedAtWaitStart[index] != 0 ? associatedAtWaitStart[index] : SIZE_MAX;
+                RetireFence(*state, fences[index], result, limit);
+            }
+        }
     }
     return result;
 }
