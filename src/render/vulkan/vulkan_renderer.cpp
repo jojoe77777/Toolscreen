@@ -152,6 +152,9 @@ enum class OverlayBlendMode : uint8_t {
 struct TimestampFrame {
     VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
     uint32_t firstQuery = 0;
+    // Written by the GPU into the completion buffer once this frame's recorded work has finished.
+    uint32_t completionSerial = 0;
+    bool earlyAvailabilityCounted = false;
     bool pending = false;
     bool pickerPending = false;
     int pickerX = -1;
@@ -386,6 +389,14 @@ struct RendererState {
     float timestampPeriodNs = 1.0f;
     std::array<TimestampFrame, kMaxTimestampFrames> timestamps{};
     uint32_t nextTimestamp = 0;
+    // One uint32 per timestamp slot. Query availability alone cannot tell a finished frame from a slot whose
+    // vkCmdResetQueryPool has not run on the GPU yet (the previous use's results still read as available), so
+    // each frame also writes its serial here after all of its work, and a slot completes only once it matches.
+    PFN_vkCmdFillBuffer cmdFillBuffer = nullptr;
+    VkBuffer completionBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory completionMemory = VK_NULL_HANDLE;
+    uint32_t* completionMapped = nullptr;
+    uint32_t nextCompletionSerial = 0;
     uint32_t activeTimestampFrames = 1;
 
     std::unordered_map<VkImage, SampledImage> imageResources;
@@ -451,6 +462,15 @@ struct RendererState {
 };
 
 RendererState g_state;
+std::atomic<uint64_t> g_timestampFramesCompleted{ 0 };
+std::atomic<uint64_t> g_timestampEarlyAvailabilityFrames{ 0 };
+std::atomic<uint64_t> g_untrackedOverlayFrames{ 0 };
+// Test-only probe (see ProbeLatestFrameAtPresent): the most recently begun slot and its serial.
+std::atomic<bool> g_frameTrackingProbeEnabled{ false };
+std::atomic<int64_t> g_lastBegunTimestampSlot{ -1 };
+std::atomic<uint32_t> g_lastBegunCompletionSerial{ 0 };
+std::atomic<uint64_t> g_probeStaleAvailabilityAtPresent{ 0 };
+std::atomic<uint64_t> g_probeSamples{ 0 };
 // RecordAfterFinalBlit mutates the renderer, ImGui contexts, and Vulkan
 // resource maps as one transaction.  Destruction hooks may arrive on another
 // thread, so serialize all state-mutating lifecycle transitions with recording.
@@ -801,6 +821,61 @@ bool CreateColorPickerReadbackResources() {
         return false;
     }
     return true;
+}
+
+bool CreateTimestampCompletionResources() {
+    g_state.cmdFillBuffer = reinterpret_cast<PFN_vkCmdFillBuffer>(
+        VulkanHooks::LoadRealFunction("vkCmdFillBuffer", reinterpret_cast<void*>(g_state.device)));
+    if (!g_state.cmdFillBuffer || !g_state.dispatch.createBuffer) return false;
+
+    VkBufferCreateInfo bufferInfo{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+    bufferInfo.size = sizeof(uint32_t) * kMaxTimestampFrames;
+    bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (g_state.dispatch.createBuffer(g_state.device, &bufferInfo, nullptr, &g_state.completionBuffer) != VK_SUCCESS) {
+        g_state.completionBuffer = VK_NULL_HANDLE;
+        return false;
+    }
+    VkMemoryRequirements requirements{};
+    g_state.dispatch.getBufferMemoryRequirements(g_state.device, g_state.completionBuffer, &requirements);
+    uint32_t memoryType = 0;
+    if (!FindMemoryType(requirements.memoryTypeBits,
+                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, memoryType)) {
+        return false;
+    }
+    VkMemoryAllocateInfo allocation{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    allocation.allocationSize = requirements.size;
+    allocation.memoryTypeIndex = memoryType;
+    if (g_state.dispatch.allocateMemory(g_state.device, &allocation, nullptr, &g_state.completionMemory) != VK_SUCCESS ||
+        g_state.dispatch.bindBufferMemory(g_state.device, g_state.completionBuffer, g_state.completionMemory, 0) != VK_SUCCESS ||
+        g_state.dispatch.mapMemory(g_state.device, g_state.completionMemory, 0, bufferInfo.size, 0,
+                                   reinterpret_cast<void**>(&g_state.completionMapped)) != VK_SUCCESS) {
+        g_state.completionMapped = nullptr;
+        return false;
+    }
+    std::memset(g_state.completionMapped, 0, static_cast<size_t>(bufferInfo.size));
+    return true;
+}
+
+// Records, after everything this frame recorded, the GPU write of the frame's completion serial.
+void RecordTimestampFrameCompletion(VkCommandBuffer commandBuffer, const TimestampFrame& frame) {
+    if (!g_state.completionMapped || !g_state.cmdFillBuffer || !g_state.dispatch.cmdPipelineBarrier) return;
+    const uint32_t frameIndex = frame.firstQuery / kQueriesPerFrame;
+    const VkDeviceSize offset = sizeof(uint32_t) * frameIndex;
+    // Execution dependency: the serial is written only after all earlier work in the queue has finished.
+    g_state.dispatch.cmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0,
+                                        nullptr, 0, nullptr, 0, nullptr);
+    g_state.cmdFillBuffer(commandBuffer, g_state.completionBuffer, offset, sizeof(uint32_t), frame.completionSerial);
+    VkBufferMemoryBarrier toHost{ VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER };
+    toHost.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    toHost.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    toHost.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toHost.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toHost.buffer = g_state.completionBuffer;
+    toHost.offset = offset;
+    toHost.size = sizeof(uint32_t);
+    g_state.dispatch.cmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1,
+                                        &toHost, 0, nullptr);
 }
 
 bool IsScreenshotFormatSupported(VkFormat format) {
@@ -2781,6 +2856,9 @@ bool InitializeRenderer(const VulkanRenderer::FinalBlitContext& context) {
     if (!CreateColorPickerReadbackResources()) {
         Log("[VULKAN] Color-picker readback resources are unavailable.");
     }
+    if (!CreateTimestampCompletionResources()) {
+        Log("[VULKAN] Frame completion markers are unavailable; GPU frame completion falls back to query availability.");
+    }
     VkQueryPoolCreateInfo queryInfo{ VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
     queryInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
     queryInfo.queryCount = g_state.activeTimestampFrames * kQueriesPerFrame;
@@ -2829,6 +2907,21 @@ void HarvestTimestamps() {
             if (values[i * 2 + 1] == 0) allAvailable = false;
         }
         if (!allAvailable) continue;
+        if (g_state.completionMapped) {
+            const uint32_t slotIndex = frame.firstQuery / kQueriesPerFrame;
+            const uint32_t written =
+                reinterpret_cast<volatile const uint32_t*>(g_state.completionMapped)[slotIndex];
+            if (written != frame.completionSerial) {
+                // The available results belong to this slot's previous use: the frame's own query reset has not
+                // run on the GPU yet, so its work has not finished either.
+                if (!frame.earlyAvailabilityCounted) {
+                    frame.earlyAvailabilityCounted = true;
+                    g_timestampEarlyAvailabilityFrames.fetch_add(1, std::memory_order_relaxed);
+                }
+                continue;
+            }
+        }
+        g_timestampFramesCompleted.fetch_add(1, std::memory_order_relaxed);
 
         if (frame.pickerPending && g_state.pickerReadbackMapped) {
             const uint32_t frameIndex = frame.firstQuery / kQueriesPerFrame;
@@ -3029,7 +3122,12 @@ TimestampFrame* BeginTimestamps(VkCommandBuffer commandBuffer) {
         frame.compositionWritePending = false;
         frame.compositionWriteSlot = UINT32_MAX;
         frame.compositionWriteSerial = 0;
+        frame.completionSerial = ++g_state.nextCompletionSerial;
+        if (frame.completionSerial == 0) frame.completionSerial = ++g_state.nextCompletionSerial;
+        frame.earlyAvailabilityCounted = false;
         frame.pending = true;
+        g_lastBegunCompletionSerial.store(frame.completionSerial, std::memory_order_relaxed);
+        g_lastBegunTimestampSlot.store(index, std::memory_order_release);
         g_state.nextTimestamp =
             (index + 1) % g_state.activeTimestampFrames;
         g_state.dispatch.cmdResetQueryPool(commandBuffer, g_state.queryPool, frame.firstQuery, kQueriesPerFrame);
@@ -3037,6 +3135,8 @@ TimestampFrame* BeginTimestamps(VkCommandBuffer commandBuffer) {
                                             g_state.queryPool, frame.firstQuery);
         return &frame;
     }
+    // Every slot is still in flight. Work recorded this frame is not covered by any retirement mask.
+    g_untrackedOverlayFrames.fetch_add(1, std::memory_order_relaxed);
     return nullptr;
 }
 
@@ -3045,6 +3145,8 @@ void WriteTimestamp(VkCommandBuffer commandBuffer, TimestampFrame* frame, uint32
     if (frame && g_state.dispatch.cmdWriteTimestamp) {
         g_state.dispatch.cmdWriteTimestamp(commandBuffer, stage, g_state.queryPool,
                                             frame->firstQuery + relativeIndex);
+        // Every exit from RecordAfterFinalBlit ends with the last timestamp, so the completion marker goes there.
+        if (relativeIndex == kQueriesPerFrame - 1) RecordTimestampFrameCompletion(commandBuffer, *frame);
     }
 }
 
@@ -6887,6 +6989,18 @@ bool IsReady() {
     return g_ready.load(std::memory_order_acquire);
 }
 
+FrameTrackingStats GetFrameTrackingStats() {
+    FrameTrackingStats stats;
+    stats.completedFrames = g_timestampFramesCompleted.load(std::memory_order_relaxed);
+    stats.earlyAvailabilityFrames = g_timestampEarlyAvailabilityFrames.load(std::memory_order_relaxed);
+    stats.untrackedFrames = g_untrackedOverlayFrames.load(std::memory_order_relaxed);
+    stats.probeSamples = g_probeSamples.load(std::memory_order_relaxed);
+    stats.probeStaleAvailability = g_probeStaleAvailabilityAtPresent.load(std::memory_order_relaxed);
+    return stats;
+}
+
+void SetFrameTrackingProbeEnabled(bool enabled) { g_frameTrackingProbeEnabled.store(enabled, std::memory_order_relaxed); }
+
 bool GetColorPickerFrame(uintptr_t& textureId, int& width, int& height) {
     if (!g_state.initialized || !g_state.pickerTextureId ||
         g_state.pickerFrameWidth <= 0 || g_state.pickerFrameHeight <= 0) {
@@ -7017,8 +7131,32 @@ void OnQueueSubmit(VkDevice, VkQueue queue, uint32_t commandBufferCount, const V
     }
 }
 
+// Test-only: right after the frame's command buffer was submitted, checks whether its slot already reads as
+// complete by query availability alone (the previous use's results) while its completion serial is unwritten,
+// i.e. whether the availability-only check would have released this frame's resources early.
+void ProbeLatestFrameAtPresent() {
+    if (!g_frameTrackingProbeEnabled.load(std::memory_order_relaxed) || !g_state.queryPool || !g_state.completionMapped) return;
+    const int64_t slot = g_lastBegunTimestampSlot.load(std::memory_order_acquire);
+    if (slot < 0) return;
+    std::array<uint64_t, kQueriesPerFrame * 2> values{};
+    if (g_state.dispatch.getQueryPoolResults(g_state.device, g_state.queryPool, static_cast<uint32_t>(slot) * kQueriesPerFrame,
+                                             kQueriesPerFrame, sizeof(values), values.data(), sizeof(uint64_t) * 2,
+                                             VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT) != VK_SUCCESS) {
+        return;
+    }
+    g_probeSamples.fetch_add(1, std::memory_order_relaxed);
+    for (uint32_t i = 0; i < kQueriesPerFrame; ++i) {
+        if (values[i * 2 + 1] == 0) return;
+    }
+    const uint32_t written = reinterpret_cast<volatile const uint32_t*>(g_state.completionMapped)[slot];
+    if (written != g_lastBegunCompletionSerial.load(std::memory_order_relaxed)) {
+        g_probeStaleAvailabilityAtPresent.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
 void OnQueuePresent(VkDevice, VkQueue queue, const VkPresentInfoKHR* presentInfo,
                     const std::vector<VkImage>& presentImages) {
+    ProbeLatestFrameAtPresent();
     if (!GetModuleHandleA("graphics-hook64.dll") || !presentInfo || !presentInfo->pSwapchains || !presentInfo->pImageIndices) return;
     if (!ShouldLogObsCapture(g_lastObsPresentLogTick)) return;
 
@@ -7246,6 +7384,15 @@ void Shutdown() {
     }
     if (g_state.pickerReadbackMapped && g_state.dispatch.unmapMemory) {
         g_state.dispatch.unmapMemory(g_state.device, g_state.pickerReadbackMemory);
+    }
+    if (g_state.completionMapped && g_state.dispatch.unmapMemory) {
+        g_state.dispatch.unmapMemory(g_state.device, g_state.completionMemory);
+    }
+    if (g_state.completionBuffer && g_state.dispatch.destroyBuffer) {
+        g_state.dispatch.destroyBuffer(g_state.device, g_state.completionBuffer, nullptr);
+    }
+    if (g_state.completionMemory && g_state.dispatch.freeMemory) {
+        g_state.dispatch.freeMemory(g_state.device, g_state.completionMemory, nullptr);
     }
     if (g_state.screenshotReadbackMapped && g_state.dispatch.unmapMemory) {
         g_state.dispatch.unmapMemory(

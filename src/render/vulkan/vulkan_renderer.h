@@ -37,6 +37,21 @@ struct FinalBlitContext {
 // Returns true when the original blit was emitted by this function.
 bool RecordAfterFinalBlit(const FinalBlitContext& context, PFN_vkCmdBlitImage originalBlit);
 bool IsReady();
+
+// GPU frame-completion tracking counters (cumulative), for diagnostics and the in-game tests.
+struct FrameTrackingStats {
+    uint64_t completedFrames = 0;
+    // Frames whose query results read as available before their own work ran (the slot's previous use).
+    uint64_t earlyAvailabilityFrames = 0;
+    // Frames recorded while every timestamp slot was still in flight, so nothing tracked their resources.
+    uint64_t untrackedFrames = 0;
+    // Test probe: presents sampled, and how many found the just-submitted frame's slot reading as complete by
+    // query availability while its own work had not finished.
+    uint64_t probeSamples = 0;
+    uint64_t probeStaleAvailability = 0;
+};
+FrameTrackingStats GetFrameTrackingStats();
+void SetFrameTrackingProbeEnabled(bool enabled);
 // The color picker uses the current source descriptor for its live GPU
 // preview. Pixel selection is a one-texel asynchronous transfer; results are
 // exposed only after the frame's completion query becomes available.
