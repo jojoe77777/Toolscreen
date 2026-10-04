@@ -3918,7 +3918,8 @@ static BOOL SwapBuffersHook_Impl(WGLSWAPBUFFERS next, HDC hDc) {
             const bool needCaptureForMirrors = (g_activeMirrorCaptureCount.load(std::memory_order_acquire) > 0);
             const bool needCaptureForEyeZoom = g_showEyeZoom.load(std::memory_order_relaxed) ||
                                                g_isTransitioningFromEyeZoom.load(std::memory_order_relaxed);
-            const bool needCaptureForObsOrVc = g_graphicsHookDetected.load(std::memory_order_acquire) || IsVirtualCameraActive();
+            const bool needCaptureForObsOrVc = g_graphicsHookDetected.load(std::memory_order_acquire) || IsVirtualCameraActive() ||
+                                               GameTest::ShouldForceSharedObsFrame();
 
             const long long pickerRequestMs = g_mirrorColorPickerCaptureRequestMs.load(std::memory_order_acquire);
             bool needCaptureForColorPicker = false;
@@ -4233,7 +4234,8 @@ static BOOL SwapBuffersHook_Impl(WGLSWAPBUFFERS next, HDC hDc) {
         // when both OBS and the game are running normally.  Compose once per
         // OpenGL game frame; the OBS consumer remains free to sample at its
         // own rate.
-        const bool shouldRenderObsHookFrame = g_graphicsHookDetected.load(std::memory_order_acquire);
+        const bool shouldRenderObsHookFrame =
+            g_graphicsHookDetected.load(std::memory_order_acquire) || GameTest::ShouldForceSharedObsFrame();
         const bool shouldRenderVirtualCameraFrame = IsVirtualCameraActive() && ShouldCaptureVirtualCameraFrame();
         const bool shouldRenderSharedObsFrame = shouldRenderObsHookFrame || shouldRenderVirtualCameraFrame;
         bool sharedObsFrameRendered = false;

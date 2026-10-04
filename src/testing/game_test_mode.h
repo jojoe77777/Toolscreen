@@ -20,4 +20,7 @@ void OnRenderThreadFrame();
 
 void Shutdown();
 
+// True while a test needs the OpenGL OBS/virtual-camera compose pass to run without OBS or a virtual camera.
+bool ShouldForceSharedObsFrame();
+
 } // namespace GameTest

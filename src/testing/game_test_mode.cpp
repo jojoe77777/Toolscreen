@@ -12,6 +12,7 @@
 #include "version.h"
 
 #include "imgui.h"
+#include "imgui_internal.h"
 
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
@@ -30,6 +31,10 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+uint64_t GetObsPassImGuiFramesReusedForTests();
+bool ReadPublishedObsComposePixelForTests(int x, int y, unsigned char outRgba[4]);
+void GetPublishedObsComposeSizeForTests(int& width, int& height);
 
 namespace ToolscreenVulkanLayerTest {
 bool GetTrackedDevice(VkDevice& device, PFN_vkGetDeviceProcAddr& layerGdpa, PFN_vkGetDeviceProcAddr& nextGdpa);
@@ -55,6 +60,7 @@ std::atomic<DWORD> s_renderThreadId{ 0 };
 std::mutex s_renderTasksMutex;
 std::deque<std::function<void()>> s_renderTasks;
 
+std::atomic<bool> s_forceSharedObsFrame{ false };
 std::thread s_runnerThread;
 std::atomic<bool> s_stopRequested{ false };
 HWND s_gameWindow = NULL;
@@ -618,6 +624,82 @@ void TestVulkanStreamingTextureLifetime() {
     Require(SwitchModeOnRenderThread(DefaultModeId()), "Could not switch back to the default mode.");
 }
 
+// With the OBS compose pass running and the settings GUI open, ImGui must build one frame per swap: the OBS pass
+// reuses the screen pass's draw data instead of running NewFrame and the whole settings GUI a second time.
+void TestObsPassReusesScreenImGuiFrame() {
+    WaitUntil([] { return GetRenderBackend() != RenderBackend::Unknown; }, std::chrono::seconds(20));
+    if (GetRenderBackend() != RenderBackend::OpenGL) Skip("The same-thread OBS compose pass is the OpenGL path.");
+    if (!IsResolutionChangeSupported(g_gameVersion)) Skip("Modes are not supported on this game version.");
+
+    // Fullscreen shows the startup welcome toast for a few seconds, which draws its own ImGui frame; measure in the
+    // test mode so only the screen and OBS passes build ImGui frames.
+    RunOnRenderThread([] { InstallTestFixtureOnRenderThread(); });
+    Require(SwitchModeOnRenderThread(kTestModeId), "Could not switch to the test mode.");
+    s_forceSharedObsFrame.store(true, std::memory_order_relaxed);
+    g_showGui.store(true, std::memory_order_release);
+    struct Restore {
+        ~Restore() {
+            g_showGui.store(false, std::memory_order_release);
+            s_forceSharedObsFrame.store(false, std::memory_order_relaxed);
+            try {
+                SwitchModeOnRenderThread(DefaultModeId());
+            } catch (...) {}
+        }
+    } restore;
+    Require(WaitForFrames(10, std::chrono::seconds(5)), "Frames stopped after opening the settings GUI.");
+
+    const uint64_t framesBefore = s_renderFrames.load(std::memory_order_acquire);
+    const int imguiBefore = RunOnRenderThread([] { return ImGui::GetCurrentContext() ? ImGui::GetFrameCount() : -1; });
+    const uint64_t reusedBefore = GetObsPassImGuiFramesReusedForTests();
+    Require(imguiBefore >= 0, "No ImGui context exists while the settings GUI is open.");
+    Require(WaitForFrames(60, std::chrono::seconds(10)), "Frames stopped while the settings GUI was open.");
+    const int imguiAfter = RunOnRenderThread([] { return ImGui::GetFrameCount(); });
+    const uint64_t frames = s_renderFrames.load(std::memory_order_acquire) - framesBefore;
+    const uint64_t reused = GetObsPassImGuiFramesReusedForTests() - reusedBefore;
+    const int imguiFrames = imguiAfter - imguiBefore;
+
+    Log("[GAME TEST] OBS pass ImGui: swaps=" + std::to_string(frames) + " imguiFrames=" + std::to_string(imguiFrames) +
+        " obsReusedScreenFrame=" + std::to_string(reused));
+    Require(reused > 0, "The OBS pass never reused the screen pass's ImGui frame.");
+    Require(static_cast<uint64_t>(imguiFrames) <= frames + 2,
+            "ImGui built " + std::to_string(imguiFrames) + " frames over " + std::to_string(frames) + " swaps.");
+
+    // The OBS output must still show the settings GUI: sample its window centre (and the vertically mirrored
+    // point, in case the compose texture is bottom-up) with the GUI open, then the same points with it closed.
+    struct Sample {
+        bool ok = false;
+        int x = 0, y = 0, mirroredY = 0;
+        unsigned char a[4] = {};
+        unsigned char b[4] = {};
+    };
+    const Sample withGui = RunOnRenderThread([] {
+        Sample sample;
+        int width = 0, height = 0;
+        GetPublishedObsComposeSizeForTests(width, height);
+        const std::string title = "Toolscreen v" + GetToolscreenVersionString() + " by jojoe77777";
+        ImGuiWindow* window = ImGui::GetCurrentContext() ? ImGui::FindWindowByName(title.c_str()) : nullptr;
+        if (!window || width <= 0 || height <= 0) return sample;
+        sample.x = static_cast<int>(window->Pos.x + window->Size.x * 0.5f);
+        sample.y = static_cast<int>(window->Pos.y + window->Size.y * 0.5f);
+        sample.mirroredY = height - 1 - sample.y;
+        sample.ok = ReadPublishedObsComposePixelForTests(sample.x, sample.y, sample.a) &&
+                    ReadPublishedObsComposePixelForTests(sample.x, sample.mirroredY, sample.b);
+        return sample;
+    });
+    Require(withGui.ok, "Could not sample the OBS compose texture at the settings window.");
+    g_showGui.store(false, std::memory_order_release);
+    Require(WaitForFrames(10, std::chrono::seconds(5)), "Frames stopped after closing the settings GUI.");
+    const Sample withoutGui = RunOnRenderThread([&] {
+        Sample sample = withGui;
+        sample.ok = ReadPublishedObsComposePixelForTests(sample.x, sample.y, sample.a) &&
+                    ReadPublishedObsComposePixelForTests(sample.x, sample.mirroredY, sample.b);
+        return sample;
+    });
+    Require(withoutGui.ok, "Could not sample the OBS compose texture with the settings GUI closed.");
+    const bool differs = std::memcmp(withGui.a, withoutGui.a, 3) != 0 || std::memcmp(withGui.b, withoutGui.b, 3) != 0;
+    Require(differs, "The OBS output looks the same with the settings GUI open and closed.");
+}
+
 struct TestCase {
     const char* name;
     void (*fn)();
@@ -633,6 +715,7 @@ const TestCase kTests[] = {
     { "input.hotkey_switches_mode", &TestHotkeySwitchesMode },
     { "input.low_level_hook_dedicated_thread", &TestLowLevelHookOnDedicatedThread },
     { "gui.toggle_renders_imgui", &TestGuiToggleRendersImGui },
+    { "gui.obs_pass_reuses_screen_frame", &TestObsPassReusesScreenImGuiFrame },
     { "hooks.third_party_swap_chain", &TestThirdPartySwapBuffersChain },
     { "vulkan.layer_wait_does_not_block_other_calls", &TestVulkanLayerWaitDoesNotBlockOtherCalls },
     { "vulkan.frame_completion_tracking", &TestVulkanFrameCompletionTracking },
@@ -739,6 +822,8 @@ void OnRenderThreadFrame() {
     }
     for (auto& task : tasks) { task(); }
 }
+
+bool ShouldForceSharedObsFrame() { return s_forceSharedObsFrame.load(std::memory_order_relaxed); }
 
 void Shutdown() {
     if (!IsEnabled()) return;
