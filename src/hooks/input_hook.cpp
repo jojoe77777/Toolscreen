@@ -196,6 +196,8 @@ struct HeldRebindOutput {
     DWORD msgVk = 0;
     UINT outputScanCode = 0;
     bool altContext = false;
+    // Non-zero when the rebind output is a mouse button (VK_LBUTTON..VK_XBUTTON2) rather than a key.
+    DWORD mouseButtonVk = 0;
 };
 static std::unordered_map<DWORD, HeldRebindOutput> s_heldShiftRebindOutputs;
 static std::mutex s_heldShiftRebindOutputsMutex;
@@ -5080,6 +5082,13 @@ static InputHandlerResult ExecuteMatchedKeyRebind(HWND hWnd, UINT uMsg, WPARAM w
                 dispatchMouseButton(true);
                 dispatchMouseButton(false);
             } else {
+                // Track the pressed button like a held key output, so the source's release (or a focus loss, GUI
+                // open or rebind change in between) releases it even when this rebind no longer matches the keyup.
+                if (isKeyDown && !isAutoRepeatKeyDown) {
+                    HeldRebindOutput held;
+                    held.mouseButtonVk = triggerVK;
+                    TrackHeldKeyRebindOutput(BuildSyntheticRebindOutputSourceId(rawVkCode, lParam, isMouseButton), held);
+                }
                 dispatchMouseButton(isKeyDown);
             }
         }
@@ -5194,7 +5203,47 @@ static void UntrackHeldShiftRebindOutput(DWORD sourceVk) {
     s_heldShiftRebindOutputs.erase(sourceVk);
 }
 
+// Sends the button-up for a held mouse-button rebind output, with the current modifier and button state and the
+// cursor's client position, as the rebind's own release would.
+static LRESULT InjectHeldMouseRebindOutputUp(HWND hWnd, DWORD buttonVk) {
+    WORD mk = 0;
+    if ((GetKeyState(VK_CONTROL) & 0x8000) != 0) mk |= MK_CONTROL;
+    if ((GetKeyState(VK_SHIFT) & 0x8000) != 0) mk |= MK_SHIFT;
+    const auto addButton = [&](int vk, WORD mask) {
+        if (vk != static_cast<int>(buttonVk) && (GetKeyState(vk) & 0x8000) != 0) mk |= mask;
+    };
+    addButton(VK_LBUTTON, MK_LBUTTON);
+    addButton(VK_RBUTTON, MK_RBUTTON);
+    addButton(VK_MBUTTON, MK_MBUTTON);
+    addButton(VK_XBUTTON1, MK_XBUTTON1);
+    addButton(VK_XBUTTON2, MK_XBUTTON2);
+
+    UINT msg = 0;
+    WPARAM wParam = mk;
+    switch (buttonVk) {
+    case VK_LBUTTON: msg = WM_LBUTTONUP; break;
+    case VK_RBUTTON: msg = WM_RBUTTONUP; break;
+    case VK_MBUTTON: msg = WM_MBUTTONUP; break;
+    case VK_XBUTTON1: msg = WM_XBUTTONUP; wParam = MAKEWPARAM(mk, XBUTTON1); break;
+    case VK_XBUTTON2: msg = WM_XBUTTONUP; wParam = MAKEWPARAM(mk, XBUTTON2); break;
+    default: return 0;
+    }
+
+    LPARAM lParam = 0;
+    POINT pt{};
+    if (GetCursorPos(&pt) && ScreenToClient(hWnd, &pt)) {
+        lParam = MAKELPARAM(pt.x, pt.y);
+    } else {
+        RECT clientRect{};
+        if (GetClientRect(hWnd, &clientRect)) {
+            lParam = MAKELPARAM((clientRect.right - clientRect.left) / 2, (clientRect.bottom - clientRect.top) / 2);
+        }
+    }
+    return CallWindowProc(g_originalWndProc, hWnd, msg, wParam, lParam);
+}
+
 static LRESULT InjectHeldShiftRebindOutputKeyUp(HWND hWnd, const HeldRebindOutput& out) {
+    if (out.mouseButtonVk != 0) return InjectHeldMouseRebindOutputUp(hWnd, out.mouseButtonVk);
     const UINT keyUpMsg = out.altContext ? WM_SYSKEYUP : WM_KEYUP;
     const LPARAM lp = BuildKeyboardMessageLParam(out.outputScanCode, false, out.altContext, 1, true, true);
     return CallWindowProc(g_originalWndProc, hWnd, keyUpMsg, out.msgVk, lp);
@@ -5236,7 +5285,7 @@ static void ReleaseAllHeldShiftRebindOutputs(HWND hWnd) {
 }
 
 static void TrackHeldKeyRebindOutput(uint64_t sourceId, const HeldRebindOutput& out) {
-    if (sourceId == 0 || out.outputScanCode == 0) { return; }
+    if (sourceId == 0 || (out.outputScanCode == 0 && out.mouseButtonVk == 0)) { return; }
     std::lock_guard<std::mutex> lock(s_heldKeyRebindOutputsMutex);
     s_heldKeyRebindOutputs[sourceId] = out;
 }
