@@ -4,6 +4,7 @@
 #include "common/utils.h"
 #include "config/config_toml.h"
 #include "gui/gui.h"
+#include "features/window_overlay.h"
 #include "hooks/hook_chain.h"
 #include "hooks/input_hook.h"
 #include "render/render_backend.h"
@@ -543,6 +544,80 @@ void TestVulkanFrameCompletionTracking() {
     Require(untracked == 0, std::to_string(untracked) + " overlay frames had no free tracking slot.");
 }
 
+// A window overlay's streaming texture must be replaced safely when its size changes, and its GPU resources
+// must be released once it stops being drawn (deleted overlays used to keep them until the swapchain went away).
+void TestVulkanStreamingTextureLifetime() {
+    WaitUntil([] { return GetRenderBackend() != RenderBackend::Unknown; }, std::chrono::seconds(20));
+    if (GetRenderBackend() != RenderBackend::Vulkan) Skip("Streaming textures are part of the Vulkan renderer.");
+    if (!IsResolutionChangeSupported(g_gameVersion)) Skip("Modes are not supported on this game version.");
+
+    static constexpr const char* kOverlayName = "GameTestStream";
+    const std::string key = std::string("window:") + kOverlayName;
+    WindowOverlayConfig overlay;
+    overlay.name = kOverlayName;
+    overlay.windowTitle = "Toolscreen game test window that does not exist";
+    const auto stage = [&](int size, unsigned char shade) {
+        std::vector<unsigned char> pixels(static_cast<size_t>(size) * size * 4, shade);
+        Require(StageWindowOverlayTestFrame(overlay, pixels, size, size), "Could not stage a window overlay frame.");
+    };
+    const auto stats = [&] { return RunOnRenderThread([&] { return VulkanRenderer::GetStreamingTextureStats(key); }); };
+
+    RunOnRenderThread([&] {
+        InstallTestFixtureOnRenderThread();
+        auto mode = std::find_if(g_config.modes.begin(), g_config.modes.end(),
+                                 [](const ModeConfig& m) { return EqualsIgnoreCase(m.id, kTestModeId); });
+        mode->sources.push_back({ ModeSourceType::WindowOverlay, kOverlayName });
+        g_config.windowOverlays.push_back(overlay);
+        g_configIsDirty = true;
+        PublishGuiConfigSnapshot();
+    });
+    struct RemoveOverlay {
+        ~RemoveOverlay() {
+            try {
+                RunOnRenderThread([] {
+                    std::erase_if(g_config.windowOverlays, [](const WindowOverlayConfig& o) { return o.name == kOverlayName; });
+                    for (ModeConfig& mode : g_config.modes) {
+                        std::erase_if(mode.sources, [](const ModeSourceRef& s) { return s.id == kOverlayName; });
+                    }
+                    g_configIsDirty = true;
+                    PublishGuiConfigSnapshot();
+                });
+            } catch (...) {}
+            RemoveWindowOverlayFromCache(kOverlayName);
+        }
+    } removeOverlay;
+
+    stage(64, 40);
+    Require(SwitchModeOnRenderThread(kTestModeId), "Could not switch to the test mode.");
+    Require(WaitUntil([&] { return stats().slots > 0; }, std::chrono::seconds(10)),
+            "The window overlay never got a streaming texture.");
+
+    // A new size replaces the slot; the old one must be retired, not left behind or destroyed while in flight.
+    stage(96, 200);
+    Require(WaitUntil([&] { return stats().largestWidth == 96; }, std::chrono::seconds(10)),
+            "The streaming texture was not recreated at the new size.");
+    Require(WaitForFrames(30, std::chrono::seconds(10)), "Frames stopped after resizing the streaming texture.");
+
+    // Delete the overlay while staying in the same mode, so no swapchain recreation frees anything for us.
+    // Its slots must be released once they have been idle for the eviction window.
+    RunOnRenderThread([] {
+        std::erase_if(g_config.windowOverlays, [](const WindowOverlayConfig& o) { return o.name == kOverlayName; });
+        for (ModeConfig& mode : g_config.modes) {
+            std::erase_if(mode.sources, [](const ModeSourceRef& s) { return s.id == kOverlayName; });
+        }
+        g_configIsDirty = true;
+        PublishGuiConfigSnapshot();
+    });
+    RemoveWindowOverlayFromCache(kOverlayName);
+    const bool released = WaitUntil([&] { return stats().keys == 0; }, std::chrono::seconds(30));
+    const VulkanRenderer::StreamingTextureStats remaining = stats();
+    Require(released, "The deleted overlay still holds " + std::to_string(remaining.slots) + " streaming texture slots under " +
+                          std::to_string(remaining.keys) + " key(s).");
+    Require(WaitUntil([&] { return stats().retiredAwaitingGpu == 0; }, std::chrono::seconds(10)),
+            "Retired texture resources were never destroyed (" + std::to_string(stats().retiredAwaitingGpu) + " remain).");
+    Require(SwitchModeOnRenderThread(DefaultModeId()), "Could not switch back to the default mode.");
+}
+
 struct TestCase {
     const char* name;
     void (*fn)();
@@ -561,6 +636,7 @@ const TestCase kTests[] = {
     { "hooks.third_party_swap_chain", &TestThirdPartySwapBuffersChain },
     { "vulkan.layer_wait_does_not_block_other_calls", &TestVulkanLayerWaitDoesNotBlockOtherCalls },
     { "vulkan.frame_completion_tracking", &TestVulkanFrameCompletionTracking },
+    { "vulkan.streaming_texture_lifetime", &TestVulkanStreamingTextureLifetime },
     { "config.save_round_trip", &TestConfigSaveRoundTrip },
 };
 
