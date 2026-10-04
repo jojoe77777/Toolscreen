@@ -1,6 +1,7 @@
 #include "game_test_mode.h"
 #include "thread_stack_dump.h"
 
+#include "common/i18n.h"
 #include "common/utils.h"
 #include "config/config_toml.h"
 #include "gui/gui.h"
@@ -703,6 +704,23 @@ void TestObsPassReusesScreenImGuiFrame() {
     Require(differs, "The OBS output looks the same with the settings GUI open and closed.");
 }
 
+// Needs a config.toml that cannot load or be restored, e.g. run_game_tests.ps1 -ConfigFixture tests/game/fixtures/broken_config.toml.
+void TestConfigLoadErrorScreen() {
+    if (!g_configLoadFailed.load(std::memory_order_acquire)) Skip("config.toml loaded; this test needs a broken config fixture.");
+
+    Require(WaitUntil([] { return g_subclassedHwnd.load(std::memory_order_acquire) != NULL; }, std::chrono::seconds(10)),
+            "The game window was never subclassed, so the config error screen cannot receive input.");
+    Require(WaitForFrames(10, std::chrono::seconds(20)), "Frames stopped passing through the render hook.");
+
+    const bool errorScreenDrawn = RunOnRenderThread([] {
+        std::lock_guard<std::recursive_mutex> lock(GetImGuiContextMutex());
+        if (ImGui::GetCurrentContext() == nullptr) return false;
+        const ImGuiWindow* window = ImGui::FindWindowByName(trc("error.configuration_error"));
+        return window != nullptr && window->WasActive;
+    });
+    Require(errorScreenDrawn, "The config error screen was not drawn.");
+}
+
 struct TestCase {
     const char* name;
     void (*fn)();
@@ -724,6 +742,7 @@ const TestCase kTests[] = {
     { "vulkan.frame_completion_tracking", &TestVulkanFrameCompletionTracking },
     { "vulkan.streaming_texture_lifetime", &TestVulkanStreamingTextureLifetime },
     { "config.save_round_trip", &TestConfigSaveRoundTrip },
+    { "config.load_error_screen", &TestConfigLoadErrorScreen },
 };
 
 bool MatchesFilter(const std::string& name) {

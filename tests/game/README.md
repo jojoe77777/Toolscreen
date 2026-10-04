@@ -48,6 +48,7 @@ Useful options:
 | --- | --- |
 | `-GraphicsBackend opengl\|vulkan` | Renderer for 26.x clients (passed as `--graphicsBackend`). Older versions always use OpenGL. |
 | `-Filter mode.,input.` | Run only tests whose name contains one of the comma-separated substrings. |
+| `-ConfigFixture <file>` | Start with this file as `toolscreen\config.toml`, e.g. `tests/game/fixtures/broken_config.toml` for the config error screen test. |
 | `-KeepGameOpen` | Leave the game running afterwards, for example to inspect it with `jcmd <pid> Thread.print`. |
 | `-BuildDir <dir>` | Test a DLL from another build tree, such as a worktree of an older commit. |
 

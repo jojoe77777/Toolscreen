@@ -1713,9 +1713,11 @@ void HandleConfigLoadFailed(HDC hDc, BOOL (*oWglSwapBuffers)(HDC)) {
     if (ImGui::GetCurrentContext() == nullptr) {
         IMGUI_CHECKVERSION();
         ImGui::CreateContext();
-        ConfigureImGuiFontsAndStyle(ComputeGuiScaleFactorFromCachedWindowSize() * 1.25f);
         ImGui_ImplWin32_Init(g_minecraftHwnd.load());
+        // The renderer backend must be initialized before the font atlas is built: it sets
+        // ImGuiBackendFlags_RendererHasTextures, and ImGui asserts if Build() ran before that flag existed.
         ImGui_ImplOpenGL3_Init("#version 330");
+        ConfigureImGuiFontsAndStyle(ComputeGuiScaleFactorFromCachedWindowSize() * 1.25f);
     }
 
     ImGui_ImplOpenGL3_NewFrame();

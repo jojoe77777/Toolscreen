@@ -1683,6 +1683,19 @@ if(TOOLSCREEN_POWERSHELL_EXECUTABLE)
             RUN_SERIAL TRUE
         )
     endforeach()
+    # Start with a config.toml that cannot be loaded or restored, and require the error screen to show.
+    add_test(
+        NAME toolscreen_integration_game_1_16_1_config_error
+        COMMAND ${TOOLSCREEN_POWERSHELL_EXECUTABLE} -NoProfile -ExecutionPolicy Bypass
+            -File "${CMAKE_CURRENT_SOURCE_DIR}/scripts/game_tests/run_game_tests.ps1"
+            -MinecraftVersion 1.16.1 -Configuration $<CONFIG> -BuildDir "${CMAKE_BINARY_DIR}"
+            -Filter "startup.,config.load_error_screen"
+            -ConfigFixture "${CMAKE_CURRENT_SOURCE_DIR}/tests/game/fixtures/broken_config.toml"
+    )
+    set_tests_properties(toolscreen_integration_game_1_16_1_config_error PROPERTIES
+        TIMEOUT 1800
+        RUN_SERIAL TRUE
+    )
 endif()
 
 add_executable(toolscreen_base64_tests tests/base64_tests.cpp)

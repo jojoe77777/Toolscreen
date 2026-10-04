@@ -3892,6 +3892,17 @@ static BOOL SwapBuffersHook_Impl(WGLSWAPBUFFERS next, HDC hDc) {
         // Start logic thread if not already running (handles OBS detection, hotkey resets, etc.)
         if (!g_logicThreadRunning.load() && g_configLoaded.load()) { StartLogicThread(); }
 
+        // A config that failed to load is never marked loaded, so the error screen has to be drawn before the early
+        // exit below. The window still needs subclassing so the error screen's buttons receive mouse input.
+        if (!g_configLoaded.load() && g_configLoadFailed.load()) {
+            HWND errorHwnd = WindowFromDC(hDc);
+            if (!errorHwnd) { return next(hDc); }
+            g_minecraftHwnd.store(errorHwnd);
+            SubclassGameWindow(errorHwnd);
+            HandleConfigLoadFailed(hDc, next);
+            return next(hDc);
+        }
+
         // Early exit if config hasn't been loaded yet (prevents race conditions during startup)
         if (!g_configLoaded.load()) { return next(hDc); }
 
