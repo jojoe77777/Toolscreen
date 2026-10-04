@@ -1622,6 +1622,104 @@ void RunKeyRebindRuntimeHeldOutputReleasedOnGuiOpenTest(TestRunMode runMode = Te
         "Expected the held F3 to be released when the Toolscreen GUI opens mid-hold.");
 }
 
+static size_t CountCapturedMessages(const ScopedRebindMessageCapture& capture, UINT message) {
+    size_t count = 0;
+    for (const CapturedWindowMessage& captured : capture.messages) {
+        if (captured.message == message) ++count;
+    }
+    return count;
+}
+
+void RunKeyRebindRuntimeHeldMouseOutputReleasedOnceOnUpTest(TestRunMode runMode = TestRunMode::Automated) {
+    DummyWindow window(kWindowWidth, kWindowHeight, runMode == TestRunMode::Visual);
+
+    PrepareRebindRuntimeCase("key_rebind_runtime_held_mouse_output_released_once_on_up",
+                             { MakeEnabledRebind('A', VK_RBUTTON) });
+    ScopedRebindMessageCapture capture(window.hwnd());
+
+    ScopedKeyboardStateOverride keyboardState;
+    keyboardState.SetKeyDown(VK_SHIFT, false);
+    keyboardState.SetToggle(VK_CAPITAL, false);
+    keyboardState.Apply();
+
+    ScopedCursorVisibilityOverride cursorVisible(true);
+
+    HandleKeyRebinding(window.hwnd(), WM_KEYDOWN, 'A', BuildTestKeyboardMessageLParam('A', true));
+    Expect(CountCapturedMessages(capture, WM_RBUTTONDOWN) == 1, "Expected the keydown to press the rebound right button.");
+
+    capture.Clear();
+    HandleKeyRebinding(window.hwnd(), WM_KEYUP, 'A', BuildTestKeyboardMessageLParam('A', false));
+    Expect(capture.messages.size() == 1 && CountCapturedMessages(capture, WM_RBUTTONUP) == 1,
+           "Expected exactly one right-button release for the keyup.");
+}
+
+void RunKeyRebindRuntimeHeldMouseOutputReleasedOnNoMatchUpTest(TestRunMode runMode = TestRunMode::Automated) {
+    DummyWindow window(kWindowWidth, kWindowHeight, runMode == TestRunMode::Visual);
+
+    PrepareRebindRuntimeCase("key_rebind_runtime_held_mouse_output_released_on_no_match_up",
+                             { MakeEnabledRebind('A', VK_RBUTTON) });
+    ScopedRebindMessageCapture capture(window.hwnd());
+
+    ScopedKeyboardStateOverride keyboardState;
+    keyboardState.SetKeyDown(VK_SHIFT, false);
+    keyboardState.SetToggle(VK_CAPITAL, false);
+    keyboardState.Apply();
+
+    ScopedCursorVisibilityOverride cursorVisible(true);
+
+    HandleKeyRebinding(window.hwnd(), WM_KEYDOWN, 'A', BuildTestKeyboardMessageLParam('A', true));
+    Expect(CountCapturedMessages(capture, WM_RBUTTONDOWN) == 1, "Expected the keydown to press the rebound right button.");
+
+    // The rebind stops matching mid-hold (rebinds toggled off, edited, or a cursor-state rebind no longer applies).
+    capture.Clear();
+    g_config.keyRebinds.rebinds = {};
+    PublishConfigSnapshot();
+
+    const InputHandlerResult upResult =
+        HandleKeyRebinding(window.hwnd(), WM_KEYUP, 'A', BuildTestKeyboardMessageLParam('A', false));
+    Expect(upResult.consumed, "Expected the keyup to be consumed while a rebound mouse button is held.");
+    Expect(capture.messages.size() == 1 && CountCapturedMessages(capture, WM_RBUTTONUP) == 1,
+           "Expected the held right button to be released even though no rebind matches the keyup.");
+}
+
+void RunKeyRebindRuntimeHeldMouseOutputReleasedOnGuiOpenTest(TestRunMode runMode = TestRunMode::Automated) {
+    DummyWindow window(kWindowWidth, kWindowHeight, runMode == TestRunMode::Visual);
+
+    PrepareRebindRuntimeCase("key_rebind_runtime_held_mouse_output_released_on_gui_open",
+                             { MakeEnabledRebind('A', VK_RBUTTON) });
+    g_config.guiHotkey = { VK_F6 };
+    ScopedRebindMessageCapture capture(window.hwnd());
+
+    ScopedKeyboardStateOverride keyboardState;
+    keyboardState.SetKeyDown(VK_SHIFT, false);
+    keyboardState.SetToggle(VK_CAPITAL, false);
+    keyboardState.Apply();
+
+    ScopedCursorVisibilityOverride cursorVisible(true);
+
+    g_showGui.store(false, std::memory_order_release);
+    const bool previousGlInitialized = g_glInitialized.load(std::memory_order_acquire);
+    g_glInitialized.store(true, std::memory_order_release);
+
+    HandleKeyRebinding(window.hwnd(), WM_KEYDOWN, 'A', BuildTestKeyboardMessageLParam('A', true));
+    const bool pressed = CountCapturedMessages(capture, WM_RBUTTONDOWN) == 1;
+
+    capture.Clear();
+    // GUI toggles are debounced globally; an earlier test may have toggled it moments ago.
+    g_lastGuiToggleTimeMs.store(0, std::memory_order_relaxed);
+    const InputHandlerResult toggleResult =
+        HandleGuiToggle(window.hwnd(), WM_KEYDOWN, VK_F6, BuildTestKeyboardMessageLParam(VK_F6, true));
+    const bool guiOpened = g_showGui.load(std::memory_order_acquire);
+    const size_t releases = CountCapturedMessages(capture, WM_RBUTTONUP);
+
+    g_showGui.store(false, std::memory_order_release);
+    g_glInitialized.store(previousGlInitialized, std::memory_order_release);
+
+    Expect(pressed, "Expected the keydown to press the rebound right button.");
+    Expect(toggleResult.consumed && guiOpened, "Expected the GUI to open on the toggle hotkey.");
+    Expect(releases == 1, "Expected opening the GUI while a rebound mouse button is held to release it.");
+}
+
 void RunKeyRebindRuntimeCursorStatePriorityAndFallbackTest(TestRunMode runMode = TestRunMode::Automated) {
     DummyWindow window(kWindowWidth, kWindowHeight, runMode == TestRunMode::Visual);
 
