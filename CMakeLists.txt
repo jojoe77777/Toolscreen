@@ -1684,32 +1684,38 @@ if(TOOLSCREEN_POWERSHELL_EXECUTABLE)
             RUN_SERIAL TRUE
         )
     endforeach()
-    # Start with a config.toml that cannot be loaded or restored, and require the error screen to show.
-    add_test(
-        NAME toolscreen_integration_game_1_16_1_config_error
-        COMMAND ${TOOLSCREEN_POWERSHELL_EXECUTABLE} -NoProfile -ExecutionPolicy Bypass
-            -File "${CMAKE_CURRENT_SOURCE_DIR}/scripts/game_tests/run_game_tests.ps1"
-            -MinecraftVersion 1.16.1 -Configuration $<CONFIG> -BuildDir "${CMAKE_BINARY_DIR}"
-            -Filter "startup.,config.load_error_screen"
-            -ConfigFixture "${CMAKE_CURRENT_SOURCE_DIR}/tests/game/fixtures/broken_config.toml"
-    )
-    set_tests_properties(toolscreen_integration_game_1_16_1_config_error PROPERTIES
-        TIMEOUT 1800
-        RUN_SERIAL TRUE
-    )
-    # Start with a corrupt config.toml beside a good launch snapshot, and require a silent restore.
-    add_test(
-        NAME toolscreen_integration_game_1_16_1_config_restore
-        COMMAND ${TOOLSCREEN_POWERSHELL_EXECUTABLE} -NoProfile -ExecutionPolicy Bypass
-            -File "${CMAKE_CURRENT_SOURCE_DIR}/scripts/game_tests/run_game_tests.ps1"
-            -MinecraftVersion 1.16.1 -Configuration $<CONFIG> -BuildDir "${CMAKE_BINARY_DIR}"
-            -Filter "startup.,render.frames_hooked,config.recovered_from_backup"
-            -ConfigFixture "${CMAKE_CURRENT_SOURCE_DIR}/tests/game/fixtures/corrupt_config_with_backup"
-    )
-    set_tests_properties(toolscreen_integration_game_1_16_1_config_restore PROPERTIES
-        TIMEOUT 1800
-        RUN_SERIAL TRUE
-    )
+    # Config fixtures, run on one client per backend:
+    #   config_error   - a config.toml that cannot be loaded or restored must show the error screen.
+    #   config_restore - a corrupt config.toml beside a good launch snapshot must be restored silently.
+    foreach(game_test_spec IN ITEMS "1.16.1:opengl" "26.3:vulkan")
+        string(REPLACE ":" ";" game_test_parts "${game_test_spec}")
+        list(GET game_test_parts 0 game_test_version)
+        list(GET game_test_parts 1 game_test_backend)
+        string(REPLACE "." "_" game_test_version_id "${game_test_version}")
+        set(game_test_prefix toolscreen_integration_game_${game_test_version_id}_${game_test_backend})
+        add_test(
+            NAME ${game_test_prefix}_config_error
+            COMMAND ${TOOLSCREEN_POWERSHELL_EXECUTABLE} -NoProfile -ExecutionPolicy Bypass
+                -File "${CMAKE_CURRENT_SOURCE_DIR}/scripts/game_tests/run_game_tests.ps1"
+                -MinecraftVersion ${game_test_version} -GraphicsBackend ${game_test_backend} -Configuration $<CONFIG>
+                -BuildDir "${CMAKE_BINARY_DIR}"
+                -Filter "startup.,config.load_error_screen"
+                -ConfigFixture "${CMAKE_CURRENT_SOURCE_DIR}/tests/game/fixtures/broken_config.toml"
+        )
+        add_test(
+            NAME ${game_test_prefix}_config_restore
+            COMMAND ${TOOLSCREEN_POWERSHELL_EXECUTABLE} -NoProfile -ExecutionPolicy Bypass
+                -File "${CMAKE_CURRENT_SOURCE_DIR}/scripts/game_tests/run_game_tests.ps1"
+                -MinecraftVersion ${game_test_version} -GraphicsBackend ${game_test_backend} -Configuration $<CONFIG>
+                -BuildDir "${CMAKE_BINARY_DIR}"
+                -Filter "startup.,render.frames_hooked,config.recovered_from_backup"
+                -ConfigFixture "${CMAKE_CURRENT_SOURCE_DIR}/tests/game/fixtures/corrupt_config_with_backup"
+        )
+        set_tests_properties(${game_test_prefix}_config_error ${game_test_prefix}_config_restore PROPERTIES
+            TIMEOUT 1800
+            RUN_SERIAL TRUE
+        )
+    endforeach()
 endif()
 
 add_executable(toolscreen_base64_tests tests/base64_tests.cpp)
