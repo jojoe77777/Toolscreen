@@ -611,8 +611,19 @@ std::wstring ConvertAnsiToWchar(LPCSTR value) {
     return converted;
 }
 
+// True once ExitProcess has started tearing the process down. Other threads are already terminated by then,
+// and WinVerifyTrust can wait on a lock one of them held, which makes Windows end the process abruptly (the JVM
+// reports it as a fatal error, and later DLLs never get DLL_PROCESS_DETACH). DLLs still load during shutdown,
+// e.g. sapi.dll from its own detach, so skip signature work then; this matches the existing fail-open policy.
+bool IsProcessShuttingDown() {
+    using RtlDllShutdownInProgressFn = BOOLEAN(NTAPI*)();
+    static const auto shutdownInProgress = reinterpret_cast<RtlDllShutdownInProgressFn>(
+        GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlDllShutdownInProgress"));
+    return shutdownInProgress && shutdownInProgress() != FALSE;
+}
+
 bool IsBlockedLoadLibraryRequest(LPCWSTR requestedPath, std::wstring& blockedPath) {
-    if (g_isCheckingLoadSignature) {
+    if (g_isCheckingLoadSignature || IsProcessShuttingDown()) {
         return false;
     }
 
@@ -629,7 +640,7 @@ bool IsBlockedLoadLibraryRequest(LPCWSTR requestedPath, std::wstring& blockedPat
 }
 
 bool IsBlockedLoadLibraryRequest(LPCSTR requestedPath, std::wstring& blockedPath) {
-    if (g_isCheckingLoadSignature) {
+    if (g_isCheckingLoadSignature || IsProcessShuttingDown()) {
         return false;
     }
 
@@ -1185,7 +1196,7 @@ std::wstring GetLoadedModulePath(HMODULE hModule) {
 }
 
 void HandleLoadedModule(HMODULE hModule) noexcept {
-    if (!hModule) return;
+    if (!hModule || IsProcessShuttingDown()) return;
 
     try {
         std::wstring loadedPath = GetLoadedModulePath(hModule);
