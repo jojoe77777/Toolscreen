@@ -233,7 +233,7 @@ y = 0
 
 [keyRebinds]
 enabled = false
-resolveRebindTargetsForHotkeys = true
+resolveRebindTargetsForHotkeys = false
 allowSystemAltTab = false
 allowSystemAltF4 = false
 suppressCapsLockToggle = false

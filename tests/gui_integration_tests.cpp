@@ -1695,7 +1695,7 @@ void PopulateRichConfigFixture() {
     g_config.eyezoom.activeOverlayIndex = 1;
 
     g_config.keyRebinds.enabled = true;
-    g_config.keyRebinds.resolveRebindTargetsForHotkeys = false;
+    g_config.keyRebinds.resolveRebindTargetsForHotkeys = true;
     g_config.keyRebinds.toggleHotkey = { VK_F4 };
     KeyRebind rebind;
     rebind.fromKey = 'J';
@@ -2422,7 +2422,7 @@ void VerifyRichCursorsAndEyeZoom() {
 
 void VerifyRichKeyRebindsAndAppearance() {
     Expect(g_config.keyRebinds.enabled, "Expected keyRebinds.enabled to roundtrip.");
-    Expect(!g_config.keyRebinds.resolveRebindTargetsForHotkeys,
+    Expect(g_config.keyRebinds.resolveRebindTargetsForHotkeys,
            "Expected keyRebinds.resolveRebindTargetsForHotkeys to roundtrip.");
     ExpectVectorEquals(g_config.keyRebinds.toggleHotkey, std::vector<DWORD>{ VK_F4 },
                        "Expected keyRebinds.toggleHotkey to roundtrip.");
