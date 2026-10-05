@@ -1198,6 +1198,11 @@ std::wstring GetLoadedModulePath(HMODULE hModule) {
 void HandleLoadedModule(HMODULE hModule) noexcept {
     if (!hModule || IsProcessShuttingDown()) return;
 
+    // LOAD_LIBRARY_AS_DATAFILE and LOAD_LIBRARY_AS_IMAGE_RESOURCE loads return a
+    // handle tagged in its low bits. The mapping holds resources only, never runs
+    // code, and is not in the loader's module list, so it has no module file name.
+    if (reinterpret_cast<uintptr_t>(hModule) & 0x3) return;
+
     try {
         std::wstring loadedPath = GetLoadedModulePath(hModule);
         if (loadedPath.empty()) {
@@ -1276,7 +1281,9 @@ HMODULE WINAPI DetourLoadLibraryW(LPCWSTR lpLibFileName) {
     }
 
     HMODULE hModule = pOriginalLoadLibraryW(lpLibFileName);
+    DWORD loadError = GetLastError();
     HandleLoadedModule(hModule);
+    SetLastError(loadError);
     return hModule;
 }
 
@@ -1289,7 +1296,9 @@ HMODULE WINAPI DetourLoadLibraryA(LPCSTR lpLibFileName) {
     }
 
     HMODULE hModule = pOriginalLoadLibraryA(lpLibFileName);
+    DWORD loadError = GetLastError();
     HandleLoadedModule(hModule);
+    SetLastError(loadError);
     return hModule;
 }
 
@@ -1302,7 +1311,9 @@ HMODULE WINAPI DetourLoadLibraryExW(LPCWSTR lpLibFileName, HANDLE hFile, DWORD d
     }
 
     HMODULE hModule = pOriginalLoadLibraryExW(lpLibFileName, hFile, dwFlags);
+    DWORD loadError = GetLastError();
     HandleLoadedModule(hModule);
+    SetLastError(loadError);
     return hModule;
 }
 
@@ -1315,7 +1326,9 @@ HMODULE WINAPI DetourLoadLibraryExA(LPCSTR lpLibFileName, HANDLE hFile, DWORD dw
     }
 
     HMODULE hModule = pOriginalLoadLibraryExA(lpLibFileName, hFile, dwFlags);
+    DWORD loadError = GetLastError();
     HandleLoadedModule(hModule);
+    SetLastError(loadError);
     return hModule;
 }
 
