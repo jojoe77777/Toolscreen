@@ -515,6 +515,32 @@ thread_local const VulkanRenderer::FinalBlitContext* g_activeFrameContext =
     nullptr;
 thread_local TimestampFrame* g_activeResourceTimestampFrame = nullptr;
 
+// Descriptor operations can run while the passive OBS context is drawing.
+// Only the interactive context owns the Vulkan backend and descriptor pool.
+class ScopedVulkanImGuiContext {
+public:
+    ScopedVulkanImGuiContext() : previous_(ImGui::GetCurrentContext()) {
+        ImGui::SetCurrentContext(g_state.imguiContext);
+    }
+    ~ScopedVulkanImGuiContext() { ImGui::SetCurrentContext(previous_); }
+
+    ScopedVulkanImGuiContext(const ScopedVulkanImGuiContext&) = delete;
+    ScopedVulkanImGuiContext& operator=(const ScopedVulkanImGuiContext&) = delete;
+
+private:
+    ImGuiContext* previous_;
+};
+
+VkDescriptorSet AddTextureDescriptor(VkSampler sampler, VkImageView view, VkImageLayout layout) {
+    ScopedVulkanImGuiContext context;
+    return ImGui_ImplVulkan_AddTexture(sampler, view, layout);
+}
+
+void RemoveTextureDescriptor(VkDescriptorSet descriptor) {
+    ScopedVulkanImGuiContext context;
+    ImGui_ImplVulkan_RemoveTexture(descriptor);
+}
+
 bool ShouldLogObsCapture(std::atomic<uint64_t>& lastTick) {
     constexpr uint64_t intervalMs = 2000;
     const uint64_t now = GetTickCount64();
@@ -669,7 +695,7 @@ bool CreateFontResources() {
     g_state.fontWidth = static_cast<uint32_t>(width);
     g_state.fontHeight = static_cast<uint32_t>(height);
     g_state.fontDescriptor =
-        ImGui_ImplVulkan_AddTexture(g_state.mirrorSampler, g_state.fontView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        AddTextureDescriptor(g_state.mirrorSampler, g_state.fontView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     if (!g_state.fontDescriptor || !io.Fonts->TexData) return false;
     io.Fonts->TexData->SetTexID(static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(g_state.fontDescriptor)));
     io.Fonts->TexData->SetStatus(ImTextureStatus_OK);
@@ -1635,12 +1661,11 @@ bool IsFormatTransferDestination(VkFormat format) {
 }
 
 void DestroyMirrorCopyImage(MirrorCopyImage& resource) {
-    ImGui::SetCurrentContext(g_state.imguiContext);
     if (resource.sampled.descriptor) {
-        ImGui_ImplVulkan_RemoveTexture(resource.sampled.descriptor);
+        RemoveTextureDescriptor(resource.sampled.descriptor);
     }
     if (resource.sampled.linearDescriptor) {
-        ImGui_ImplVulkan_RemoveTexture(resource.sampled.linearDescriptor);
+        RemoveTextureDescriptor(resource.sampled.linearDescriptor);
     }
     if (resource.sampled.view && g_state.dispatch.destroyImageView) {
         g_state.dispatch.destroyImageView(g_state.device, resource.sampled.view, nullptr);
@@ -1718,7 +1743,7 @@ bool CreateMirrorCopyImage(const ImageMetadata& metadata, MirrorCopyImage& resou
         DestroyMirrorCopyImage(resource);
         return false;
     }
-    resource.sampled.descriptor = ImGui_ImplVulkan_AddTexture(
+    resource.sampled.descriptor = AddTextureDescriptor(
         g_state.mirrorSampler, resource.sampled.view,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     if (!resource.sampled.descriptor) {
@@ -2077,13 +2102,12 @@ SampledImage* ResolveMirrorSample(
 }
 
 void DestroyTextureAsset(TextureAsset& asset) {
-    ImGui::SetCurrentContext(g_state.imguiContext);
     for (TextureFrame& frame : asset.frames) {
         if (frame.sampled.descriptor) {
-            ImGui_ImplVulkan_RemoveTexture(frame.sampled.descriptor);
+            RemoveTextureDescriptor(frame.sampled.descriptor);
         }
         if (frame.sampled.linearDescriptor) {
-            ImGui_ImplVulkan_RemoveTexture(frame.sampled.linearDescriptor);
+            RemoveTextureDescriptor(frame.sampled.linearDescriptor);
         }
         if (frame.sampled.view && g_state.dispatch.destroyImageView) {
             g_state.dispatch.destroyImageView(
@@ -2163,9 +2187,8 @@ void RestoreActiveFontResource(RetiredFontResource&& resource) {
 }
 
 void DestroyFontResource(RetiredFontResource& resource) {
-    ImGui::SetCurrentContext(g_state.imguiContext);
     if (resource.descriptor) {
-        ImGui_ImplVulkan_RemoveTexture(resource.descriptor);
+        RemoveTextureDescriptor(resource.descriptor);
     }
     if (resource.uploadMapped && g_state.dispatch.unmapMemory) {
         g_state.dispatch.unmapMemory(
@@ -2273,7 +2296,7 @@ bool CreateTextureFrame(int width, int height, TextureFrame& frame) {
     if (!CreateImageView(frame.sampled.image, metadata, frame.sampled)) {
         return false;
     }
-    frame.sampled.descriptor = ImGui_ImplVulkan_AddTexture(
+    frame.sampled.descriptor = AddTextureDescriptor(
         g_state.mirrorSampler, frame.sampled.view,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     // The linear descriptor is created lazily by ResolveTextureFrame and
@@ -2490,14 +2513,9 @@ void RecordTextureUploads(VkCommandBuffer commandBuffer) {
 
 void EnsureLinearDescriptor(TextureFrame& frame) {
     if (frame.sampled.linearDescriptor || !frame.sampled.view) return;
-    // The passive OBS context has no Vulkan backend, so allocate through the
-    // interactive context that owns the descriptor pool.
-    ImGuiContext* previous = ImGui::GetCurrentContext();
-    ImGui::SetCurrentContext(g_state.imguiContext);
-    frame.sampled.linearDescriptor = ImGui_ImplVulkan_AddTexture(
+    frame.sampled.linearDescriptor = AddTextureDescriptor(
         g_state.linearSampler, frame.sampled.view,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    ImGui::SetCurrentContext(previous);
 }
 
 TextureFrame* ResolveTextureFrame(TextureAsset& asset, bool linear) {
@@ -2700,8 +2718,8 @@ SampledImage* GetSampledImage(VkImage image, const ImageMetadata& metadata, VkIm
         return nullptr;
     }
     if (resource.descriptor == VK_NULL_HANDLE || resource.descriptorLayout != layout) {
-        if (resource.descriptor != VK_NULL_HANDLE) ImGui_ImplVulkan_RemoveTexture(resource.descriptor);
-        resource.descriptor = ImGui_ImplVulkan_AddTexture(g_state.mirrorSampler, resource.view, layout);
+        if (resource.descriptor != VK_NULL_HANDLE) RemoveTextureDescriptor(resource.descriptor);
+        resource.descriptor = AddTextureDescriptor(g_state.mirrorSampler, resource.view, layout);
         resource.descriptorLayout = layout;
     }
     return resource.descriptor != VK_NULL_HANDLE ? &resource : nullptr;
@@ -7273,10 +7291,9 @@ void OnImageDestroyed(VkDevice device, VkImage image) {
     }
     auto it = g_state.imageResources.find(image);
     if (it == g_state.imageResources.end()) return;
-    ImGui::SetCurrentContext(g_state.imguiContext);
-    if (it->second.descriptor) ImGui_ImplVulkan_RemoveTexture(it->second.descriptor);
+    if (it->second.descriptor) RemoveTextureDescriptor(it->second.descriptor);
     if (it->second.linearDescriptor) {
-        ImGui_ImplVulkan_RemoveTexture(it->second.linearDescriptor);
+        RemoveTextureDescriptor(it->second.linearDescriptor);
     }
     if (it->second.view && g_state.dispatch.destroyImageView) {
         g_state.dispatch.destroyImageView(device, it->second.view, nullptr);
@@ -7341,9 +7358,9 @@ void Shutdown() {
         g_state.publishedObsCompositionSlot = UINT32_MAX;
     }
     for (auto& [image, resource] : g_state.imageResources) {
-        if (resource.descriptor) ImGui_ImplVulkan_RemoveTexture(resource.descriptor);
+        if (resource.descriptor) RemoveTextureDescriptor(resource.descriptor);
         if (resource.linearDescriptor) {
-            ImGui_ImplVulkan_RemoveTexture(resource.linearDescriptor);
+            RemoveTextureDescriptor(resource.linearDescriptor);
         }
         if (resource.view && g_state.dispatch.destroyImageView) {
             g_state.dispatch.destroyImageView(g_state.device, resource.view, nullptr);
@@ -7384,7 +7401,7 @@ void Shutdown() {
         DestroyFontResource(retired);
     }
     g_state.retiredFontResources.clear();
-    if (g_state.fontDescriptor) ImGui_ImplVulkan_RemoveTexture(g_state.fontDescriptor);
+    if (g_state.fontDescriptor) RemoveTextureDescriptor(g_state.fontDescriptor);
     if (g_state.queryPool && g_state.dispatch.destroyQueryPool) {
         g_state.dispatch.destroyQueryPool(g_state.device, g_state.queryPool, nullptr);
     }
