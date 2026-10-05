@@ -295,6 +295,10 @@ bool matchesAt(vec2 uv) {
 }
 
 void main() {
+    // Mirror content detection counts surviving fragments with an occlusion query. Some drivers (seen on NVIDIA)
+    // count samples before the fragment shader unless it writes depth, so every discard below would still count
+    // and every color-filtered mirror would always report content. Writing depth forces counting after the shader.
+    gl_FragDepth = gl_FragCoord.z;
     if (staticBorderMode != 0) {
         vec2 pixelPos = fragmentUv * pushConstants.staticBorderQuadSize;
         vec2 centeredPixelPos =
