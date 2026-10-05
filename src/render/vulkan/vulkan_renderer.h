@@ -82,5 +82,8 @@ void OnDeviceDestroyed(VkDevice device);
 void Shutdown();
 // Render thread only. The latest content-detection result for a mirror; false if none has been read back yet.
 bool GetMirrorHasContentForTests(const std::string& mirrorName, bool& hasContent);
+// Render thread only. Requests the presented swapchain pixel at (x, y) in window pixels; true once a sample of that
+// pixel has been read back.
+bool TryGetPresentedPixelForTests(int x, int y, std::array<float, 4>& color);
 
 } // namespace VulkanRenderer

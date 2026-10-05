@@ -8,6 +8,7 @@
 #include "features/window_overlay.h"
 #include "hooks/hook_chain.h"
 #include "hooks/input_hook.h"
+#include "render/mirror_thread.h"
 #include "render/render.h"
 #include "render/render_backend.h"
 #include "render/vulkan/vulkan_renderer.h"
@@ -22,6 +23,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <deque>
@@ -249,6 +251,8 @@ void InstallTestFixtureOnRenderThread() {
 constexpr const char* kTestMirrorMatchAll = "GameTestMirrorMatchAll";
 constexpr const char* kTestMirrorMatchNone = "GameTestMirrorMatchNone";
 constexpr const char* kTestMirrorAdded = "GameTestMirrorAdded";
+constexpr const char* kTestMirrorOpaqueRealtime = "GameTestMirrorOpaqueRealtime";
+constexpr const char* kTestMirrorOpaqueLimited = "GameTestMirrorOpaqueLimited";
 
 void RemoveTestFixtureOnRenderThread() {
     std::erase_if(g_config.mirrors, [](const MirrorConfig& mirror) {
@@ -890,6 +894,122 @@ void TestAddMirrorToCurrentMode() {
     Require(created, "The added mirror was never created or rendered by the active backend.");
 }
 
+// Minecraft leaves partial alpha in its frame where it blends translucent geometry (and in the sky with Fabulous
+// graphics). Mirrors draw the game as an opaque copy, so a mirror over such a pixel must show its color exactly
+// instead of blending it with whatever is underneath. Covers both the realtime source view and the fps-limited copy.
+void TestVulkanMirrorsDrawGameOpaque() {
+    WaitUntil([] { return GetRenderBackend() != RenderBackend::Unknown; }, std::chrono::seconds(20));
+    if (GetRenderBackend() != RenderBackend::Vulkan) Skip("This reads back the Vulkan renderer's presented frame.");
+    Require(WaitForFrames(120, std::chrono::seconds(20)), "Frames stopped before the test started.");
+
+    int gameW = 0, gameH = 0;
+    Require(GetLatestGameViewportSize(gameW, gameH), "The game viewport size is unknown.");
+
+    const auto sampleSource = [](int x, int y, std::array<float, 4>& color) {
+        return WaitUntil([&] { return RunOnRenderThread([&] { return VulkanRenderer::TryGetColorPickerSample(x, y, color); }); },
+                         std::chrono::seconds(3));
+    };
+    const auto samplePresented = [](int x, int y, std::array<float, 4>& color) {
+        return WaitUntil([&] { return RunOnRenderThread([&] { return VulkanRenderer::TryGetPresentedPixelForTests(x, y, color); }); },
+                         std::chrono::seconds(3));
+    };
+    const auto rgbDistance = [](const std::array<float, 4>& a, const std::array<float, 4>& b) {
+        return (std::max)({ std::abs(a[0] - b[0]), std::abs(a[1] - b[1]), std::abs(a[2] - b[2]) });
+    };
+
+    // Find a translucent pixel, keeping its 2x2 block uniform so the scaled mirror shows one color.
+    int sourceX = -1, sourceY = -1;
+    std::array<float, 4> source{};
+    for (int gy = 0; gy < 18 && sourceX < 0; ++gy) {
+        for (int gx = 0; gx < 32 && sourceX < 0; ++gx) {
+            const int x = gameW * (2 * gx + 1) / 64, y = gameH * (2 * gy + 1) / 36;
+            std::array<float, 4> color{}, right{}, below{};
+            if (!sampleSource(x, y, color) || color[3] > 0.9f) continue;
+            if (!sampleSource(x + 1, y, right) || !sampleSource(x, y + 1, below) || rgbDistance(color, right) > 0.02f ||
+                rgbDistance(color, below) > 0.02f) {
+                continue;
+            }
+            sourceX = x;
+            sourceY = y;
+            source = color;
+        }
+    }
+    if (sourceX < 0) Skip("No translucent pixel is in view (load a world with Improved Transparency on, or water or leaves on screen).");
+
+    struct Probe {
+        const char* name;
+        int fps;
+        int outputX;
+    };
+    const Probe probes[] = { { kTestMirrorOpaqueRealtime, kMirrorRealtimeFps, 40 }, { kTestMirrorOpaqueLimited, 30, 120 } };
+    constexpr int kOutputY = 40;
+    constexpr int kScale = 16;
+    std::array<float, 4> under[2]{};
+    for (size_t i = 0; i < 2; ++i) {
+        Require(samplePresented(probes[i].outputX + kScale, kOutputY + kScale, under[i]), "Could not read the presented frame.");
+        if (rgbDistance(under[i], source) < 0.1f) Skip("The frame under the mirror output matches the source pixel.");
+    }
+
+    const std::string modeId = GetPublishedCurrentModeId();
+    RunOnRenderThread([&] {
+        for (const Probe& probe : probes) {
+            MirrorConfig mirror;
+            mirror.name = probe.name;
+            mirror.captureWidth = 2;
+            mirror.captureHeight = 2;
+            mirror.fps = probe.fps;
+            mirror.rawOutput = true;
+            mirror.border.type = MirrorBorderType::Static;
+            mirror.border.staticThickness = 0;
+            mirror.input.push_back(MirrorCaptureConfig{ sourceX, sourceY, "topLeftScreen" });
+            mirror.output.relativeTo = "topLeftScreen";
+            mirror.output.x = probe.outputX;
+            mirror.output.y = kOutputY;
+            mirror.output.scale = static_cast<float>(kScale);
+            AddMirrorToCurrentMode(std::move(mirror));
+        }
+        PublishGuiConfigSnapshot();
+    });
+    const auto cleanup = [&] {
+        RunOnRenderThread([&] {
+            for (ModeConfig& mode : g_config.modes) {
+                for (const Probe& probe : probes) RemoveAllModeSources(mode, ModeSourceType::Mirror, probe.name);
+            }
+            std::erase_if(g_config.mirrors, [&](const MirrorConfig& mirror) {
+                return mirror.name == kTestMirrorOpaqueRealtime || mirror.name == kTestMirrorOpaqueLimited;
+            });
+            g_configIsDirty = true;
+            PublishGuiConfigSnapshot();
+        });
+    };
+
+    std::array<float, 4> shown[2]{};
+    bool read[2]{};
+    try {
+        Require(WaitForFrames(30, std::chrono::seconds(5)), "Frames stopped after adding the mirrors.");
+        for (size_t i = 0; i < 2; ++i) read[i] = samplePresented(probes[i].outputX + kScale, kOutputY + kScale, shown[i]);
+    } catch (...) {
+        cleanup();
+        throw;
+    }
+    cleanup();
+
+    const auto describe = [](const std::array<float, 4>& c) {
+        std::ostringstream out;
+        out << c[0] << "," << c[1] << "," << c[2] << "," << c[3];
+        return out.str();
+    };
+    Log("[GAME TEST] Opaque mirror check: source (" + std::to_string(sourceX) + "," + std::to_string(sourceY) + ")=" + describe(source) +
+        " realtime=" + describe(shown[0]) + " over " + describe(under[0]) + ", limited=" + describe(shown[1]) + " over " +
+        describe(under[1]) + " in mode " + modeId);
+    for (size_t i = 0; i < 2; ++i) {
+        Require(read[i], std::string("Could not read the presented frame under mirror ") + probes[i].name + ".");
+        Require(rgbDistance(shown[i], source) < 0.03f,
+                std::string("Mirror ") + probes[i].name + " showed " + describe(shown[i]) + " instead of the source pixel " +
+                    describe(source) + "; it blended the game's alpha with the frame underneath.");
+    }
+}
+
 // With the OBS compose pass running and the settings GUI open, ImGui must build one frame per swap: the OBS pass
 // reuses the screen pass's draw data instead of running NewFrame and the whole settings GUI a second time.
 // A color-filtered mirror reports content only when some captured pixel matches a target color. Vulkan measures this
@@ -1438,6 +1558,7 @@ const TestCase kTests[] = {
     { "vulkan.streaming_texture_lifetime", &TestVulkanStreamingTextureLifetime },
     { "vulkan.mirror_content_detection", &TestVulkanMirrorContentDetection },
     { "mirror.add_to_current_mode", &TestAddMirrorToCurrentMode },
+    { "vulkan.mirrors_draw_game_opaque", &TestVulkanMirrorsDrawGameOpaque },
     { "config.save_round_trip", &TestConfigSaveRoundTrip },
     { "config.load_error_screen", &TestConfigLoadErrorScreen },
     { "config.recovered_from_backup", &TestConfigRecoveredFromBackup },

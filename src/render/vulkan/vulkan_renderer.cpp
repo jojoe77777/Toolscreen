@@ -51,6 +51,8 @@ constexpr uint32_t kMaxTimestampFrames = 16;
 constexpr uint32_t kMaxMirrorQueriesPerFrame = 64;
 constexpr uint32_t kObsCompositionSlotCount = 4;
 constexpr VkDeviceSize kPickerReadbackStride = 16;
+// The presented-pixel test readback shares each frame's picker slot; a pixel is at most 8 bytes.
+constexpr VkDeviceSize kPresentedReadbackOffset = 8;
 constexpr int kEyeZoomSnapshotFpsKey = 9999;
 constexpr const char* kRebindIndicatorEnabledTextureId =
     "__vulkan_rebind_indicator_enabled";
@@ -160,6 +162,10 @@ struct TimestampFrame {
     int pickerX = -1;
     int pickerY = -1;
     VkFormat pickerFormat = VK_FORMAT_UNDEFINED;
+    bool presentedPending = false;
+    int presentedX = -1;
+    int presentedY = -1;
+    VkFormat presentedFormat = VK_FORMAT_UNDEFINED;
     bool screenshotPending = false;
     int screenshotWidth = 0;
     int screenshotHeight = 0;
@@ -375,6 +381,13 @@ struct RendererState {
     int pickerReadyX = -1;
     int pickerReadyY = -1;
     std::array<float, 4> pickerReadyColor{};
+    bool presentedSampleRequested = false;
+    int presentedRequestX = -1;
+    int presentedRequestY = -1;
+    bool presentedSampleReady = false;
+    int presentedReadyX = -1;
+    int presentedReadyY = -1;
+    std::array<float, 4> presentedReadyColor{};
     VkImage fontImage = VK_NULL_HANDLE;
     VkDeviceMemory fontMemory = VK_NULL_HANDLE;
     VkImageView fontView = VK_NULL_HANDLE;
@@ -406,6 +419,9 @@ struct RendererState {
     uint32_t activeTimestampFrames = 1;
 
     std::unordered_map<VkImage, SampledImage> imageResources;
+    // Views of Minecraft's frame for sampling. Kept apart from imageResources because they force alpha to one, which
+    // an attachment view must not do.
+    std::unordered_map<VkImage, SampledImage> sourceImageResources;
     std::unordered_map<VkImage, MirrorCopyImage> mirrorCopyImages;
     std::unordered_map<int, MirrorSnapshotState> mirrorSnapshots;
     std::vector<RetiredMirrorSnapshot> retiredMirrorSnapshots;
@@ -1623,12 +1639,16 @@ uint64_t HashMirrorIdentity(const std::string& name) {
     return hash;
 }
 
-bool CreateImageView(VkImage image, const ImageMetadata& metadata, SampledImage& result) {
+// Minecraft leaves partial alpha in its frame where it blends translucent geometry, and across the sky and water with
+// Improved Transparency. Views that sample the frame for mirrors and EyeZoom read alpha as one so the game always
+// draws opaque, like the GL path.
+bool CreateImageView(VkImage image, const ImageMetadata& metadata, SampledImage& result, bool opaqueAlpha = false) {
     if (!g_state.dispatch.createImageView) return false;
     VkImageViewCreateInfo info{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
     info.image = image;
     info.viewType = VK_IMAGE_VIEW_TYPE_2D;
     info.format = metadata.format;
+    if (opaqueAlpha) info.components.a = VK_COMPONENT_SWIZZLE_ONE;
     info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     info.subresourceRange.levelCount = 1;
     info.subresourceRange.layerCount = 1;
@@ -1739,7 +1759,7 @@ bool CreateMirrorCopyImage(const ImageMetadata& metadata, MirrorCopyImage& resou
     ownedMetadata.usage = imageInfo.usage;
     ownedMetadata.tiling = VK_IMAGE_TILING_OPTIMAL;
     ownedMetadata.samples = VK_SAMPLE_COUNT_1_BIT;
-    if (!CreateImageView(resource.sampled.image, ownedMetadata, resource.sampled)) {
+    if (!CreateImageView(resource.sampled.image, ownedMetadata, resource.sampled, true)) {
         DestroyMirrorCopyImage(resource);
         return false;
     }
@@ -2745,10 +2765,10 @@ TextureFrame* PrepareStreamingTexture(
 }
 
 SampledImage* GetSampledImage(VkImage image, const ImageMetadata& metadata, VkImageLayout layout) {
-    auto [it, inserted] = g_state.imageResources.try_emplace(image);
+    auto [it, inserted] = g_state.sourceImageResources.try_emplace(image);
     SampledImage& resource = it->second;
-    if (inserted && !CreateImageView(image, metadata, resource)) {
-        g_state.imageResources.erase(it);
+    if (inserted && !CreateImageView(image, metadata, resource, true)) {
+        g_state.sourceImageResources.erase(it);
         return nullptr;
     }
     if (resource.descriptor == VK_NULL_HANDLE || resource.descriptorLayout != layout) {
@@ -3043,6 +3063,18 @@ void HarvestTimestamps() {
                 g_state.pickerSampleReady = true;
             }
         }
+        if (frame.presentedPending && g_state.pickerReadbackMapped) {
+            const uint32_t frameIndex = frame.firstQuery / kQueriesPerFrame;
+            std::array<float, 4> decoded{};
+            if (DecodeColorPickerPixel(
+                    g_state.pickerReadbackMapped + frameIndex * kPickerReadbackStride + kPresentedReadbackOffset,
+                    frame.presentedFormat, decoded)) {
+                g_state.presentedReadyX = frame.presentedX;
+                g_state.presentedReadyY = frame.presentedY;
+                g_state.presentedReadyColor = decoded;
+                g_state.presentedSampleReady = true;
+            }
+        }
         if (frame.screenshotPending && g_state.screenshotReadbackMapped) {
             const bool bgra =
                 frame.screenshotFormat == VK_FORMAT_B8G8R8A8_UNORM ||
@@ -3160,6 +3192,7 @@ void HarvestTimestamps() {
         }
         frame.pending = false;
         frame.pickerPending = false;
+        frame.presentedPending = false;
         frame.screenshotPending = false;
         frame.screenshotWidth = 0;
         frame.screenshotHeight = 0;
@@ -3222,6 +3255,7 @@ TimestampFrame* BeginTimestamps(VkCommandBuffer commandBuffer) {
         frame.mirrorFirstQuery = index * kMaxMirrorQueriesPerFrame;
         frame.mirrorQueryCount = 0;
         frame.pickerPending = false;
+        frame.presentedPending = false;
         frame.screenshotPending = false;
         frame.virtualCameraPending = false;
         frame.virtualCameraFrame = {};
@@ -6261,6 +6295,60 @@ void RecordColorPickerSample(const VulkanRenderer::FinalBlitContext& context, Ti
     frame->pickerFormat = context.sourceMetadata->format;
 }
 
+// Test readback of one presented pixel after Toolscreen's overlay. The destination is a color attachment here.
+void RecordPresentedPixelSample(const VulkanRenderer::FinalBlitContext& context, TimestampFrame* frame) {
+    if (!g_state.presentedSampleRequested) return;
+    g_state.presentedSampleRequested = false;
+    if (!frame || !g_state.pickerReadbackBuffer || !g_state.cmdCopyImageToBuffer || !context.swapchain ||
+        !context.destinationMetadata || !IsColorPickerFormatSupported(context.destinationMetadata->format) ||
+        (context.destinationMetadata->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) == 0) {
+        return;
+    }
+    const int width = static_cast<int>(context.swapchain->extent.width);
+    const int height = static_cast<int>(context.swapchain->extent.height);
+    const int x = std::clamp(g_state.presentedRequestX, 0, (std::max)(0, width - 1));
+    const int y = std::clamp(g_state.presentedRequestY, 0, (std::max)(0, height - 1));
+    const uint32_t frameIndex = frame->firstQuery / kQueriesPerFrame;
+
+    VkImageMemoryBarrier toCopy = MakeBarrier(
+        context.destinationImage, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    g_state.dispatch.cmdPipelineBarrier(
+        context.commandBuffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0, 0, nullptr, 0, nullptr, 1, &toCopy);
+
+    VkBufferImageCopy copy{};
+    copy.bufferOffset = frameIndex * kPickerReadbackStride + kPresentedReadbackOffset;
+    copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    copy.imageSubresource.layerCount = 1;
+    copy.imageOffset = { x, y, 0 };
+    copy.imageExtent = { 1, 1, 1 };
+    g_state.cmdCopyImageToBuffer(
+        context.commandBuffer, context.destinationImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        g_state.pickerReadbackBuffer, 1, &copy);
+
+    VkBufferMemoryBarrier toHost{ VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER };
+    toHost.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    toHost.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    toHost.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toHost.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toHost.buffer = g_state.pickerReadbackBuffer;
+    toHost.offset = copy.bufferOffset;
+    toHost.size = kPickerReadbackStride - kPresentedReadbackOffset;
+    VkImageMemoryBarrier backToColor = MakeBarrier(
+        context.destinationImage, VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    g_state.dispatch.cmdPipelineBarrier(
+        context.commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        0, 0, nullptr, 1, &toHost, 1, &backToColor);
+
+    frame->presentedPending = true;
+    frame->presentedX = x;
+    frame->presentedY = y;
+    frame->presentedFormat = context.destinationMetadata->format;
+}
+
 void RecordScreenshotCopy(
     const VulkanRenderer::FinalBlitContext& context, TimestampFrame* frame) {
     if (!g_screenshotRequested.exchange(false, std::memory_order_acq_rel))
@@ -7074,6 +7162,7 @@ bool RecordAfterFinalBlit(const FinalBlitContext& context, PFN_vkCmdBlitImage or
         }
     }
     g_activeResourceTimestampFrame = nullptr;
+    RecordPresentedPixelSample(context, timestamp);
     RecordScreenshotCopy(context, timestamp);
     VkImageMemoryBarrier toTransfer = MakeBarrier(
         context.destinationImage, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -7324,16 +7413,18 @@ void OnImageDestroyed(VkDevice device, VkImage image) {
         RetireMirrorCopyImage(std::move(copy->second));
         g_state.mirrorCopyImages.erase(copy);
     }
-    auto it = g_state.imageResources.find(image);
-    if (it == g_state.imageResources.end()) return;
-    if (it->second.descriptor) RemoveTextureDescriptor(it->second.descriptor);
-    if (it->second.linearDescriptor) {
-        RemoveTextureDescriptor(it->second.linearDescriptor);
+    for (auto* resources : { &g_state.imageResources, &g_state.sourceImageResources }) {
+        auto it = resources->find(image);
+        if (it == resources->end()) continue;
+        if (it->second.descriptor) RemoveTextureDescriptor(it->second.descriptor);
+        if (it->second.linearDescriptor) {
+            RemoveTextureDescriptor(it->second.linearDescriptor);
+        }
+        if (it->second.view && g_state.dispatch.destroyImageView) {
+            g_state.dispatch.destroyImageView(device, it->second.view, nullptr);
+        }
+        resources->erase(it);
     }
-    if (it->second.view && g_state.dispatch.destroyImageView) {
-        g_state.dispatch.destroyImageView(device, it->second.view, nullptr);
-    }
-    g_state.imageResources.erase(it);
 }
 
 void OnSwapchainDestroyed(VkDevice device, VkSwapchainKHR, const std::vector<VkImage>& images) {
@@ -7392,16 +7483,18 @@ void Shutdown() {
         }
         g_state.publishedObsCompositionSlot = UINT32_MAX;
     }
-    for (auto& [image, resource] : g_state.imageResources) {
-        if (resource.descriptor) RemoveTextureDescriptor(resource.descriptor);
-        if (resource.linearDescriptor) {
-            RemoveTextureDescriptor(resource.linearDescriptor);
+    for (auto* resources : { &g_state.imageResources, &g_state.sourceImageResources }) {
+        for (auto& [image, resource] : *resources) {
+            if (resource.descriptor) RemoveTextureDescriptor(resource.descriptor);
+            if (resource.linearDescriptor) {
+                RemoveTextureDescriptor(resource.linearDescriptor);
+            }
+            if (resource.view && g_state.dispatch.destroyImageView) {
+                g_state.dispatch.destroyImageView(g_state.device, resource.view, nullptr);
+            }
         }
-        if (resource.view && g_state.dispatch.destroyImageView) {
-            g_state.dispatch.destroyImageView(g_state.device, resource.view, nullptr);
-        }
+        resources->clear();
     }
-    g_state.imageResources.clear();
     for (auto& [id, asset] : g_state.textureAssets) {
         DestroyTextureAsset(asset);
     }
@@ -7556,6 +7649,16 @@ void Shutdown() {
     }
     g_state = {};
     g_deviceBeingDestroyed.store(false, std::memory_order_release);
+}
+
+bool TryGetPresentedPixelForTests(int x, int y, std::array<float, 4>& color) {
+    if (!g_state.initialized) return false;
+    g_state.presentedRequestX = x;
+    g_state.presentedRequestY = y;
+    g_state.presentedSampleRequested = true;
+    if (!g_state.presentedSampleReady || g_state.presentedReadyX != x || g_state.presentedReadyY != y) return false;
+    color = g_state.presentedReadyColor;
+    return true;
 }
 
 bool GetMirrorHasContentForTests(const std::string& mirrorName, bool& hasContent) {
