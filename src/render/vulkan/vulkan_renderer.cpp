@@ -2032,6 +2032,40 @@ void PrepareMirrorSnapshots(
     }
 }
 
+// OpenGL publishes these from its SwapBuffers hook. Vulkan never runs that
+// hook, so derive them here from the visual mode once per presented frame.
+void PublishEyeZoomFrameState() {
+    const bool isEyeZoom = EqualsIgnoreCase(g_state.modeId, "EyeZoom");
+    bool isTransitioningFromEyeZoom = false;
+    int eyeZoomAnimatedViewportX = -1;
+    if (IsModeTransitionActive()) {
+        const ModeTransitionState transition = GetModeTransitionState();
+        const bool slideAnimationsEnabled =
+            transition.gameTransition == GameTransitionType::Bounce;
+        const bool fromEyeZoom =
+            EqualsIgnoreCase(transition.fromModeId, "EyeZoom");
+        if (slideAnimationsEnabled && !isEyeZoom && fromEyeZoom) {
+            isTransitioningFromEyeZoom = true;
+            eyeZoomAnimatedViewportX = static_cast<int>(
+                transition.fromX +
+                (transition.targetX - transition.fromX) *
+                    transition.moveProgress);
+        } else if (slideAnimationsEnabled && isEyeZoom && !fromEyeZoom) {
+            eyeZoomAnimatedViewportX = transition.x;
+        }
+    }
+    const bool hideAnimations =
+        g_state.configSnapshot && g_state.configSnapshot->hideAnimationsInGame;
+    g_showEyeZoom.store(
+        isEyeZoom || (isTransitioningFromEyeZoom && !hideAnimations),
+        std::memory_order_relaxed);
+    g_eyeZoomFadeOpacity.store(1.0f, std::memory_order_relaxed);
+    g_eyeZoomAnimatedViewportX.store(
+        eyeZoomAnimatedViewportX, std::memory_order_relaxed);
+    g_isTransitioningFromEyeZoom.store(
+        isTransitioningFromEyeZoom, std::memory_order_release);
+}
+
 SampledImage* PrepareEyeZoomSource(
     const VulkanRenderer::FinalBlitContext& context, SampledImage* realtime,
     VkImageLayout sampleLayout, TimestampFrame* timestampFrame) {
@@ -6889,6 +6923,7 @@ bool RecordAfterFinalBlit(const FinalBlitContext& context, PFN_vkCmdBlitImage or
         context.sourceMetadata
             ? static_cast<int>(context.sourceMetadata->extent.height)
             : 0);
+    PublishEyeZoomFrameState();
     {
         const ModeViewportInfo presented =
             ResolveSubmittedViewport(context);
