@@ -52,6 +52,8 @@ constexpr int kTestModeWidth = 640;
 constexpr int kTestModeHeight = 360;
 constexpr DWORD kTestHotkeyVk = VK_F9;
 constexpr DWORD kTestExactModifierHotkeyVk = VK_F10;
+// Injected with SendInput, so it must be a key that no other program on the machine consumes system-wide.
+constexpr DWORD kTestRealInputHotkeyVk = VK_F24;
 
 std::atomic<bool> s_enabled{ false };
 std::wstring s_resultsPath;
@@ -228,6 +230,7 @@ void InstallTestFixtureOnRenderThread() {
     upsertHotkey({ kTestHotkeyVk });
     // A side-specific modifier makes Toolscreen track exact modifiers, which needs the low-level keyboard hook.
     upsertHotkey({ VK_LCONTROL, kTestExactModifierHotkeyVk });
+    upsertHotkey({ kTestRealInputHotkeyVk });
 
     ResizeHotkeySecondaryModes(g_config.hotkeys.size());
     for (size_t i = 0; i < g_config.hotkeys.size(); ++i) { SetHotkeySecondaryMode(i, g_config.hotkeys[i].secondaryMode); }
@@ -381,6 +384,54 @@ void TestLowLevelHookOnDedicatedThread() {
     const DWORD windowThreadId = GetWindowThreadProcessId(hwnd, nullptr);
     Require(hookThreadId != windowThreadId, "The low-level keyboard hook runs on the game's window thread.");
     Require(hookThreadId != s_renderThreadId.load(std::memory_order_acquire), "The low-level keyboard hook runs on the render thread.");
+}
+
+void SendRealKey(DWORD vk, bool keyUp) {
+    INPUT input{};
+    input.type = INPUT_KEYBOARD;
+    input.ki.wVk = static_cast<WORD>(vk);
+    input.ki.wScan = static_cast<WORD>(MapVirtualKeyW(vk, MAPVK_VK_TO_VSC));
+    input.ki.dwFlags = keyUp ? KEYEVENTF_KEYUP : 0;
+    SendInput(1, &input, sizeof(input));
+}
+
+// A real key press must reach Windows (so other programs and shell shortcuts still see it) and must trigger the
+// hotkey exactly once. On Vulkan the low-level hook hands the window an early copy of each key, so this also checks
+// that the delayed native message is dropped instead of toggling the mode a second time.
+void TestRealKeyPassesThroughOnce() {
+    if (!IsResolutionChangeSupported(g_gameVersion)) Skip("Resolution changes are not supported on this game version.");
+    RunOnRenderThread([] { InstallTestFixtureOnRenderThread(); });
+    const HWND hwnd = g_subclassedHwnd.load(std::memory_order_acquire);
+    Require(hwnd != NULL, "No subclassed game window to send keys to.");
+    if (s_gameWindow) SetForegroundWindow(s_gameWindow);
+    if (!WaitUntil([&] { return IsWindowInForegroundTree(hwnd); }, std::chrono::seconds(2))) {
+        Skip("The game window is not in the foreground, so injected keys would go elsewhere.");
+    }
+    PostMessageW(hwnd, WM_NULL, 0, 0);
+    DWORD hookThreadId = 0;
+    Require(WaitUntil([&] { return GetLowLevelKeyboardHookState(hookThreadId); }, std::chrono::seconds(5)),
+            "The low-level keyboard hook was not installed.");
+
+    const std::string defaultMode = DefaultModeId();
+    Require(SwitchModeOnRenderThread(defaultMode), "Could not start from the default mode.");
+    Require(WaitForPublishedMode(defaultMode, std::chrono::seconds(5)), "The default mode was not published.");
+
+    SendRealKey(kTestRealInputHotkeyVk, false);
+    const bool keyStateDown = WaitUntil([] { return (GetAsyncKeyState(kTestRealInputHotkeyVk) & 0x8000) != 0; }, std::chrono::seconds(1));
+    const bool switched = WaitForPublishedMode(kTestModeId, std::chrono::seconds(5));
+    SendRealKey(kTestRealInputHotkeyVk, true);
+    Require(keyStateDown, "The low-level hook kept the key press from reaching Windows.");
+    Require(switched, "A real press of the test hotkey did not switch to the test mode (current: " + GetPublishedCurrentModeId() + ").");
+
+    // A duplicate key-down from the delayed native message would toggle straight back to the default mode.
+    Require(WaitForFrames(30, std::chrono::seconds(5)), "Frames stopped after the hotkey press.");
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    Require(EqualsIgnoreCase(GetPublishedCurrentModeId(), kTestModeId),
+            "One real press of the test hotkey toggled the mode twice (current: " + GetPublishedCurrentModeId() + ").");
+    Require(WaitUntil([] { return (GetAsyncKeyState(kTestRealInputHotkeyVk) & 0x8000) == 0; }, std::chrono::seconds(1)),
+            "The key release did not reach Windows.");
+
+    Require(SwitchModeOnRenderThread(defaultMode), "Could not return to the default mode.");
 }
 
 void TestConfigSaveRoundTrip() {
@@ -851,6 +902,7 @@ const TestCase kTests[] = {
     { "mode.switch_resizes_game", &TestModeSwitchResizesGame },
     { "input.hotkey_switches_mode", &TestHotkeySwitchesMode },
     { "input.low_level_hook_dedicated_thread", &TestLowLevelHookOnDedicatedThread },
+    { "input.real_key_passes_through_once", &TestRealKeyPassesThroughOnce },
     { "input.sensitivity_override_scales_sdl_motion", &TestSensitivityOverrideScalesSdlMotion },
     { "gui.toggle_renders_imgui", &TestGuiToggleRendersImGui },
     { "gui.obs_pass_reuses_screen_frame", &TestObsPassReusesScreenImGuiFrame },

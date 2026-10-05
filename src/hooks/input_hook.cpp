@@ -113,10 +113,24 @@ struct LowLevelSuppressedKeyState {
 };
 
 // Minecraft's Vulkan window path can leave ordinary WM_KEY* messages queued behind
-// presentation work. Keep a separate record of the keyboard events that we
-// immediately repost to the subclassed game window so that the delayed original
-// messages can be suppressed without losing key-up/repeat semantics.
-static std::unordered_map<DWORD, LowLevelSuppressedKeyState> s_vulkanFastPathKeys;
+// presentation work. The low-level hook hands the game window an early copy of
+// each key event and still passes the original on to Windows, then the window
+// drops the delayed original once it arrives. Events are matched by their input
+// timestamp, which the hook and the window message share.
+struct VulkanFastPathKeyEvent {
+    DWORD rawVk = 0;
+    UINT scanCodeWithFlags = 0;
+    bool isSystemKey = false;
+    bool isKeyDown = false;
+    bool wasDown = false;
+    DWORD time = 0;
+};
+// Copies posted by the hook thread that the window has not processed yet.
+static std::deque<VulkanFastPathKeyEvent> s_vulkanFastPathQueuedKeys;
+// Copies the window processed whose native message has not arrived yet.
+static std::deque<VulkanFastPathKeyEvent> s_vulkanFastPathHandledKeys;
+// Keys held down per the copies, for the previous-key-state bit of repeats.
+static std::unordered_set<DWORD> s_vulkanFastPathDownKeys;
 static std::mutex s_vulkanFastPathKeysMutex;
 
 struct LowLevelExactModifierEvent {
@@ -4154,60 +4168,131 @@ static bool HasVulkanModeHotkeyFastPathNeed() {
            HasConfiguredVulkanModeHotkeys();
 }
 
-static bool PostVulkanFastPathKeyMessage(HWND hWnd, const KBDLLHOOKSTRUCT& info, WPARAM hookMessage, bool isKeyDown) {
+// The shell consumes Alt+Tab, Alt+F4, the Start menu and Win+<key> before the game window sees them, so these keys
+// only take the native path. An early copy would hand the game keys that the GLFW/OpenGL path never delivers.
+static bool ShouldBypassVulkanFastPathForSystemShortcut(const KBDLLHOOKSTRUCT& info) {
     const DWORD rawVk = static_cast<DWORD>(info.vkCode);
-    if (!hWnd || rawVk == 0) return false;
+    if (IsMenuActivationModifierVk(rawVk)) return true;
+    if ((info.flags & LLKHF_ALTDOWN) != 0) return true;
+    return (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0 || (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0;
+}
 
-    LowLevelSuppressedKeyState state{};
-    bool wasDown = false;
-    bool inserted = false;
+static DWORD NormalizeVulkanFastPathMatchVk(DWORD vk) {
+    switch (vk) {
+    case VK_LSHIFT:
+    case VK_RSHIFT: return VK_SHIFT;
+    case VK_LCONTROL:
+    case VK_RCONTROL: return VK_CONTROL;
+    case VK_LMENU:
+    case VK_RMENU: return VK_MENU;
+    default: return vk;
+    }
+}
+
+static bool DoesVulkanFastPathKeyEventMatch(const VulkanFastPathKeyEvent& event, bool isKeyDown, DWORD vk, UINT scanCodeWithFlags,
+                                            DWORD messageTime) {
+    if (event.time != messageTime || event.isKeyDown != isKeyDown) return false;
+    if (NormalizeVulkanFastPathMatchVk(event.rawVk) != NormalizeVulkanFastPathMatchVk(vk)) return false;
+    // Injected input can carry no scan code, so only compare scan codes when both sides have one.
+    return event.scanCodeWithFlags == 0 || scanCodeWithFlags == 0 || event.scanCodeWithFlags == scanCodeWithFlags;
+}
+
+// Caller must hold s_vulkanFastPathKeysMutex.
+static void PruneVulkanFastPathHandledKeysLocked(DWORD now) {
+    // A native message the shell or another program's RegisterHotKey consumed never arrives to clear its record.
+    // Records only ever match their exact event time, so a stale one is harmless and can age out generously.
+    constexpr DWORD kMaxAgeMs = 30000;
+    constexpr size_t kMaxRecords = 512;
+    auto& handled = s_vulkanFastPathHandledKeys;
+    while (!handled.empty() && (static_cast<DWORD>(now - handled.front().time) > kMaxAgeMs || handled.size() > kMaxRecords)) {
+        handled.pop_front();
+    }
+}
+
+// Runs on the hook thread. Queues an early copy of the key event for the game window and asks it to process the copy
+// now. The hook still passes the original event on, so Windows and other programs see every key exactly as they do on
+// the GLFW/OpenGL path; the window drops the original once it arrives (see ConsumeNativeVulkanFastPathDuplicate).
+static void QueueVulkanFastPathKeyCopy(HWND hWnd, const KBDLLHOOKSTRUCT& info, WPARAM hookMessage, bool isKeyDown) {
+    const DWORD rawVk = static_cast<DWORD>(info.vkCode);
+    if (!hWnd || rawVk == 0) return;
+
     {
         std::lock_guard<std::mutex> lock(s_vulkanFastPathKeysMutex);
-        auto it = s_vulkanFastPathKeys.find(rawVk);
-        if (it != s_vulkanFastPathKeys.end()) {
-            state = it->second;
-            wasDown = true;
-        } else if (isKeyDown) {
-            state.rawVk = rawVk;
-            state.scanCodeWithFlags = BuildScanCodeWithFlagsFromLowLevelEvent(info);
-            state.isSystemKey = (hookMessage == WM_SYSKEYDOWN || hookMessage == WM_SYSKEYUP);
-            s_vulkanFastPathKeys.emplace(rawVk, state);
-            inserted = true;
-        } else {
+        if (!isKeyDown) s_vulkanFastPathDownKeys.erase(rawVk);
+        if (ShouldBypassVulkanFastPathForSystemShortcut(info)) return;
+
+        VulkanFastPathKeyEvent event{};
+        event.rawVk = rawVk;
+        event.scanCodeWithFlags = BuildScanCodeWithFlagsFromLowLevelEvent(info);
+        event.isSystemKey = (hookMessage == WM_SYSKEYDOWN || hookMessage == WM_SYSKEYUP);
+        event.isKeyDown = isKeyDown;
+        event.wasDown = isKeyDown ? !s_vulkanFastPathDownKeys.insert(rawVk).second : true;
+        event.time = info.time;
+        s_vulkanFastPathQueuedKeys.push_back(event);
+    }
+
+    // If the post fails the copy stays queued until the native message arrives and claims it instead.
+    (void)::PostMessage(hWnd, WM_TOOLSCREEN_VULKAN_FAST_PATH_KEY, 0, 0);
+}
+
+static void ResetVulkanFastPathKeyTracking() {
+    std::lock_guard<std::mutex> lock(s_vulkanFastPathKeysMutex);
+    s_vulkanFastPathDownKeys.clear();
+}
+
+static bool s_dispatchingVulkanFastPathKeyCopy = false;
+
+// Runs on the window thread for WM_TOOLSCREEN_VULKAN_FAST_PATH_KEY. Posted messages are retrieved ahead of queued input,
+// so the copy reaches the hotkey pipeline (and the game) before the delayed native WM_KEY* message. Each posted message
+// handles one copy, which keeps copies in order with key messages that deep suppression posts directly.
+static void DispatchQueuedVulkanFastPathKeyCopy(HWND hWnd) {
+    VulkanFastPathKeyEvent event{};
+    {
+        std::lock_guard<std::mutex> lock(s_vulkanFastPathKeysMutex);
+        if (s_vulkanFastPathQueuedKeys.empty()) return;
+        event = s_vulkanFastPathQueuedKeys.front();
+        s_vulkanFastPathQueuedKeys.pop_front();
+        PruneVulkanFastPathHandledKeysLocked(GetTickCount());
+        s_vulkanFastPathHandledKeys.push_back(event);
+    }
+
+    const UINT msg = event.isKeyDown ? (event.isSystemKey ? WM_SYSKEYDOWN : WM_KEYDOWN) : (event.isSystemKey ? WM_SYSKEYUP : WM_KEYUP);
+    const LPARAM msgLParam =
+        BuildKeyboardMessageLParam(event.scanCodeWithFlags, event.isKeyDown, event.isSystemKey, 1, event.wasDown, !event.isKeyDown);
+    s_dispatchingVulkanFastPathKeyCopy = true;
+    (void)SubclassedWndProc(hWnd, msg, static_cast<WPARAM>(event.rawVk), msgLParam);
+    s_dispatchingVulkanFastPathKeyCopy = false;
+}
+
+// Runs on the window thread for each native WM_KEY* message. Returns true when an early copy of the same event was
+// already processed, so the native message must be dropped to avoid delivering the key twice.
+static bool ConsumeNativeVulkanFastPathDuplicate(UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    if (s_dispatchingVulkanFastPathKeyCopy) return false;
+    if (uMsg != WM_KEYDOWN && uMsg != WM_SYSKEYDOWN && uMsg != WM_KEYUP && uMsg != WM_SYSKEYUP) return false;
+
+    const bool isKeyDown = (uMsg == WM_KEYDOWN || uMsg == WM_SYSKEYDOWN);
+    const DWORD vk = static_cast<DWORD>(wParam);
+    const UINT scanCodeWithFlags = GetScanCodeWithExtendedFlagFromLParam(lParam);
+    const DWORD messageTime = static_cast<DWORD>(GetMessageTime());
+
+    std::lock_guard<std::mutex> lock(s_vulkanFastPathKeysMutex);
+    if (s_vulkanFastPathQueuedKeys.empty() && s_vulkanFastPathHandledKeys.empty()) return false;
+
+    // The native message beat its copy here: let the native message through and discard the copy.
+    for (auto it = s_vulkanFastPathQueuedKeys.begin(); it != s_vulkanFastPathQueuedKeys.end(); ++it) {
+        if (DoesVulkanFastPathKeyEventMatch(*it, isKeyDown, vk, scanCodeWithFlags, messageTime)) {
+            s_vulkanFastPathQueuedKeys.erase(it);
             return false;
         }
     }
 
-    if (!PostSuppressedLowLevelKeyMessage(hWnd, state, isKeyDown, wasDown)) {
-        if (inserted || !isKeyDown) {
-            std::lock_guard<std::mutex> lock(s_vulkanFastPathKeysMutex);
-            s_vulkanFastPathKeys.erase(rawVk);
+    for (auto it = s_vulkanFastPathHandledKeys.begin(); it != s_vulkanFastPathHandledKeys.end(); ++it) {
+        if (DoesVulkanFastPathKeyEventMatch(*it, isKeyDown, vk, scanCodeWithFlags, messageTime)) {
+            s_vulkanFastPathHandledKeys.erase(it);
+            return true;
         }
-        return false;
     }
-
-    if (!isKeyDown) {
-        std::lock_guard<std::mutex> lock(s_vulkanFastPathKeysMutex);
-        s_vulkanFastPathKeys.erase(rawVk);
-    }
-    return true;
-}
-
-static void ReleaseVulkanFastPathKeys(HWND hWnd) {
-    std::vector<LowLevelSuppressedKeyState> activeKeys;
-    {
-        std::lock_guard<std::mutex> lock(s_vulkanFastPathKeysMutex);
-        activeKeys.reserve(s_vulkanFastPathKeys.size());
-        for (const auto& [vk, state] : s_vulkanFastPathKeys) {
-            (void)vk;
-            activeKeys.push_back(state);
-        }
-        s_vulkanFastPathKeys.clear();
-    }
-
-    for (const auto& state : activeKeys) {
-        (void)PostSuppressedLowLevelKeyMessage(hWnd, state, false, true);
-    }
+    return false;
 }
 
 static LRESULT CALLBACK LowLevelKeyboardProc(int code, WPARAM wParam, LPARAM lParam) {
@@ -4275,15 +4360,18 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int code, WPARAM wParam, LPARAM lPa
             }
         }
 
-        // Repost the complete keyboard stream while mode hotkeys are configured.
-        // This preserves the ordering required by release/hold hotkeys and lets the
-        // existing WndProc hotkey pipeline run immediately instead of waiting for
-        // Vulkan-delayed delivery of the original WM_KEY* message.
-        if (!IsHotkeyBindingActive() && !IsRebindBindingActive() && HasConfiguredVulkanModeHotkeys() &&
-            PostVulkanFastPathKeyMessage(targetHwnd, *info, wParam, isKeyDown)) {
-            return 1;
-        }
     }
+
+    // While mode hotkeys are configured on Vulkan, copy the complete keyboard stream to the window early. This
+    // preserves the ordering required by release/hold hotkeys and lets the existing WndProc hotkey pipeline run
+    // immediately instead of waiting for Vulkan-delayed delivery of the original WM_KEY* message. The original
+    // event still continues down the hook chain, so the key reaches Windows and other programs as usual.
+    const bool useVulkanFastPath =
+        backend == RenderBackend::Vulkan && !IsHotkeyBindingActive() && !IsRebindBindingActive() && HasConfiguredVulkanModeHotkeys();
+    auto passThrough = [&]() {
+        if (useVulkanFastPath) QueueVulkanFastPathKeyCopy(targetHwnd, *info, wParam, isKeyDown);
+        return CallNextHookEx(s_lowLevelKeyboardHook, code, wParam, lParam);
+    };
 
     LowLevelSuppressedKeyState existingState{};
     bool hasExistingState = false;
@@ -4305,12 +4393,12 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int code, WPARAM wParam, LPARAM lPa
     }
 
     if (!isKeyDown) {
-        return CallNextHookEx(s_lowLevelKeyboardHook, code, wParam, lParam);
+        return passThrough();
     }
 
     const bool suppressCapsLock = (rawVk == VK_CAPITAL) && IsCapsLockSuppressionEnabled();
     if (!suppressCapsLock && !ShouldDeepSuppressLowLevelModifierKey(rawVk)) {
-        return CallNextHookEx(s_lowLevelKeyboardHook, code, wParam, lParam);
+        return passThrough();
     }
 
     LowLevelSuppressedKeyState newState{};
@@ -4590,7 +4678,7 @@ static void UpdateLowLevelKeyboardHookInstalledState() {
         (needsDeepSuppression || needsExactModifierTracking || needsCapsLockSuppression || needsVulkanModeHotkeyFastPath);
     if (!hookRequested) {
         ReleaseSuppressedLowLevelRebindKeys(targetHwnd);
-        ReleaseVulkanFastPathKeys(targetHwnd);
+        ResetVulkanFastPathKeyTracking();
         ResetLowLevelExactModifierState();
         UninstallLowLevelKeyboardHook();
     } else {
@@ -5956,6 +6044,14 @@ LRESULT CALLBACK SubclassedWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
     const HWND expectedHwnd = g_subclassedHwnd.load();
     if (expectedHwnd != NULL && hWnd != expectedHwnd) {
         return DefWindowProc(hWnd, uMsg, wParam, lParam);
+    }
+
+    if (uMsg == WM_TOOLSCREEN_VULKAN_FAST_PATH_KEY) {
+        DispatchQueuedVulkanFastPathKeyCopy(hWnd);
+        return 0;
+    }
+    if (!isLocalRepeatTagged && ConsumeNativeVulkanFastPathDuplicate(uMsg, wParam, lParam)) {
+        return 0;
     }
 
     const bool isKeyboardRepeatMessage =

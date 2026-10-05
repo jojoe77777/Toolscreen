@@ -32,6 +32,8 @@ inline constexpr UINT WM_TOOLSCREEN_KEYUP_NO_REBIND = WM_APP + 0x2A3;
 inline constexpr UINT WM_TOOLSCREEN_APPLY_FOCUS_REGAIN_SIZE = WM_APP + 0x2A4;
 inline constexpr UINT WM_TOOLSCREEN_LOCAL_KEY_REPEAT = WM_APP + 0x2A5;
 inline constexpr UINT WM_TOOLSCREEN_INVOKE_GLFW_RESIZE_CALLBACKS = WM_APP + 0x2A6;
+// Posted by the low-level keyboard hook on Vulkan: process the queued early copies of key events.
+inline constexpr UINT WM_TOOLSCREEN_VULKAN_FAST_PATH_KEY = WM_APP + 0x2A7;
 
 InputHandlerResult HandleMouseMoveViewportOffset(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM& lParam);
 
