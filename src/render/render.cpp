@@ -3336,6 +3336,10 @@ void CreateMirrorGPUResources(const MirrorConfig& conf) {
         return;
     }
 
+    // Vulkan builds mirror resources from the live config each frame and has no GL context here.
+    // Without a context (e.g. a non-render thread) the GL render path creates it via EnsureMirrorGPUResourcesForConfig.
+    if (GetRenderBackend() == RenderBackend::Vulkan || wglGetCurrentContext() == nullptr) { return; }
+
     // Lock mutex before accessing g_mirrorInstances
     std::unique_lock<std::shared_mutex> lock(g_mirrorInstancesMutex); // Write lock - creating instance
 

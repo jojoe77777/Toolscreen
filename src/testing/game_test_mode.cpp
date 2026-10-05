@@ -248,10 +248,11 @@ void InstallTestFixtureOnRenderThread() {
 
 constexpr const char* kTestMirrorMatchAll = "GameTestMirrorMatchAll";
 constexpr const char* kTestMirrorMatchNone = "GameTestMirrorMatchNone";
+constexpr const char* kTestMirrorAdded = "GameTestMirrorAdded";
 
 void RemoveTestFixtureOnRenderThread() {
     std::erase_if(g_config.mirrors, [](const MirrorConfig& mirror) {
-        return mirror.name == kTestMirrorMatchAll || mirror.name == kTestMirrorMatchNone;
+        return mirror.name == kTestMirrorMatchAll || mirror.name == kTestMirrorMatchNone || mirror.name == kTestMirrorAdded;
     });
     std::erase_if(g_config.modes, [](const ModeConfig& mode) { return EqualsIgnoreCase(mode.id, kTestModeId); });
     std::erase_if(g_config.hotkeys, [](const HotkeyConfig& hotkey) { return EqualsIgnoreCase(hotkey.secondaryMode, kTestModeId); });
@@ -846,6 +847,49 @@ void TestVulkanStreamingTextureLifetime() {
     Require(SwitchModeOnRenderThread(DefaultModeId()), "Could not switch back to the default mode.");
 }
 
+// The mirrors tab's "add new mirror" button calls AddMirrorToCurrentMode from the GUI pass. On OpenGL that creates
+// the mirror's FBOs on the spot; on Vulkan there is no GL context, so it must leave creation to the Vulkan renderer.
+void TestAddMirrorToCurrentMode() {
+    Require(WaitUntil([] { return GetRenderBackend() != RenderBackend::Unknown; }, std::chrono::seconds(20)),
+            "The render backend never latched.");
+    if (!IsResolutionChangeSupported(g_gameVersion)) Skip("Resolution changes are not supported on this game version.");
+
+    RunOnRenderThread([] { InstallTestFixtureOnRenderThread(); });
+    Require(SwitchModeOnRenderThread(kTestModeId), "SwitchToMode refused the test mode.");
+    Require(WaitForPublishedMode(kTestModeId, std::chrono::seconds(5)), "The test mode was not published as current.");
+
+    RunOnRenderThread([] {
+        MirrorConfig mirror;
+        mirror.name = kTestMirrorAdded;
+        mirror.output.relativeTo = "topLeftScreen";
+        mirror.output.x = 10;
+        mirror.output.y = 10;
+        mirror.rawOutput = true;
+        mirror.border.type = MirrorBorderType::Static;
+        MirrorCaptureConfig zone;
+        zone.relativeTo = "topLeftScreen";
+        mirror.input.push_back(zone);
+        AddMirrorToCurrentMode(std::move(mirror));
+        PublishGuiConfigSnapshot();
+    });
+
+    const bool created = WaitUntil([] {
+        return RunOnRenderThread([] {
+            std::shared_lock<std::shared_mutex> lock(g_mirrorInstancesMutex);
+            const auto it = g_mirrorInstances.find(kTestMirrorAdded);
+            if (it == g_mirrorInstances.end()) return false;
+            if (GetRenderBackend() == RenderBackend::OpenGL) return it->second.fbo != 0 && it->second.finalFbo != 0;
+            return it->second.cachedRenderState.isValid;
+        });
+    }, std::chrono::seconds(5));
+    Require(WaitForFrames(10, std::chrono::seconds(5)), "Frames stopped after adding a mirror.");
+
+    RunOnRenderThread([] { RemoveTestFixtureOnRenderThread(); });
+    SwitchModeOnRenderThread(DefaultModeId());
+
+    Require(created, "The added mirror was never created or rendered by the active backend.");
+}
+
 // With the OBS compose pass running and the settings GUI open, ImGui must build one frame per swap: the OBS pass
 // reuses the screen pass's draw data instead of running NewFrame and the whole settings GUI a second time.
 // A color-filtered mirror reports content only when some captured pixel matches a target color. Vulkan measures this
@@ -1393,6 +1437,7 @@ const TestCase kTests[] = {
     { "vulkan.frame_completion_tracking", &TestVulkanFrameCompletionTracking },
     { "vulkan.streaming_texture_lifetime", &TestVulkanStreamingTextureLifetime },
     { "vulkan.mirror_content_detection", &TestVulkanMirrorContentDetection },
+    { "mirror.add_to_current_mode", &TestAddMirrorToCurrentMode },
     { "config.save_round_trip", &TestConfigSaveRoundTrip },
     { "config.load_error_screen", &TestConfigLoadErrorScreen },
     { "config.recovered_from_backup", &TestConfigRecoveredFromBackup },
