@@ -402,6 +402,22 @@ void TestEyeZoomRendersAndSwitches() {
     Require(WaitUntil([] { return g_showEyeZoom.load(std::memory_order_acquire); }, std::chrono::seconds(5)),
             "EyeZoom became the current mode but the zoom overlay never showed.");
     Require(WaitForFrames(120, std::chrono::seconds(10)), "Frames stopped while EyeZoom was showing.");
+    {
+        const ModeConfig* eyeZoomMode = GetModeFromSnapshotOrFallback(*snapshot, "EyeZoom");
+        const int wantW = eyeZoomMode ? eyeZoomMode->width : 0;
+        const int wantH = eyeZoomMode ? eyeZoomMode->height : 0;
+        int gameW = 0, gameH = 0;
+        const bool sized = WaitUntil([&] { return GetLatestGameViewportSize(gameW, gameH) && gameW == wantW && gameH == wantH; },
+                                     std::chrono::seconds(5));
+        RECT client{};
+        GetClientRect(g_subclassedHwnd.load(std::memory_order_acquire), &client);
+        Log("[GAME TEST] EyeZoom game frame " + std::to_string(gameW) + "x" + std::to_string(gameH) + ", window client " +
+            std::to_string(client.right) + "x" + std::to_string(client.bottom) + ", mode " + std::to_string(wantW) + "x" +
+            std::to_string(wantH));
+        Require(sized, "In EyeZoom the game rendered " + std::to_string(gameW) + "x" + std::to_string(gameH) + " instead of the mode's " +
+                           std::to_string(wantW) + "x" + std::to_string(wantH) + " (window client " + std::to_string(client.right) + "x" +
+                           std::to_string(client.bottom) + ").");
+    }
 
     // The settings GUI draws an EyeZoom preview from the same snapshot.
     g_showGui.store(true, std::memory_order_release);
