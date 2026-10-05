@@ -852,6 +852,7 @@ void TestVulkanStreamingTextureLifetime() {
 // with an occlusion query over the filter's surviving fragments; if the driver counts discarded fragments too, every
 // filtered mirror reports content and its static border always shows.
 void TestVulkanMirrorContentDetection() {
+    WaitUntil([] { return GetRenderBackend() != RenderBackend::Unknown; }, std::chrono::seconds(20));
     if (GetRenderBackend() != RenderBackend::Vulkan) Skip("This checks the Vulkan renderer's mirror content queries.");
     if (!IsResolutionChangeSupported(g_gameVersion)) Skip("Resolution changes are not supported on this game version.");
 
