@@ -1212,8 +1212,10 @@ std::string DescribeForegroundWindow() {
 long long PressRealKey(DWORD vk, std::chrono::milliseconds hold) {
     const HWND hwnd = g_subclassedHwnd.load(std::memory_order_acquire);
     if (!IsWindowInForegroundTree(hwnd)) {
+        // SendInput goes to whatever window has focus, so never type into another program.
         ++s_realKeyStats.pressedWithoutFocus;
         s_realKeyStats.lastForeground = DescribeForegroundWindow();
+        Skip("The game window lost focus (foreground: " + s_realKeyStats.lastForeground + "), so real key presses stopped.");
     }
     INPUT input{};
     input.type = INPUT_KEYBOARD;
