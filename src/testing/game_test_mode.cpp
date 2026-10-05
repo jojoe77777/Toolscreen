@@ -8,6 +8,7 @@
 #include "features/window_overlay.h"
 #include "hooks/hook_chain.h"
 #include "hooks/input_hook.h"
+#include "render/render.h"
 #include "render/render_backend.h"
 #include "render/vulkan/vulkan_renderer.h"
 #include "version.h"
@@ -368,6 +369,141 @@ void TestGuiToggleRendersImGui() {
     Require(WaitForFrames(10, std::chrono::seconds(5)), "Frames stopped while the settings GUI was open.");
     const int laterFrame = RunOnRenderThread([] { return ImGui::GetCurrentContext() ? ImGui::GetFrameCount() : -1; });
     Require(laterFrame > firstFrame, "ImGui did not render new frames while the settings GUI was open.");
+}
+
+// EyeZoom renders a tall game image through the zoom snapshot, then keeps that snapshot alive while it transitions out.
+// Switching in, out and between modes quickly (including mid-transition) exercises the snapshot's lifetime.
+void TestEyeZoomRendersAndSwitches() {
+    if (!IsResolutionChangeSupported(g_gameVersion)) Skip("Resolution changes are not supported on this game version.");
+    const auto snapshot = GetConfigSnapshot();
+    const bool hasEyeZoom = snapshot && std::any_of(snapshot->modes.begin(), snapshot->modes.end(),
+                                                    [](const ModeConfig& mode) { return EqualsIgnoreCase(mode.id, "EyeZoom"); });
+    if (!hasEyeZoom) Skip("The config has no EyeZoom mode.");
+    RunOnRenderThread([] { InstallTestFixtureOnRenderThread(); });
+
+    const std::string defaultMode = DefaultModeId();
+    Require(SwitchModeOnRenderThread(defaultMode), "Could not start from the default mode.");
+    Require(WaitForPublishedMode(defaultMode, std::chrono::seconds(5)), "The default mode was not published.");
+
+    Require(SwitchModeOnRenderThread("EyeZoom"), "SwitchToMode refused EyeZoom.");
+    Require(WaitForPublishedMode("EyeZoom", std::chrono::seconds(5)), "EyeZoom was not published as current.");
+    Require(WaitUntil([] { return g_showEyeZoom.load(std::memory_order_acquire); }, std::chrono::seconds(5)),
+            "EyeZoom became the current mode but the zoom overlay never showed.");
+    Require(WaitForFrames(120, std::chrono::seconds(10)), "Frames stopped while EyeZoom was showing.");
+
+    // The settings GUI draws an EyeZoom preview from the same snapshot.
+    g_showGui.store(true, std::memory_order_release);
+    const bool guiFrames = WaitForFrames(60, std::chrono::seconds(10));
+    g_showGui.store(false, std::memory_order_release);
+    Require(guiFrames, "Frames stopped with the settings GUI open in EyeZoom.");
+
+    Require(SwitchModeOnRenderThread(defaultMode), "SwitchToMode refused the default mode after EyeZoom.");
+    Require(WaitForPublishedMode(defaultMode, std::chrono::seconds(5)), "Leaving EyeZoom did not publish the default mode.");
+    Require(WaitUntil([] { return !g_showEyeZoom.load(std::memory_order_acquire) &&
+                                  !g_isTransitioningFromEyeZoom.load(std::memory_order_acquire); },
+                      std::chrono::seconds(5)),
+            "The EyeZoom overlay or its exit transition never finished after leaving EyeZoom.");
+    Require(WaitForFrames(30, std::chrono::seconds(5)), "Frames stopped after leaving EyeZoom.");
+
+    // EyeZoom straight to another resized mode and back, with no stop at the default mode.
+    Require(SwitchModeOnRenderThread("EyeZoom"), "SwitchToMode refused EyeZoom the second time.");
+    Require(WaitForFrames(20, std::chrono::seconds(5)), "Frames stopped re-entering EyeZoom.");
+    Require(SwitchModeOnRenderThread(kTestModeId), "SwitchToMode refused EyeZoom -> test mode.");
+    Require(WaitForFrames(20, std::chrono::seconds(5)), "Frames stopped switching EyeZoom -> test mode.");
+    Require(SwitchModeOnRenderThread("EyeZoom"), "SwitchToMode refused test mode -> EyeZoom.");
+    Require(WaitForFrames(20, std::chrono::seconds(5)), "Frames stopped switching test mode -> EyeZoom.");
+
+    // Rapid toggles, each landing before the previous resize or exit transition has settled.
+    for (int i = 0; i < 20; ++i) {
+        const std::string target = (i % 2 == 0) ? defaultMode : std::string("EyeZoom");
+        Require(SwitchModeOnRenderThread(target), "SwitchToMode refused " + target + " during rapid toggling (step " + std::to_string(i) + ").");
+        Require(WaitForFrames(static_cast<uint64_t>(1 + i % 4), std::chrono::seconds(5)),
+                "Frames stopped during rapid EyeZoom toggling (step " + std::to_string(i) + ").");
+    }
+
+    Require(SwitchModeOnRenderThread(defaultMode), "Could not return to the default mode.");
+    Require(WaitForPublishedMode(defaultMode, std::chrono::seconds(5)), "The default mode was not published after toggling.");
+    Require(WaitUntil([] { return !g_showEyeZoom.load(std::memory_order_acquire) &&
+                                  !g_isTransitioningFromEyeZoom.load(std::memory_order_acquire); },
+                      std::chrono::seconds(5)),
+            "EyeZoom stayed visible after rapid toggling ended on the default mode.");
+    Require(WaitForFrames(60, std::chrono::seconds(10)), "Frames stopped after rapid EyeZoom toggling.");
+}
+
+// Sets the game transition of the named modes and publishes the config. Returns the previous values. Render thread only.
+std::vector<std::pair<std::string, GameTransitionType>> SetGameTransitionsOnRenderThread(
+    const std::vector<std::pair<std::string, GameTransitionType>>& transitions) {
+    std::vector<std::pair<std::string, GameTransitionType>> previous;
+    for (const auto& [modeId, type] : transitions) {
+        for (ModeConfig& mode : g_config.modes) {
+            if (!EqualsIgnoreCase(mode.id, modeId)) continue;
+            previous.emplace_back(mode.id, mode.gameTransition);
+            mode.gameTransition = type;
+        }
+    }
+    g_configIsDirty = true;
+    PublishGuiConfigSnapshot();
+    return previous;
+}
+
+// A slide (Bounce) transition out of EyeZoom keeps drawing the zoom from a frozen snapshot while the game resizes.
+void TestEyeZoomSlideTransitions() {
+    if (!IsResolutionChangeSupported(g_gameVersion)) Skip("Resolution changes are not supported on this game version.");
+    const auto snapshot = GetConfigSnapshot();
+    const bool hasEyeZoom = snapshot && std::any_of(snapshot->modes.begin(), snapshot->modes.end(),
+                                                    [](const ModeConfig& mode) { return EqualsIgnoreCase(mode.id, "EyeZoom"); });
+    if (!hasEyeZoom) Skip("The config has no EyeZoom mode.");
+
+    const std::string defaultMode = DefaultModeId();
+    Require(SwitchModeOnRenderThread(defaultMode), "Could not start from the default mode.");
+    Require(WaitForPublishedMode(defaultMode, std::chrono::seconds(5)), "The default mode was not published.");
+
+    const auto previous = RunOnRenderThread([defaultMode] {
+        return SetGameTransitionsOnRenderThread({ { defaultMode, GameTransitionType::Bounce }, { "EyeZoom", GameTransitionType::Bounce } });
+    });
+    struct RestoreTransitions {
+        std::vector<std::pair<std::string, GameTransitionType>> values;
+        ~RestoreTransitions() {
+            try {
+                RunOnRenderThread([this] { SetGameTransitionsOnRenderThread(values); });
+            } catch (...) {}
+        }
+    } restore{ previous };
+
+    // Full slide in and out, three times.
+    bool sawSlideOut = false;
+    for (int round = 0; round < 3; ++round) {
+        Require(SwitchModeOnRenderThread("EyeZoom"), "SwitchToMode refused EyeZoom (round " + std::to_string(round) + ").");
+        Require(WaitUntil([] { return g_showEyeZoom.load(std::memory_order_acquire); }, std::chrono::seconds(5)),
+                "EyeZoom never showed with a slide transition (round " + std::to_string(round) + ").");
+        Require(WaitUntil([] { return !IsModeTransitionActive(); }, std::chrono::seconds(5)),
+                "The slide into EyeZoom never finished (round " + std::to_string(round) + ").");
+        Require(WaitForFrames(20, std::chrono::seconds(5)), "Frames stopped in EyeZoom after a slide in.");
+
+        Require(SwitchModeOnRenderThread(defaultMode), "SwitchToMode refused the default mode (round " + std::to_string(round) + ").");
+        sawSlideOut |= WaitUntil([] { return g_isTransitioningFromEyeZoom.load(std::memory_order_acquire); }, std::chrono::seconds(2));
+        Require(WaitUntil([] { return !IsModeTransitionActive() && !g_isTransitioningFromEyeZoom.load(std::memory_order_acquire) &&
+                                      !g_showEyeZoom.load(std::memory_order_acquire); },
+                          std::chrono::seconds(5)),
+                "The slide out of EyeZoom never finished (round " + std::to_string(round) + ").");
+        Require(WaitForFrames(20, std::chrono::seconds(5)), "Frames stopped after a slide out of EyeZoom.");
+    }
+    Require(sawSlideOut, "Leaving EyeZoom with a slide transition never reported the EyeZoom exit transition.");
+
+    // Reverse each slide part-way through, so a new transition starts while the frozen snapshot is still in use.
+    for (int i = 0; i < 20; ++i) {
+        const std::string target = (i % 2 == 0) ? std::string("EyeZoom") : defaultMode;
+        Require(SwitchModeOnRenderThread(target), "SwitchToMode refused " + target + " mid-slide (step " + std::to_string(i) + ").");
+        Require(WaitForFrames(static_cast<uint64_t>(2 + i % 5), std::chrono::seconds(5)),
+                "Frames stopped while reversing slides (step " + std::to_string(i) + ").");
+    }
+
+    Require(SwitchModeOnRenderThread(defaultMode), "Could not return to the default mode.");
+    Require(WaitUntil([] { return !IsModeTransitionActive() && !g_isTransitioningFromEyeZoom.load(std::memory_order_acquire) &&
+                                  !g_showEyeZoom.load(std::memory_order_acquire); },
+                      std::chrono::seconds(5)),
+            "EyeZoom stayed visible after the reversed slides ended on the default mode.");
+    Require(WaitForFrames(60, std::chrono::seconds(10)), "Frames stopped after reversing EyeZoom slides.");
 }
 
 void TestLowLevelHookOnDedicatedThread() {
@@ -888,6 +1024,256 @@ void TestSensitivityOverrideScalesSdlMotion() {
                                             std::to_string(scaled) + ").");
 }
 
+// Watches for a freeze from another thread while a test runs: the longest gap between hooked frames, and the longest
+// time the game window took to answer a message (its thread pumps SDL/GLFW events, so this is input latency).
+class FreezeWatchdog {
+public:
+    FreezeWatchdog(HWND hwnd) : m_hwnd(hwnd), m_thread([this] { Run(); }) {}
+    ~FreezeWatchdog() { Stop(); }
+    void Stop() {
+        m_stop.store(true);
+        if (m_thread.joinable()) m_thread.join();
+    }
+    long long MaxFrameGapMs() const { return m_maxFrameGapMs.load(); }
+    long long MaxMessageLatencyMs() const { return m_maxMessageLatencyMs.load(); }
+    int MessageTimeouts() const { return m_messageTimeouts.load(); }
+
+private:
+    void Run() {
+        using Clock = std::chrono::steady_clock;
+        uint64_t lastFrames = s_renderFrames.load(std::memory_order_acquire);
+        auto lastFrameChange = Clock::now();
+        auto nextPing = Clock::now();
+        while (!m_stop.load()) {
+            const auto now = Clock::now();
+            const uint64_t frames = s_renderFrames.load(std::memory_order_acquire);
+            if (frames != lastFrames) {
+                lastFrames = frames;
+                lastFrameChange = now;
+            }
+            const long long gap = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastFrameChange).count();
+            if (gap > m_maxFrameGapMs.load()) m_maxFrameGapMs.store(gap);
+
+            if (now >= nextPing) {
+                DWORD_PTR result = 0;
+                const auto sent = Clock::now();
+                const LRESULT ok = SendMessageTimeoutW(m_hwnd, WM_NULL, 0, 0, SMTO_NORMAL, 2000, &result);
+                const long long latency = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - sent).count();
+                if (!ok) m_messageTimeouts.fetch_add(1);
+                if (latency > m_maxMessageLatencyMs.load()) m_maxMessageLatencyMs.store(latency);
+                nextPing = Clock::now() + std::chrono::milliseconds(50);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+    }
+
+    HWND m_hwnd;
+    std::atomic<bool> m_stop{ false };
+    std::atomic<long long> m_maxFrameGapMs{ 0 };
+    std::atomic<long long> m_maxMessageLatencyMs{ 0 };
+    std::atomic<int> m_messageTimeouts{ 0 };
+    std::thread m_thread;
+};
+
+// Counts the SDL key events the game receives, per SDL scancode.
+struct SdlKeyCounter {
+    static constexpr int kScancodes = 512;
+    std::atomic<int> downs[kScancodes]{};
+    std::atomic<int> ups[kScancodes]{};
+    std::atomic<int> anyKeyEvents{ 0 };
+    std::atomic<uint32_t> lastScancode{ 0 };
+};
+SdlKeyCounter s_sdlKeys;
+
+bool SdlKeyWatch(void*, void* event) {
+    const uint32_t type = *static_cast<const uint32_t*>(event);
+    if (type == 0x300 || type == 0x301) { // SDL_EVENT_KEY_DOWN / SDL_EVENT_KEY_UP
+        uint32_t scancode = 0;
+        bool repeat = false;
+        std::memcpy(&scancode, static_cast<const char*>(event) + 24, sizeof(scancode));
+        std::memcpy(&repeat, static_cast<const char*>(event) + 37, sizeof(repeat));
+        s_sdlKeys.anyKeyEvents.fetch_add(1);
+        s_sdlKeys.lastScancode.store(scancode);
+        if (scancode < SdlKeyCounter::kScancodes && !repeat) {
+            (type == 0x300 ? s_sdlKeys.downs : s_sdlKeys.ups)[scancode].fetch_add(1);
+        }
+    }
+    return true;
+}
+
+struct RealKeyStats {
+    int sendFailures = 0;
+    int pressedWithoutFocus = 0;
+    std::string lastForeground;
+};
+RealKeyStats s_realKeyStats;
+
+std::string DescribeForegroundWindow() {
+    const HWND fg = GetForegroundWindow();
+    if (!fg) return "none";
+    wchar_t title[128] = {};
+    GetWindowTextW(fg, title, static_cast<int>(std::size(title)));
+    DWORD pid = 0;
+    GetWindowThreadProcessId(fg, &pid);
+    return "pid " + std::to_string(pid) + " '" + WideToUtf8(title) + "'";
+}
+
+// Presses vk for real and returns how long Windows took to report it down, or -1 if it never did.
+long long PressRealKey(DWORD vk, std::chrono::milliseconds hold) {
+    const HWND hwnd = g_subclassedHwnd.load(std::memory_order_acquire);
+    if (!IsWindowInForegroundTree(hwnd)) {
+        ++s_realKeyStats.pressedWithoutFocus;
+        s_realKeyStats.lastForeground = DescribeForegroundWindow();
+    }
+    INPUT input{};
+    input.type = INPUT_KEYBOARD;
+    input.ki.wVk = static_cast<WORD>(vk);
+    input.ki.wScan = static_cast<WORD>(MapVirtualKeyW(vk, MAPVK_VK_TO_VSC));
+    const auto start = std::chrono::steady_clock::now();
+    if (SendInput(1, &input, sizeof(input)) != 1) ++s_realKeyStats.sendFailures;
+    long long downLatency = -1;
+    if (WaitUntil([vk] { return (GetAsyncKeyState(static_cast<int>(vk)) & 0x8000) != 0; }, std::chrono::seconds(3))) {
+        downLatency = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+    }
+    std::this_thread::sleep_for(hold);
+    input.ki.dwFlags = KEYEVENTF_KEYUP;
+    if (SendInput(1, &input, sizeof(input)) != 1) ++s_realKeyStats.sendFailures;
+    WaitUntil([vk] { return (GetAsyncKeyState(static_cast<int>(vk)) & 0x8000) == 0; }, std::chrono::seconds(3));
+    return downLatency;
+}
+
+// Reported freeze: after EyeZoom toggles the game stopped responding without crashing. Drive EyeZoom with real presses
+// of its configured hotkey and check, throughout and afterwards, that frames keep coming, the window keeps answering
+// messages, keys reach Windows promptly, and the game itself still receives every key down and up.
+void TestResponsiveThroughEyeZoomToggles() {
+    if (!IsResolutionChangeSupported(g_gameVersion)) Skip("Resolution changes are not supported on this game version.");
+    const auto snapshot = GetConfigSnapshot();
+    DWORD eyeZoomVk = 0;
+    std::string mainMode;
+    if (snapshot) {
+        for (const HotkeyConfig& hotkey : snapshot->hotkeys) {
+            if (hotkey.keys.size() == 1 && EqualsIgnoreCase(hotkey.secondaryMode, "EyeZoom")) {
+                eyeZoomVk = hotkey.keys[0];
+                mainMode = hotkey.mainMode;
+                break;
+            }
+        }
+    }
+    if (eyeZoomVk == 0) Skip("The config has no single-key EyeZoom hotkey.");
+
+    const HWND hwnd = g_subclassedHwnd.load(std::memory_order_acquire);
+    Require(hwnd != NULL, "No subclassed game window to send keys to.");
+    if (s_gameWindow) SetForegroundWindow(s_gameWindow);
+    if (!WaitUntil([&] { return IsWindowInForegroundTree(hwnd); }, std::chrono::seconds(2))) {
+        Skip("The game window is not in the foreground, so injected keys would go elsewhere.");
+    }
+    Require(SwitchModeOnRenderThread(mainMode), "Could not start from the EyeZoom hotkey's main mode.");
+    Require(WaitForPublishedMode(mainMode, std::chrono::seconds(5)), "The main mode was not published.");
+    Require(WaitForFrames(30, std::chrono::seconds(5)), "Frames stopped before the test started.");
+
+    HMODULE sdl = GetModuleHandleW(L"SDL3.dll");
+    using SdlEventFilter = bool (*)(void*, void*);
+    const auto addEventWatch = sdl ? reinterpret_cast<bool (*)(SdlEventFilter, void*)>(GetProcAddress(sdl, "SDL_AddEventWatch")) : nullptr;
+    const auto removeEventWatch = sdl ? reinterpret_cast<void (*)(SdlEventFilter, void*)>(GetProcAddress(sdl, "SDL_RemoveEventWatch")) : nullptr;
+    const bool watchingSdl = addEventWatch && removeEventWatch && addEventWatch(&SdlKeyWatch, nullptr);
+    for (int i = 0; i < SdlKeyCounter::kScancodes; ++i) {
+        s_sdlKeys.downs[i].store(0);
+        s_sdlKeys.ups[i].store(0);
+    }
+    struct RemoveWatch {
+        bool active;
+        void (*remove)(SdlEventFilter, void*);
+        ~RemoveWatch() { if (active) remove(&SdlKeyWatch, nullptr); }
+    } removeWatch{ watchingSdl, removeEventWatch };
+
+    s_realKeyStats = RealKeyStats{};
+    FreezeWatchdog watchdog(hwnd);
+    long long maxKeyLatencyMs = 0;
+    int keysNeverDown = 0;
+    const auto press = [&](DWORD vk, std::chrono::milliseconds hold) {
+        const long long latency = PressRealKey(vk, hold);
+        if (latency < 0) ++keysNeverDown;
+        else maxKeyLatencyMs = std::max(maxKeyLatencyMs, latency);
+    };
+    // A movement key the game must still see once EyeZoom has been toggled. SDL_SCANCODE_W is 26.
+    constexpr DWORD kProbeVk = 'W';
+    constexpr int kProbeScancode = 26;
+    int probesSent = 0;
+    const auto probeGameInput = [&](const std::string& when) {
+        if (!watchingSdl) return;
+        ++probesSent;
+        const long long latency = PressRealKey(kProbeVk, std::chrono::milliseconds(60));
+        if (latency < 0) ++keysNeverDown;
+        else maxKeyLatencyMs = std::max(maxKeyLatencyMs, latency);
+        const bool received = WaitUntil([&] { return s_sdlKeys.downs[kProbeScancode].load() >= probesSent &&
+                                                     s_sdlKeys.ups[kProbeScancode].load() >= probesSent; },
+                                        std::chrono::seconds(2));
+        Require(received, "The game stopped receiving keys " + when + " (W down " + std::to_string(s_sdlKeys.downs[kProbeScancode].load()) +
+                              ", up " + std::to_string(s_sdlKeys.ups[kProbeScancode].load()) + " of " + std::to_string(probesSent) + "; key-to-Windows latency " + std::to_string(latency) +
+                              " ms, SDL key events seen " + std::to_string(s_sdlKeys.anyKeyEvents.load()) + ", last SDL scancode " +
+                              std::to_string(s_sdlKeys.lastScancode.load()) + ", foreground " +
+                              (IsWindowInForegroundTree(hwnd) ? "yes" : "no") + ").");
+    };
+
+    probeGameInput("before any EyeZoom toggle");
+
+    // Paced toggles: each press must switch modes, and the game must still see other keys in both modes.
+    std::string expected = mainMode;
+    for (int i = 0; i < 12; ++i) {
+        expected = EqualsIgnoreCase(expected, "EyeZoom") ? mainMode : std::string("EyeZoom");
+        press(eyeZoomVk, std::chrono::milliseconds(40));
+        Require(WaitForPublishedMode(expected, std::chrono::seconds(3)),
+                "Press " + std::to_string(i + 1) + " of the EyeZoom hotkey did not switch to " + expected + " (current: " +
+                    GetPublishedCurrentModeId() + ", foreground " + DescribeForegroundWindow() + ", presses without focus " +
+                    std::to_string(s_realKeyStats.pressedWithoutFocus) + ", SendInput failures " +
+                    std::to_string(s_realKeyStats.sendFailures) + ").");
+        Require(WaitForFrames(10, std::chrono::seconds(3)), "Frames stopped after EyeZoom hotkey press " + std::to_string(i + 1) + ".");
+        probeGameInput("in " + expected + " after " + std::to_string(i + 1) + " EyeZoom toggles");
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    }
+
+    // Burst: presses just past the hotkey debounce, landing while the previous resize is still settling.
+    for (int i = 0; i < 16; ++i) {
+        press(eyeZoomVk, std::chrono::milliseconds(20));
+        std::this_thread::sleep_for(std::chrono::milliseconds(110));
+    }
+    Require(WaitUntil([] { return !IsModeTransitionActive(); }, std::chrono::seconds(5)), "A mode transition never finished after the burst.");
+    Require(WaitForFrames(30, std::chrono::seconds(5)), "Frames stopped after a burst of EyeZoom hotkey presses.");
+    probeGameInput("after a burst of EyeZoom toggles");
+
+    // The hotkey must still work after the burst.
+    const std::string afterBurst = GetPublishedCurrentModeId();
+    const std::string next = EqualsIgnoreCase(afterBurst, "EyeZoom") ? mainMode : std::string("EyeZoom");
+    press(eyeZoomVk, std::chrono::milliseconds(40));
+    Require(WaitForPublishedMode(next, std::chrono::seconds(3)),
+            "The EyeZoom hotkey stopped working after the burst (still " + GetPublishedCurrentModeId() + ").");
+    if (!EqualsIgnoreCase(next, mainMode)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        press(eyeZoomVk, std::chrono::milliseconds(40));
+        Require(WaitForPublishedMode(mainMode, std::chrono::seconds(3)), "The EyeZoom hotkey did not return to " + mainMode + ".");
+    }
+    Require(WaitForFrames(60, std::chrono::seconds(5)), "Frames stopped after leaving EyeZoom.");
+    probeGameInput("after leaving EyeZoom");
+    watchdog.Stop();
+
+    const bool keyStuck = (GetAsyncKeyState(static_cast<int>(eyeZoomVk)) & 0x8000) != 0 || (GetAsyncKeyState(kProbeVk) & 0x8000) != 0;
+    const int hotkeyScancode = static_cast<int>(MapVirtualKeyW(eyeZoomVk, MAPVK_VK_TO_VSC));
+    std::ostringstream stats;
+    stats << "max frame gap " << watchdog.MaxFrameGapMs() << " ms, max window message latency " << watchdog.MaxMessageLatencyMs()
+          << " ms, message timeouts " << watchdog.MessageTimeouts() << ", max key-to-Windows latency " << maxKeyLatencyMs
+          << " ms, keys never down " << keysNeverDown << ", SendInput failures " << s_realKeyStats.sendFailures
+          << ", presses without focus " << s_realKeyStats.pressedWithoutFocus << " (last foreground " << s_realKeyStats.lastForeground
+          << "), hotkey PS/2 scancode " << hotkeyScancode;
+    Log("[GAME TEST] Responsiveness through EyeZoom toggles: " + stats.str());
+
+    Require(keysNeverDown == 0, "Some injected keys never reached Windows: " + stats.str());
+    Require(maxKeyLatencyMs < 300, "Keys took too long to reach Windows (low-level hook stall): " + stats.str());
+    Require(watchdog.MessageTimeouts() == 0 && watchdog.MaxMessageLatencyMs() < 1000,
+            "The game window stopped answering messages: " + stats.str());
+    Require(watchdog.MaxFrameGapMs() < 1000, "Rendering stalled: " + stats.str());
+    Require(!keyStuck, "A key stayed down after the test released it: " + stats.str());
+}
+
 struct TestCase {
     const char* name;
     void (*fn)();
@@ -900,10 +1286,13 @@ const TestCase kTests[] = {
     { "render.backend_latched", &TestRenderBackendLatched },
     { "render.frames_hooked", &TestFramesHooked },
     { "mode.switch_resizes_game", &TestModeSwitchResizesGame },
+    { "mode.eyezoom_renders_and_switches", &TestEyeZoomRendersAndSwitches },
+    { "mode.eyezoom_slide_transitions", &TestEyeZoomSlideTransitions },
     { "input.hotkey_switches_mode", &TestHotkeySwitchesMode },
     { "input.low_level_hook_dedicated_thread", &TestLowLevelHookOnDedicatedThread },
     { "input.real_key_passes_through_once", &TestRealKeyPassesThroughOnce },
     { "input.sensitivity_override_scales_sdl_motion", &TestSensitivityOverrideScalesSdlMotion },
+    { "input.responsive_through_eyezoom_toggles", &TestResponsiveThroughEyeZoomToggles },
     { "gui.toggle_renders_imgui", &TestGuiToggleRendersImGui },
     { "gui.obs_pass_reuses_screen_frame", &TestObsPassReusesScreenImGuiFrame },
     { "hooks.third_party_swap_chain", &TestThirdPartySwapBuffersChain },
