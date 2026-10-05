@@ -594,6 +594,7 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.mirrors"))) {
                 mirrorSettingsRowLabel(trc("mirrors.opacity"));
                 if (ImGui::SliderFloat("##mirror_opacity", &mirror.opacity, 0.0f, 1.0f)) {
                     g_configIsDirty = true;
+                    std::unique_lock<std::shared_mutex> lock(g_mirrorInstancesMutex);
                     auto it = g_mirrorInstances.find(mirror.name);
                     if (it != g_mirrorInstances.end()) it->second.forceUpdateFrames = 3;
                 }
