@@ -1473,6 +1473,8 @@ using SDLSETEVENTFILTER = void (*)(SDLEVENTFILTER filter, void* userdata);
 using SDLGETEVENTFILTER = bool (*)(SDLEVENTFILTER* filter, void** userdata);
 static SDLEVENTFILTER g_previousSdlEventFilter = nullptr;
 static void* g_previousSdlEventFilterUserdata = nullptr;
+// Set once ToolscreenSdlEventFilter scales SDL3 mouse motion, which takes over from the raw input hook.
+static std::atomic<bool> g_sdlMotionScalingInstalled{ false };
 static bool ApplySdlRelativeMouseMode_Impl(SDLSETWINDOWRELATIVEMOUSEMODE next, void* window, bool enabled);
 
 struct SdlWindowState {
@@ -2969,6 +2971,46 @@ bool hkSdlSetWindowRelativeMouseMode(void* window, bool enabled) {
     return ApplySdlRelativeMouseMode_Impl(oSdlSetWindowRelativeMouseMode, window, enabled);
 }
 
+// The mouse sensitivity multiplier in effect: a sensitivity hotkey's temporary override, else the current mode's
+// override, else the global setting.
+static void ResolveMouseSensitivity(float& sensitivityX, float& sensitivityY) {
+    sensitivityX = 1.0f;
+    sensitivityY = 1.0f;
+    {
+        std::lock_guard<std::mutex> lock(g_tempSensitivityMutex);
+        if (g_tempSensitivityOverride.active) {
+            sensitivityX = g_tempSensitivityOverride.sensitivityX;
+            sensitivityY = g_tempSensitivityOverride.sensitivityY;
+            return;
+        }
+    }
+
+    const ViewportTransitionSnapshot& transitionSnap =
+        g_viewportTransitionSnapshots[g_viewportTransitionSnapshotIndex.load(std::memory_order_acquire)];
+
+    std::string modeId;
+    if (transitionSnap.active) {
+        modeId = transitionSnap.toModeId;
+    } else {
+        modeId = GetPublishedCurrentModeId();
+    }
+
+    auto inputCfgSnap = GetConfigSnapshot();
+    const ModeConfig* mode = inputCfgSnap ? GetModeFromSnapshotOrFallback(*inputCfgSnap, modeId) : nullptr;
+    if (mode && mode->sensitivityOverrideEnabled) {
+        if (mode->separateXYSensitivity) {
+            sensitivityX = mode->modeSensitivityX;
+            sensitivityY = mode->modeSensitivityY;
+        } else {
+            sensitivityX = mode->modeSensitivity;
+            sensitivityY = mode->modeSensitivity;
+        }
+    } else if (inputCfgSnap) {
+        sensitivityX = inputCfgSnap->mouseSensitivity;
+        sensitivityY = inputCfgSnap->mouseSensitivity;
+    }
+}
+
 // While the settings GUI is open the game must not see input. For GLFW that
 // happens in the window procedure, but SDL3's relative mouse mode reads raw
 // input on its own thread and never touches the game window's messages. Drop
@@ -2989,11 +3031,44 @@ static bool ShouldBlockSdlEventWhileGuiOpen(uint32_t type) {
     }
 }
 
+// SDL3's SDL_MouseMotionEvent: the float deltas Minecraft turns the camera by.
+struct SdlMouseMotionEventCompat {
+    uint32_t type;
+    uint32_t reserved;
+    uint64_t timestamp;
+    uint32_t windowID;
+    uint32_t which;
+    uint32_t state;
+    float x;
+    float y;
+    float xrel;
+    float yrel;
+};
+static_assert(offsetof(SdlMouseMotionEventCompat, xrel) == 36 && offsetof(SdlMouseMotionEventCompat, yrel) == 40,
+              "SDL_MouseMotionEvent layout");
+
+// GLFW's disabled cursor reads WM_INPUT through GetRawInputData, which hkGetRawInputData scales. SDL3's relative
+// mode reads raw input on its own thread through GetRawInputBuffer, so scale the deltas it queues instead.
+// Floats need no remainder carried between events.
+static void ApplySensitivityToSdlMotion(void* event) {
+    if (!g_nativeCursorGrabbed.load(std::memory_order_acquire)) return;
+    float sensitivityX = 1.0f;
+    float sensitivityY = 1.0f;
+    ResolveMouseSensitivity(sensitivityX, sensitivityY);
+    if (sensitivityX == 1.0f && sensitivityY == 1.0f) return;
+    auto* motion = static_cast<SdlMouseMotionEventCompat*>(event);
+    motion->xrel *= sensitivityX;
+    motion->yrel *= sensitivityY;
+}
+
 // Runs on whichever thread queues the event, including SDL's raw input thread.
 static bool ToolscreenSdlEventFilter(void* userdata, void* event) {
     if (event && g_showGui.load(std::memory_order_acquire) &&
         ShouldBlockSdlEventWhileGuiOpen(*static_cast<const uint32_t*>(event))) {
         return false;
+    }
+    if (event && *static_cast<const uint32_t*>(event) == 0x400) { // SDL_EVENT_MOUSE_MOTION
+        ApplySensitivityToSdlMotion(event);
     }
     return g_previousSdlEventFilter ? g_previousSdlEventFilter(g_previousSdlEventFilterUserdata, event) : true;
 }
@@ -3013,6 +3088,7 @@ static void InstallSdlGuiInputFilter(HMODULE sdl) {
         g_previousSdlEventFilterUserdata = previousUserdata;
     }
     setEventFilter(&ToolscreenSdlEventFilter, nullptr);
+    g_sdlMotionScalingInstalled.store(true, std::memory_order_release);
 }
 
 static bool TryInstallSdlHooks(HMODULE sdl) {
@@ -3261,46 +3337,14 @@ static UINT GetRawInputDataHook_Impl(GETRAWINPUTDATAPROC next, HRAWINPUT hRawInp
 
     RAWINPUT* raw = reinterpret_cast<RAWINPUT*>(pData);
 
+    // SDL3 scales its motion events in ToolscreenSdlEventFilter instead. Its raw input thread reads through
+    // GetRawInputBuffer, and scaling here as well would apply the sensitivity twice to any WM_INPUT it handles.
+    if (g_sdlMotionScalingInstalled.load(std::memory_order_acquire)) { return result; }
+
     if (raw->header.dwType == RIM_TYPEMOUSE) {
         float sensitivityX = 1.0f;
         float sensitivityY = 1.0f;
-        bool sensitivityDetermined = false;
-
-        {
-            std::lock_guard<std::mutex> lock(g_tempSensitivityMutex);
-            if (g_tempSensitivityOverride.active) {
-                sensitivityX = g_tempSensitivityOverride.sensitivityX;
-                sensitivityY = g_tempSensitivityOverride.sensitivityY;
-                sensitivityDetermined = true;
-            }
-        }
-
-        if (!sensitivityDetermined) {
-            const ViewportTransitionSnapshot& transitionSnap =
-                g_viewportTransitionSnapshots[g_viewportTransitionSnapshotIndex.load(std::memory_order_acquire)];
-
-            std::string modeId;
-            if (transitionSnap.active) {
-                modeId = transitionSnap.toModeId;
-            } else {
-                modeId = GetPublishedCurrentModeId();
-            }
-
-            auto inputCfgSnap = GetConfigSnapshot();
-            const ModeConfig* mode = inputCfgSnap ? GetModeFromSnapshotOrFallback(*inputCfgSnap, modeId) : nullptr;
-            if (mode && mode->sensitivityOverrideEnabled) {
-                if (mode->separateXYSensitivity) {
-                    sensitivityX = mode->modeSensitivityX;
-                    sensitivityY = mode->modeSensitivityY;
-                } else {
-                    sensitivityX = mode->modeSensitivity;
-                    sensitivityY = mode->modeSensitivity;
-                }
-            } else if (inputCfgSnap) {
-                sensitivityX = inputCfgSnap->mouseSensitivity;
-                sensitivityY = inputCfgSnap->mouseSensitivity;
-            }
-        }
+        ResolveMouseSensitivity(sensitivityX, sensitivityY);
 
         if (!(raw->data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE)) {
             static float xAccum = 0.0f;

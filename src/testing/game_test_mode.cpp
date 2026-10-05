@@ -22,6 +22,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -37,6 +38,7 @@ uint64_t GetObsPassImGuiFramesReusedForTests();
 bool ReadPublishedObsComposePixelForTests(int x, int y, unsigned char outRgba[4]);
 void GetPublishedObsComposeSizeForTests(int& width, int& height);
 extern std::atomic<bool> g_configLoaded;
+extern std::atomic<void*> g_lastSdlCursorWindow;
 
 namespace ToolscreenVulkanLayerTest {
 bool GetTrackedDevice(VkDevice& device, PFN_vkGetDeviceProcAddr& layerGdpa, PFN_vkGetDeviceProcAddr& nextGdpa);
@@ -745,6 +747,96 @@ void TestConfigRecoveredFromBackup() {
             "The damaged config.toml was not kept next to the restored file.");
 }
 
+// SDL3's relative mouse mode reads raw input on its own thread, and the game turns the camera by the motion
+// events' xrel/yrel. A sensitivity override must scale those deltas, the same as it scales GLFW's.
+void TestSensitivityOverrideScalesSdlMotion() {
+    HMODULE sdl = GetModuleHandleW(L"SDL3.dll");
+    if (!sdl) Skip("The game does not use SDL3.");
+    using SdlEventFilter = bool (*)(void* userdata, void* event);
+    const auto addEventWatch = reinterpret_cast<bool (*)(SdlEventFilter, void*)>(GetProcAddress(sdl, "SDL_AddEventWatch"));
+    const auto removeEventWatch = reinterpret_cast<void (*)(SdlEventFilter, void*)>(GetProcAddress(sdl, "SDL_RemoveEventWatch"));
+    const auto setRelativeMouseMode =
+        reinterpret_cast<bool (*)(void*, bool)>(GetProcAddress(sdl, "SDL_SetWindowRelativeMouseMode"));
+    Require(addEventWatch && removeEventWatch && setRelativeMouseMode, "SDL3 is missing the event-watch or relative-mouse API.");
+    Require(WaitUntil([] { return g_lastSdlCursorWindow.load(std::memory_order_acquire) != nullptr; }, std::chrono::seconds(20)),
+            "Toolscreen never tracked the SDL window.");
+    void* window = g_lastSdlCursorWindow.load(std::memory_order_acquire);
+
+    struct MotionSum {
+        std::atomic<int> events{ 0 };
+        std::atomic<double> xrel{ 0.0 };
+    };
+    static MotionSum s_sum;
+    // Watches see each event after the event filter, so they read the deltas the game will get.
+    const SdlEventFilter watch = [](void*, void* event) -> bool {
+        if (*static_cast<const uint32_t*>(event) == 0x400) { // SDL_EVENT_MOUSE_MOTION
+            float xrel = 0.0f;
+            std::memcpy(&xrel, static_cast<const char*>(event) + 36, sizeof(xrel));
+            s_sum.events.fetch_add(1);
+            s_sum.xrel.store(s_sum.xrel.load() + xrel);
+        }
+        return true;
+    };
+    const auto setOverride = [](bool active, float sensitivity) {
+        std::lock_guard<std::mutex> lock(g_tempSensitivityMutex);
+        g_tempSensitivityOverride.active = active;
+        g_tempSensitivityOverride.sensitivityX = active ? sensitivity : 1.0f;
+        g_tempSensitivityOverride.sensitivityY = active ? sensitivity : 1.0f;
+        g_tempSensitivityOverride.activeSensHotkeyIndex = -1;
+    };
+    // Injects relative moves and returns the total xrel the game received for them.
+    const auto measure = [&]() {
+        s_sum.events.store(0);
+        s_sum.xrel.store(0.0);
+        for (int i = 0; i < 40; ++i) {
+            INPUT input{};
+            input.type = INPUT_MOUSE;
+            input.mi.dx = 5;
+            input.mi.dwFlags = MOUSEEVENTF_MOVE;
+            SendInput(1, &input, sizeof(input));
+            std::this_thread::sleep_for(std::chrono::milliseconds(3));
+        }
+        // Let the raw input thread drain, then wait for the total to settle.
+        double last = -1.0;
+        WaitUntil([&] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            const double now = s_sum.xrel.load();
+            const bool settled = now == last;
+            last = now;
+            return settled;
+        }, std::chrono::seconds(3));
+        return s_sum.xrel.load();
+    };
+
+    if (s_gameWindow) SetForegroundWindow(s_gameWindow);
+    Require(RunOnRenderThread([&] { return setRelativeMouseMode(window, true); }), "SDL_SetWindowRelativeMouseMode(true) failed.");
+    Require(addEventWatch(watch, nullptr), "SDL_AddEventWatch failed.");
+    double baseline = 0.0;
+    double scaled = 0.0;
+    try {
+        setOverride(false, 1.0f);
+        // Entering relative mode can report one jump as SDL recenters the cursor; keep it out of the baseline.
+        measure();
+        baseline = measure();
+        setOverride(true, 2.0f);
+        scaled = measure();
+    } catch (...) {
+        setOverride(false, 1.0f);
+        removeEventWatch(watch, nullptr);
+        RunOnRenderThread([&] { return setRelativeMouseMode(window, false); });
+        throw;
+    }
+    setOverride(false, 1.0f);
+    removeEventWatch(watch, nullptr);
+    RunOnRenderThread([&] { return setRelativeMouseMode(window, false); });
+
+    Require(baseline > 0.0, "The game received no relative mouse motion; the game window probably lacks focus.");
+    const double ratio = scaled / baseline;
+    Require(ratio > 1.8 && ratio < 2.2, "A 2x sensitivity override changed SDL motion by " + std::to_string(ratio) +
+                                            "x (baseline xrel " + std::to_string(baseline) + ", scaled xrel " +
+                                            std::to_string(scaled) + ").");
+}
+
 struct TestCase {
     const char* name;
     void (*fn)();
@@ -759,6 +851,7 @@ const TestCase kTests[] = {
     { "mode.switch_resizes_game", &TestModeSwitchResizesGame },
     { "input.hotkey_switches_mode", &TestHotkeySwitchesMode },
     { "input.low_level_hook_dedicated_thread", &TestLowLevelHookOnDedicatedThread },
+    { "input.sensitivity_override_scales_sdl_motion", &TestSensitivityOverrideScalesSdlMotion },
     { "gui.toggle_renders_imgui", &TestGuiToggleRendersImGui },
     { "gui.obs_pass_reuses_screen_frame", &TestObsPassReusesScreenImGuiFrame },
     { "hooks.third_party_swap_chain", &TestThirdPartySwapBuffersChain },
