@@ -71,6 +71,12 @@ std::atomic<bool> s_forceSharedObsFrame{ false };
 // TOOLSCREEN_GAME_TEST_EXIT: after the tests, close the game normally so DLL_PROCESS_DETACH runs.
 // "plain" just closes it; "log_lock" first leaves g_logFileMutex held by a thread that process exit will kill.
 std::string s_exitMode;
+// TOOLSCREEN_GAME_TEST_WAIT_FOR_TITLE: hold the tests until the game window title contains this, e.g. once a
+// quick-play world has finished loading.
+std::string s_waitForTitle;
+// TOOLSCREEN_GAME_TEST_WINDOW: "borderless" (Toolscreen's borderless toggle) or "fullscreen" (the game's F11) to
+// run the tests at monitor size instead of the default small window.
+std::string s_windowMode;
 std::thread s_runnerThread;
 std::atomic<bool> s_stopRequested{ false };
 HWND s_gameWindow = NULL;
@@ -1342,6 +1348,29 @@ void RequestGameExit() {
 
 void RunAllTests() {
     AppendResultLine("{\"event\":\"start\",\"version\":\"" + JsonEscape(VersionString(g_gameVersion)) + "\"}");
+    if (!s_waitForTitle.empty()) {
+        const bool reached = WaitUntil([] {
+            wchar_t title[256] = {};
+            GetWindowTextW(s_gameWindow, title, static_cast<int>(std::size(title)));
+            return WideToUtf8(title).find(s_waitForTitle) != std::string::npos;
+        }, std::chrono::seconds(180));
+        if (!reached) {
+            AppendResultLine("{\"event\":\"error\",\"message\":\"The window title never contained '" + JsonEscape(s_waitForTitle) + "'.\"}");
+        }
+        // Let the first chunks load and the loading overlay fade.
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+    }
+    if (!s_windowMode.empty()) {
+        RECT before{};
+        GetClientRect(s_gameWindow, &before);
+        if (s_windowMode == "borderless") ToggleBorderlessWindowedFullscreen(s_gameWindow);
+        else if (s_windowMode == "fullscreen") PostKeyPress(g_subclassedHwnd.load(std::memory_order_acquire), VK_F11);
+        std::this_thread::sleep_for(std::chrono::seconds(3));
+        RECT after{};
+        GetClientRect(s_gameWindow, &after);
+        Log("[GAME TEST] Window mode '" + s_windowMode + "': client " + std::to_string(before.right) + "x" + std::to_string(before.bottom) +
+            " -> " + std::to_string(after.right) + "x" + std::to_string(after.bottom));
+    }
     int passed = 0, failed = 0, skipped = 0;
 
     for (const TestCase& test : kTests) {
@@ -1399,6 +1428,8 @@ void InitializeFromEnvironment() {
 
     s_resultsPath = Utf8ToWide(resultsPath);
     s_exitMode = ToLower(ReadEnvUtf8(L"TOOLSCREEN_GAME_TEST_EXIT"));
+    s_waitForTitle = ReadEnvUtf8(L"TOOLSCREEN_GAME_TEST_WAIT_FOR_TITLE");
+    s_windowMode = ToLower(ReadEnvUtf8(L"TOOLSCREEN_GAME_TEST_WINDOW"));
     s_expectedVersion = ReadEnvUtf8(L"TOOLSCREEN_GAME_TEST_EXPECTED_VERSION");
     s_expectedBackend = ToLower(ReadEnvUtf8(L"TOOLSCREEN_GAME_TEST_EXPECTED_BACKEND"));
     std::stringstream filters(ReadEnvUtf8(L"TOOLSCREEN_GAME_TEST_FILTER"));

@@ -39,6 +39,12 @@ param(
     # Seeds the toolscreen folder before launch: a file is copied to toolscreen\config.toml, a folder's contents
     # (config.toml, backups\, profiles\...) are copied into toolscreen\.
     [string]$ConfigFixture = "",
+    # 26.x only: load straight into this world (a folder name in out/game-tests/<version>/run/saves) instead of the
+    # title screen. Create the world once by hand with -KeepGameOpen.
+    [string]$QuickPlayWorld = "",
+    # Run the tests at monitor size: "borderless" uses Toolscreen's borderless toggle, "fullscreen" the game's F11.
+    [ValidateSet("", "borderless", "fullscreen")]
+    [string]$WindowMode = "",
     [switch]$KeepGameOpen
 )
 
@@ -98,6 +104,13 @@ $isModernVersion = -not $MinecraftVersion.StartsWith("1.")
 $ExpectedBackend = if ($isModernVersion) { $GraphicsBackend } else { "opengl" }
 $gradleArgs = "--no-daemon --console=plain runClient"
 if ($isModernVersion) { $gradleArgs += " -PgraphicsBackend=$GraphicsBackend" }
+if ($QuickPlayWorld) {
+    if (-not $isModernVersion) { throw "-QuickPlayWorld is only supported on 26.x clients." }
+    if (-not (Test-Path (Join-Path $RunDir "saves\$QuickPlayWorld\level.dat"))) {
+        throw "No world '$QuickPlayWorld' in $(Join-Path $RunDir 'saves'). Create it once by hand with -KeepGameOpen."
+    }
+    $gradleArgs += " `"-PquickPlayWorld=$QuickPlayWorld`""
+}
 
 $toolscreenDll = Join-Path $BinDir "Toolscreen.dll"
 $loggerDll = Join-Path $BinDir "liblogger_x64.dll"
@@ -194,6 +207,9 @@ $env:TOOLSCREEN_GAME_TEST_EXPECTED_BACKEND = $ExpectedBackend
 $env:TOOLSCREEN_GAME_TEST_TOOLSCREEN_DIR = $ToolscreenDir
 $env:TOOLSCREEN_GAME_TEST_FILTER = $Filter
 $env:TOOLSCREEN_GAME_TEST_EXIT = $ExitMode
+# 26.x adds " - Singleplayer" to the window title once the world has loaded.
+$env:TOOLSCREEN_GAME_TEST_WINDOW = $WindowMode
+$env:TOOLSCREEN_GAME_TEST_WAIT_FOR_TITLE = $(if ($QuickPlayWorld) { " - Singleplayer" } else { "" })
 
 $gradle = Start-Process -FilePath "cmd.exe" -WorkingDirectory $ProjectDir -PassThru -WindowStyle Hidden `
     -ArgumentList "/c", "`"`"$(Join-Path $ProjectDir 'gradlew.bat')`" $gradleArgs > `"$GradleLog`" 2>&1`""

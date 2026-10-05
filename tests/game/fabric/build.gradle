@@ -13,6 +13,10 @@ loom {
 			if (project.hasProperty("graphicsBackend")) {
 				programArgs "--graphicsBackend", project.property("graphicsBackend").toString()
 			}
+			// Loads straight into an existing world in run/saves instead of stopping at the title screen.
+			if (project.hasProperty("quickPlayWorld")) {
+				programArgs "--quickPlaySingleplayer", project.property("quickPlayWorld").toString()
+			}
 		}
 	}
 }
