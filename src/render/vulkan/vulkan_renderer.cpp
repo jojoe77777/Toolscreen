@@ -7558,6 +7558,13 @@ void Shutdown() {
     g_deviceBeingDestroyed.store(false, std::memory_order_release);
 }
 
+bool GetMirrorHasContentForTests(const std::string& mirrorName, bool& hasContent) {
+    const auto it = g_state.mirrorHasContent.find(HashMirrorIdentity(mirrorName));
+    if (it == g_state.mirrorHasContent.end()) return false;
+    hasContent = it->second;
+    return true;
+}
+
 } // namespace VulkanRenderer
 
 extern "C" __declspec(dllexport) bool ToolscreenVulkanGetObsComposition(

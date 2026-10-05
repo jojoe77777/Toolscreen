@@ -246,7 +246,13 @@ void InstallTestFixtureOnRenderThread() {
     PublishGuiConfigSnapshot();
 }
 
+constexpr const char* kTestMirrorMatchAll = "GameTestMirrorMatchAll";
+constexpr const char* kTestMirrorMatchNone = "GameTestMirrorMatchNone";
+
 void RemoveTestFixtureOnRenderThread() {
+    std::erase_if(g_config.mirrors, [](const MirrorConfig& mirror) {
+        return mirror.name == kTestMirrorMatchAll || mirror.name == kTestMirrorMatchNone;
+    });
     std::erase_if(g_config.modes, [](const ModeConfig& mode) { return EqualsIgnoreCase(mode.id, kTestModeId); });
     std::erase_if(g_config.hotkeys, [](const HotkeyConfig& hotkey) { return EqualsIgnoreCase(hotkey.secondaryMode, kTestModeId); });
     ResizeHotkeySecondaryModes(g_config.hotkeys.size());
@@ -826,6 +832,68 @@ void TestVulkanStreamingTextureLifetime() {
 
 // With the OBS compose pass running and the settings GUI open, ImGui must build one frame per swap: the OBS pass
 // reuses the screen pass's draw data instead of running NewFrame and the whole settings GUI a second time.
+// A color-filtered mirror reports content only when some captured pixel matches a target color. Vulkan measures this
+// with an occlusion query over the filter's surviving fragments; if the driver counts discarded fragments too, every
+// filtered mirror reports content and its static border always shows.
+void TestVulkanMirrorContentDetection() {
+    if (GetRenderBackend() != RenderBackend::Vulkan) Skip("This checks the Vulkan renderer's mirror content queries.");
+    if (!IsResolutionChangeSupported(g_gameVersion)) Skip("Resolution changes are not supported on this game version.");
+
+    RunOnRenderThread([] {
+        InstallTestFixtureOnRenderThread();
+        const auto addMirror = [](const char* name, Color target, float sensitivity, int outputX) {
+            MirrorConfig mirror{};
+            mirror.name = name;
+            mirror.captureWidth = 32;
+            mirror.captureHeight = 32;
+            mirror.input.push_back(MirrorCaptureConfig{ 0, 0, "topLeftScreen" });
+            mirror.output.x = outputX;
+            mirror.output.y = 10;
+            mirror.output.relativeTo = "topLeftScreen";
+            mirror.colors.targetColors = { target };
+            mirror.colors.output = Color{ 1.0f, 1.0f, 1.0f, 1.0f };
+            mirror.colorSensitivity = sensitivity;
+            g_config.mirrors.push_back(mirror);
+        };
+        // Every color is within 2.0 of black, so every pixel matches.
+        addMirror(kTestMirrorMatchAll, Color{ 0.0f, 0.0f, 0.0f, 1.0f }, 2.0f, 10);
+        // Exact pure magenta does not occur in the game image.
+        addMirror(kTestMirrorMatchNone, Color{ 1.0f, 0.0f, 1.0f, 1.0f }, 0.0001f, 60);
+        for (ModeConfig& mode : g_config.modes) {
+            if (!EqualsIgnoreCase(mode.id, kTestModeId)) continue;
+            mode.sources.push_back(ModeSourceRef{ ModeSourceType::Mirror, kTestMirrorMatchAll });
+            mode.sources.push_back(ModeSourceRef{ ModeSourceType::Mirror, kTestMirrorMatchNone });
+        }
+        g_configIsDirty = true;
+        PublishGuiConfigSnapshot();
+    });
+
+    Require(SwitchModeOnRenderThread(kTestModeId), "SwitchToMode refused the test mode.");
+    Require(WaitForPublishedMode(kTestModeId, std::chrono::seconds(5)), "The test mode was not published as current.");
+
+    bool matchAll = false;
+    bool matchNone = true;
+    const bool measured = WaitUntil([&] {
+        return RunOnRenderThread([&] {
+            return VulkanRenderer::GetMirrorHasContentForTests(kTestMirrorMatchAll, matchAll) &&
+                   VulkanRenderer::GetMirrorHasContentForTests(kTestMirrorMatchNone, matchNone);
+        });
+    }, std::chrono::seconds(5));
+    // Let several frames of query results settle after the mode switch.
+    Require(WaitForFrames(30, std::chrono::seconds(5)), "Frames stopped while measuring mirror content.");
+    RunOnRenderThread([&] {
+        VulkanRenderer::GetMirrorHasContentForTests(kTestMirrorMatchAll, matchAll);
+        VulkanRenderer::GetMirrorHasContentForTests(kTestMirrorMatchNone, matchNone);
+    });
+
+    RunOnRenderThread([] { RemoveTestFixtureOnRenderThread(); });
+    SwitchModeOnRenderThread(DefaultModeId());
+
+    Require(measured, "The Vulkan renderer never read back content results for the test mirrors.");
+    Require(matchAll, "A mirror whose filter matches every pixel reported no content.");
+    Require(!matchNone, "A mirror whose filter matches no pixel reported content (discarded fragments were counted).");
+}
+
 void TestObsPassReusesScreenImGuiFrame() {
     WaitUntil([] { return GetRenderBackend() != RenderBackend::Unknown; }, std::chrono::seconds(20));
     if (GetRenderBackend() != RenderBackend::OpenGL) Skip("The same-thread OBS compose pass is the OpenGL path.");
@@ -1305,6 +1373,7 @@ const TestCase kTests[] = {
     { "vulkan.layer_wait_does_not_block_other_calls", &TestVulkanLayerWaitDoesNotBlockOtherCalls },
     { "vulkan.frame_completion_tracking", &TestVulkanFrameCompletionTracking },
     { "vulkan.streaming_texture_lifetime", &TestVulkanStreamingTextureLifetime },
+    { "vulkan.mirror_content_detection", &TestVulkanMirrorContentDetection },
     { "config.save_round_trip", &TestConfigSaveRoundTrip },
     { "config.load_error_screen", &TestConfigLoadErrorScreen },
     { "config.recovered_from_backup", &TestConfigRecoveredFromBackup },

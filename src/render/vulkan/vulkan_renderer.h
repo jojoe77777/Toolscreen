@@ -80,5 +80,7 @@ void OnImageDestroyed(VkDevice device, VkImage image);
 void OnSwapchainDestroyed(VkDevice device, VkSwapchainKHR swapchain, const std::vector<VkImage>& images);
 void OnDeviceDestroyed(VkDevice device);
 void Shutdown();
+// Render thread only. The latest content-detection result for a mirror; false if none has been read back yet.
+bool GetMirrorHasContentForTests(const std::string& mirrorName, bool& hasContent);
 
 } // namespace VulkanRenderer
