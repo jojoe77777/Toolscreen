@@ -388,6 +388,12 @@ struct RendererState {
     int presentedReadyX = -1;
     int presentedReadyY = -1;
     std::array<float, 4> presentedReadyColor{};
+    // Test frame capture: the next screenshot copy lands here instead of on the clipboard.
+    bool frameCaptureForTests = false;
+    bool frameCaptureReady = false;
+    std::vector<uint8_t> frameCapturePixels;
+    int frameCaptureWidth = 0;
+    int frameCaptureHeight = 0;
     VkImage fontImage = VK_NULL_HANDLE;
     VkDeviceMemory fontMemory = VK_NULL_HANDLE;
     VkImageView fontView = VK_NULL_HANDLE;
@@ -3079,10 +3085,25 @@ void HarvestTimestamps() {
             const bool bgra =
                 frame.screenshotFormat == VK_FORMAT_B8G8R8A8_UNORM ||
                 frame.screenshotFormat == VK_FORMAT_B8G8R8A8_SRGB;
-            ScreenshotPixelsToClipboard(
-                g_state.screenshotReadbackMapped, frame.screenshotWidth,
-                frame.screenshotHeight,
-                static_cast<size_t>(frame.screenshotWidth) * 4u, bgra, true);
+            if (g_state.frameCaptureForTests) {
+                const size_t bytes = static_cast<size_t>(frame.screenshotWidth) * frame.screenshotHeight * 4u;
+                g_state.frameCapturePixels.assign(
+                    g_state.screenshotReadbackMapped, g_state.screenshotReadbackMapped + bytes);
+                if (bgra) {
+                    for (size_t i = 0; i < bytes; i += 4) {
+                        std::swap(g_state.frameCapturePixels[i], g_state.frameCapturePixels[i + 2]);
+                    }
+                }
+                g_state.frameCaptureWidth = frame.screenshotWidth;
+                g_state.frameCaptureHeight = frame.screenshotHeight;
+                g_state.frameCaptureForTests = false;
+                g_state.frameCaptureReady = true;
+            } else {
+                ScreenshotPixelsToClipboard(
+                    g_state.screenshotReadbackMapped, frame.screenshotWidth,
+                    frame.screenshotHeight,
+                    static_cast<size_t>(frame.screenshotWidth) * 4u, bgra, true);
+            }
         }
         if (frame.virtualCameraPending) {
             const bool published =
@@ -7649,6 +7670,21 @@ void Shutdown() {
     }
     g_state = {};
     g_deviceBeingDestroyed.store(false, std::memory_order_release);
+}
+
+void RequestFrameCaptureForTests() {
+    g_state.frameCaptureReady = false;
+    g_state.frameCaptureForTests = true;
+    g_screenshotRequested.store(true, std::memory_order_release);
+}
+
+bool TryGetFrameCaptureForTests(std::vector<uint8_t>& rgba, int& width, int& height) {
+    if (!g_state.frameCaptureReady) return false;
+    rgba = std::move(g_state.frameCapturePixels);
+    width = g_state.frameCaptureWidth;
+    height = g_state.frameCaptureHeight;
+    g_state.frameCaptureReady = false;
+    return true;
 }
 
 bool TryGetPresentedPixelForTests(int x, int y, std::array<float, 4>& color) {

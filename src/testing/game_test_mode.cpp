@@ -1010,6 +1010,53 @@ void TestVulkanMirrorsDrawGameOpaque() {
     }
 }
 
+// Manual check, skipped unless TOOLSCREEN_GAME_TEST_SCREENSHOT_DIR is set: switches to EyeZoom and saves the presented
+// frame as <dir>\<TOOLSCREEN_GAME_TEST_SCREENSHOT_TAG>.bmp. Reads the frame from the Vulkan renderer, so other windows
+// and focus do not matter.
+void TestEyeZoomScreenshots() {
+    const std::wstring dir = Utf8ToWide(ReadEnvUtf8(L"TOOLSCREEN_GAME_TEST_SCREENSHOT_DIR"));
+    if (dir.empty()) Skip("TOOLSCREEN_GAME_TEST_SCREENSHOT_DIR is not set.");
+    const std::wstring tag = Utf8ToWide(ReadEnvUtf8(L"TOOLSCREEN_GAME_TEST_SCREENSHOT_TAG"));
+    WaitUntil([] { return GetRenderBackend() != RenderBackend::Unknown; }, std::chrono::seconds(20));
+    if (GetRenderBackend() != RenderBackend::Vulkan) Skip("Frame capture reads the Vulkan renderer's presented frame.");
+    // Give distant chunks time to load so fog at the render distance is visible.
+    Require(WaitForFrames(900, std::chrono::seconds(60)), "Frames stopped before the screenshot.");
+
+    Require(SwitchModeOnRenderThread("EyeZoom"), "SwitchToMode refused EyeZoom.");
+    Require(WaitForPublishedMode("EyeZoom", std::chrono::seconds(5)), "EyeZoom was not published as current.");
+    Require(WaitForFrames(120, std::chrono::seconds(10)), "Frames stopped while EyeZoom was showing.");
+
+    std::vector<uint8_t> rgba;
+    int width = 0, height = 0;
+    RunOnRenderThread([] { VulkanRenderer::RequestFrameCaptureForTests(); });
+    const bool captured = WaitUntil([&] {
+        return RunOnRenderThread([&] { return VulkanRenderer::TryGetFrameCaptureForTests(rgba, width, height); });
+    }, std::chrono::seconds(5));
+    SwitchModeOnRenderThread(DefaultModeId());
+    Require(captured && width > 0 && height > 0, "The presented frame was never captured.");
+
+    BITMAPINFOHEADER info{};
+    info.biSize = sizeof(info);
+    info.biWidth = width;
+    info.biHeight = -height;
+    info.biPlanes = 1;
+    info.biBitCount = 32;
+    info.biCompression = BI_RGB;
+    for (size_t i = 0; i < rgba.size(); i += 4) {
+        std::swap(rgba[i], rgba[i + 2]);
+        rgba[i + 3] = 255;
+    }
+    BITMAPFILEHEADER file{};
+    file.bfType = 0x4D42;
+    file.bfOffBits = sizeof(file) + sizeof(info);
+    file.bfSize = file.bfOffBits + static_cast<DWORD>(rgba.size());
+    std::ofstream out(std::filesystem::path(dir + L"\\" + tag + L".bmp"), std::ios::binary);
+    out.write(reinterpret_cast<const char*>(&file), sizeof(file));
+    out.write(reinterpret_cast<const char*>(&info), sizeof(info));
+    out.write(reinterpret_cast<const char*>(rgba.data()), static_cast<std::streamsize>(rgba.size()));
+    Require(out.good(), "Could not write the screenshot.");
+}
+
 // With the OBS compose pass running and the settings GUI open, ImGui must build one frame per swap: the OBS pass
 // reuses the screen pass's draw data instead of running NewFrame and the whole settings GUI a second time.
 // A color-filtered mirror reports content only when some captured pixel matches a target color. Vulkan measures this
@@ -1559,6 +1606,7 @@ const TestCase kTests[] = {
     { "vulkan.mirror_content_detection", &TestVulkanMirrorContentDetection },
     { "mirror.add_to_current_mode", &TestAddMirrorToCurrentMode },
     { "vulkan.mirrors_draw_game_opaque", &TestVulkanMirrorsDrawGameOpaque },
+    { "manual.eyezoom_screenshots", &TestEyeZoomScreenshots },
     { "config.save_round_trip", &TestConfigSaveRoundTrip },
     { "config.load_error_screen", &TestConfigLoadErrorScreen },
     { "config.recovered_from_backup", &TestConfigRecoveredFromBackup },

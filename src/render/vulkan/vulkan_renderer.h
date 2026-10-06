@@ -85,5 +85,8 @@ bool GetMirrorHasContentForTests(const std::string& mirrorName, bool& hasContent
 // Render thread only. Requests the presented swapchain pixel at (x, y) in window pixels; true once a sample of that
 // pixel has been read back.
 bool TryGetPresentedPixelForTests(int x, int y, std::array<float, 4>& color);
+// Render thread only. Copies the next presented frame (RGBA, top row first) for tests instead of to the clipboard.
+void RequestFrameCaptureForTests();
+bool TryGetFrameCaptureForTests(std::vector<uint8_t>& rgba, int& width, int& height);
 
 } // namespace VulkanRenderer
