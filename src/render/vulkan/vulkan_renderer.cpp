@@ -2029,6 +2029,8 @@ bool UpdateMirrorSnapshot(
         static_cast<uint32_t>(std::size(toShader)), toShader);
 
     destination.image.initialized = true;
+    // The copy runs in this frame even when nothing samples the slot this frame, so keep the slot until it completes.
+    destination.pendingFrameMask |= TimestampFrameBit(timestampFrame);
     state.latestSlot = writableSlot;
     state.lastUpdate = now;
     return true;
