@@ -1627,6 +1627,71 @@ void TestSensitivityOverrideScalesSdlMotion() {
                                             std::to_string(scaled) + ").");
 }
 
+// Minecraft 26.x warps the cursor with SDL_WarpMouseInWindow to the centre of what it believes is its window (the
+// mode size) when it grabs or releases the mouse. The cursor must land on the centre of the presented game, not that
+// many pixels from the real client's top-left corner.
+void TestSdlWarpLandsInPresentedGame() {
+    HMODULE sdl = GetModuleHandleW(L"SDL3.dll");
+    if (!sdl) Skip("The game does not use SDL3.");
+    if (!IsResolutionChangeSupported(g_gameVersion)) Skip("Resolution changes are not supported on this game version.");
+    const auto warpMouse = reinterpret_cast<void (*)(void*, float, float)>(GetProcAddress(sdl, "SDL_WarpMouseInWindow"));
+    const auto setRelativeMouseMode =
+        reinterpret_cast<bool (*)(void*, bool)>(GetProcAddress(sdl, "SDL_SetWindowRelativeMouseMode"));
+    const auto getRelativeMouseMode = reinterpret_cast<bool (*)(void*)>(GetProcAddress(sdl, "SDL_GetWindowRelativeMouseMode"));
+    Require(warpMouse && setRelativeMouseMode && getRelativeMouseMode, "SDL3 is missing the warp or relative-mouse API.");
+    Require(WaitUntil([] { return g_lastSdlCursorWindow.load(std::memory_order_acquire) != nullptr; }, std::chrono::seconds(20)),
+            "Toolscreen never tracked the SDL window.");
+    void* window = g_lastSdlCursorWindow.load(std::memory_order_acquire);
+    Require(WaitUntil([] { return g_subclassedHwnd.load(std::memory_order_acquire) != NULL; }, std::chrono::seconds(20)),
+            "Toolscreen never subclassed the game window.");
+    const HWND hwnd = g_subclassedHwnd.load(std::memory_order_acquire);
+    if (s_gameWindow) SetForegroundWindow(s_gameWindow);
+    if (!WaitUntil([&] { return IsWindowInForegroundTree(hwnd); }, std::chrono::seconds(2))) {
+        Skip("The game window is not in the foreground, so cursor warps are left alone.");
+    }
+
+    RunOnRenderThread([] { InstallTestFixtureOnRenderThread(); });
+    Require(SwitchModeOnRenderThread(kTestModeId), "SwitchToMode refused the test mode.");
+    Require(WaitForPublishedMode(kTestModeId, std::chrono::seconds(5)), "The test mode was not published as current.");
+    Require(WaitForFrames(10, std::chrono::seconds(5)), "Frames stopped after switching modes.");
+
+    struct WarpResult {
+        POINT cursor{};
+        RECT client{};
+    };
+    const bool wasRelative = RunOnRenderThread([&] { return getRelativeMouseMode(window); });
+    // SDL and the cursor queries run on the game's thread so they share its DPI awareness.
+    const auto warpTo = [&](float x, float y) {
+        return RunOnRenderThread([&] {
+            WarpResult result;
+            setRelativeMouseMode(window, false);
+            warpMouse(window, x, y);
+            GetCursorPos(&result.cursor);
+            ScreenToClient(hwnd, &result.cursor);
+            GetClientRect(hwnd, &result.client);
+            return result;
+        });
+    };
+    WarpResult result;
+    try {
+        result = warpTo(kTestModeWidth / 2.0f, kTestModeHeight / 2.0f);
+    } catch (...) {
+        RunOnRenderThread([&] { return setRelativeMouseMode(window, wasRelative); });
+        SwitchModeOnRenderThread(DefaultModeId());
+        throw;
+    }
+    RunOnRenderThread([&] { return setRelativeMouseMode(window, wasRelative); });
+    Require(SwitchModeOnRenderThread(DefaultModeId()), "SwitchToMode refused the default mode.");
+
+    // The test mode is unstretched, so the game is centred in the client area.
+    const int expectedX = GetCenteredAxisOffset(result.client.right, kTestModeWidth) + kTestModeWidth / 2;
+    const int expectedY = GetCenteredAxisOffset(result.client.bottom, kTestModeHeight) + kTestModeHeight / 2;
+    Require(std::abs(result.cursor.x - expectedX) <= 2 && std::abs(result.cursor.y - expectedY) <= 2,
+            "Warping to the game's centre put the cursor at client " + std::to_string(result.cursor.x) + "," +
+                std::to_string(result.cursor.y) + " instead of " + std::to_string(expectedX) + "," + std::to_string(expectedY) +
+                " (client " + std::to_string(result.client.right) + "x" + std::to_string(result.client.bottom) + ").");
+}
+
 // Watches for a freeze from another thread while a test runs: the longest gap between hooked frames, and the longest
 // time the game window took to answer a message (its thread pumps SDL/GLFW events, so this is input latency).
 class FreezeWatchdog {
@@ -2116,6 +2181,7 @@ const TestCase kTests[] = {
     { "input.low_level_hook_dedicated_thread", &TestLowLevelHookOnDedicatedThread },
     { "input.real_key_passes_through_once", &TestRealKeyPassesThroughOnce },
     { "input.sensitivity_override_scales_sdl_motion", &TestSensitivityOverrideScalesSdlMotion },
+    { "input.sdl_warp_lands_in_presented_game", &TestSdlWarpLandsInPresentedGame },
     { "input.responsive_through_eyezoom_toggles", &TestResponsiveThroughEyeZoomToggles },
     { "gui.toggle_renders_imgui", &TestGuiToggleRendersImGui },
     { "gui.obs_pass_reuses_screen_frame", &TestObsPassReusesScreenImGuiFrame },

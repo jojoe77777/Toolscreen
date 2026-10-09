@@ -17,6 +17,7 @@
 
 #include "gui/imgui_input_queue.h"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -2934,41 +2935,15 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
     return { false, 0 };
 }
 
-InputHandlerResult HandleMouseCoordinateTranslationPhase(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM& lParam) {
-    // Only translate messages whose lParam is already in CLIENT coordinates.
-    // Wheel messages use SCREEN coordinates and must not be transformed here.
-    switch (uMsg) {
-    case WM_MOUSEMOVE:
-    case WM_LBUTTONDOWN:
-    case WM_LBUTTONUP:
-    case WM_LBUTTONDBLCLK:
-    case WM_RBUTTONDOWN:
-    case WM_RBUTTONUP:
-    case WM_RBUTTONDBLCLK:
-    case WM_MBUTTONDOWN:
-    case WM_MBUTTONUP:
-    case WM_MBUTTONDBLCLK:
-    case WM_XBUTTONDOWN:
-    case WM_XBUTTONUP:
-    case WM_XBUTTONDBLCLK:
-        break;
-    default:
-        return { false, 0 };
-    }
-
-    if (!IsCursorVisible() && !g_showGui.load(std::memory_order_acquire)) {
-        return { false, 0 };
-    }
-
-    PROFILE_SCOPE("HandleMouseCoordinateTranslation");
-
+// Where the game's client area is presented inside the real window: geo.width/height is the game's
+// size and geo.stretch* is the rect it is drawn into, both in client pixels.
+static bool ResolveMouseTranslationViewport(HWND hWnd, ModeViewportInfo& geo, int& clientW, int& clientH) {
     RECT clientRect{};
-    if (!GetClientRect(hWnd, &clientRect)) { return { false, 0 }; }
-    const int clientW = clientRect.right - clientRect.left;
-    const int clientH = clientRect.bottom - clientRect.top;
-    if (clientW <= 0 || clientH <= 0) { return { false, 0 }; }
+    if (!GetClientRect(hWnd, &clientRect)) { return false; }
+    clientW = clientRect.right - clientRect.left;
+    clientH = clientRect.bottom - clientRect.top;
+    if (clientW <= 0 || clientH <= 0) { return false; }
 
-    ModeViewportInfo geo;
     const std::string currentModeId = GetPublishedCurrentModeId();
     auto cfgSnap = GetConfigSnapshot();
     const ModeConfig* currentMode = cfgSnap ? GetModeFromSnapshotOrFallback(*cfgSnap, currentModeId) : nullptr;
@@ -2978,7 +2953,7 @@ InputHandlerResult HandleMouseCoordinateTranslationPhase(HWND hWnd, UINT uMsg, W
     // source size and any screen-sized output rects using live state from this message.
     if (!ResolvePresentedGameViewport(geo)) {
         if (!currentMode || currentMode->width <= 0 || currentMode->height <= 0) {
-            return { false, 0 };
+            return false;
         }
 
         geo.valid = true;
@@ -3022,7 +2997,7 @@ InputHandlerResult HandleMouseCoordinateTranslationPhase(HWND hWnd, UINT uMsg, W
         const int outputWidth = geo.stretchWidth > 0 ? geo.stretchWidth : (currentMode ? currentMode->width : geo.width);
         const int outputHeight = geo.stretchHeight > 0 ? geo.stretchHeight : (currentMode ? currentMode->height : geo.height);
         if (outputWidth <= 0 || outputHeight <= 0) {
-            return { false, 0 };
+            return false;
         }
 
         geo.stretchWidth = outputWidth;
@@ -3031,7 +3006,56 @@ InputHandlerResult HandleMouseCoordinateTranslationPhase(HWND hWnd, UINT uMsg, W
         geo.stretchY = GetCenteredAxisOffset(clientH, outputHeight);
     }
 
-    if (!geo.valid || geo.width <= 0 || geo.height <= 0 || geo.stretchWidth <= 0 || geo.stretchHeight <= 0) { return { false, 0 }; }
+    return geo.valid && geo.width > 0 && geo.height > 0 && geo.stretchWidth > 0 && geo.stretchHeight > 0;
+}
+
+bool MapGameClientPointToWindowClient(HWND hWnd, int& x, int& y) {
+    ModeViewportInfo geo;
+    int clientW = 0;
+    int clientH = 0;
+    if (!ResolveMouseTranslationViewport(hWnd, geo, clientW, clientH)) { return false; }
+
+    const float scaleX = static_cast<float>(geo.stretchWidth) / static_cast<float>(geo.width);
+    const float scaleY = static_cast<float>(geo.stretchHeight) / static_cast<float>(geo.height);
+    const int mappedX = geo.stretchX + static_cast<int>(std::lround(static_cast<float>(x) * scaleX));
+    const int mappedY = geo.stretchY + static_cast<int>(std::lround(static_cast<float>(y) * scaleY));
+    x = (std::clamp)(mappedX, 0, clientW - 1);
+    y = (std::clamp)(mappedY, 0, clientH - 1);
+    return true;
+}
+
+InputHandlerResult HandleMouseCoordinateTranslationPhase(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM& lParam) {
+    // Only translate messages whose lParam is already in CLIENT coordinates.
+    // Wheel messages use SCREEN coordinates and must not be transformed here.
+    switch (uMsg) {
+    case WM_MOUSEMOVE:
+    case WM_LBUTTONDOWN:
+    case WM_LBUTTONUP:
+    case WM_LBUTTONDBLCLK:
+    case WM_RBUTTONDOWN:
+    case WM_RBUTTONUP:
+    case WM_RBUTTONDBLCLK:
+    case WM_MBUTTONDOWN:
+    case WM_MBUTTONUP:
+    case WM_MBUTTONDBLCLK:
+    case WM_XBUTTONDOWN:
+    case WM_XBUTTONUP:
+    case WM_XBUTTONDBLCLK:
+        break;
+    default:
+        return { false, 0 };
+    }
+
+    if (!IsCursorVisible() && !g_showGui.load(std::memory_order_acquire)) {
+        return { false, 0 };
+    }
+
+    PROFILE_SCOPE("HandleMouseCoordinateTranslation");
+
+    ModeViewportInfo geo;
+    int clientW = 0;
+    int clientH = 0;
+    if (!ResolveMouseTranslationViewport(hWnd, geo, clientW, clientH)) { return { false, 0 }; }
 
     const int viewportLeft = geo.stretchX;
     const int viewportTop = geo.stretchY;

@@ -1451,6 +1451,7 @@ using SDLGETPOINTERPROPERTY = void* (*)(SDLPROPERTIESID properties, const char* 
 using SDLGETWINDOWFLAGS = uint64_t (*)(void* window);
 using SDLSETWINDOWRELATIVEMOUSEMODE = bool (*)(void* window, bool enabled);
 using SDLGETWINDOWRELATIVEMOUSEMODE = bool (*)(void* window);
+using SDLWARPMOUSEINWINDOW = void (*)(void* window, float x, float y);
 using SDLGLGETCURRENTWINDOW = void* (*)();
 
 static SDLCREATEWINDOW oSdlCreateWindow = nullptr;
@@ -1461,6 +1462,11 @@ static SDLGETPOINTERPROPERTY sdlGetPointerPropertyProc = nullptr;
 static SDLGETWINDOWFLAGS sdlGetWindowFlagsProc = nullptr;
 static SDLSETWINDOWRELATIVEMOUSEMODE oSdlSetWindowRelativeMouseMode = nullptr;
 static SDLGETWINDOWRELATIVEMOUSEMODE sdlGetWindowRelativeMouseModeProc = nullptr;
+static SDLWARPMOUSEINWINDOW oSdlWarpMouseInWindow = nullptr;
+// Nonzero while SDL3 warps the cursor to a point the game gave in its own client space: SDL_WarpMouseInWindow, and
+// the restore warp when relative mode turns off. Minecraft believes its window is the mode size, so SDL's
+// ClientToScreen anchors that point to the real client's top-left instead of the presented game viewport.
+static thread_local int t_sdlGameCursorWarpDepth = 0;
 static std::atomic<SDLGLGETCURRENTWINDOW> sdlGlGetCurrentWindowProc{ nullptr };
 using SDLPUSHEVENT = bool (*)(void* event);
 using SDLGETWINDOWID = uint32_t (*)(void* window);
@@ -2389,6 +2395,15 @@ static BOOL SetCursorPosHook_Impl(SETCURSORPOSPROC next, int X, int Y) {
     if (guiOpen) { return TRUE; }
     if (g_isShuttingDown.load()) { return next(X, Y); }
 
+    if (t_sdlGameCursorWarpDepth > 0) {
+        RECT clientRectScreen{};
+        if (!GetWindowClientRectInScreen(hwnd, clientRectScreen)) { return next(X, Y); }
+        int clientX = X - clientRectScreen.left;
+        int clientY = Y - clientRectScreen.top;
+        if (!MapGameClientPointToWindowClient(hwnd, clientX, clientY)) { return next(X, Y); }
+        return next(clientRectScreen.left + clientX, clientRectScreen.top + clientY);
+    }
+
     ModeViewportInfo viewport = GetCurrentModeViewport();
     if (!viewport.valid) { return next(X, Y); }
 
@@ -2950,7 +2965,10 @@ static bool ApplySdlRelativeMouseMode_Impl(SDLSETWINDOWRELATIVEMOUSEMODE next, v
     const bool previous = g_nativeCursorGrabbed.load(std::memory_order_acquire);
     g_nativeCursorGrabbed.store(enabled, std::memory_order_release);
     g_capturingMousePos.store(enabled ? CapturingState::DISABLED : CapturingState::NORMAL, std::memory_order_release);
+    // Leaving relative mode warps the cursor back to SDL's game-space mouse position.
+    if (!enabled) ++t_sdlGameCursorWarpDepth;
     const bool result = next(window, enabled);
+    if (!enabled) --t_sdlGameCursorWarpDepth;
     g_capturingMousePos.store(CapturingState::NONE, std::memory_order_release);
     if (!result) g_nativeCursorGrabbed.store(previous, std::memory_order_release);
     return result;
@@ -2969,6 +2987,13 @@ bool hkSdlSetWindowRelativeMouseMode(void* window, bool enabled) {
     }
 
     return ApplySdlRelativeMouseMode_Impl(oSdlSetWindowRelativeMouseMode, window, enabled);
+}
+
+void hkSdlWarpMouseInWindow(void* window, float x, float y) {
+    if (!oSdlWarpMouseInWindow) return;
+    ++t_sdlGameCursorWarpDepth;
+    oSdlWarpMouseInWindow(window, x, y);
+    --t_sdlGameCursorWarpDepth;
 }
 
 // The mouse sensitivity multiplier in effect: a sensitivity hotkey's temporary override, else the current mode's
@@ -3131,6 +3156,8 @@ static bool TryInstallSdlHooks(HMODULE sdl) {
     CreateHookOrDie(GetProcAddress(sdl, "SDL_DestroyWindow"), &hkSdlDestroyWindow, &oSdlDestroyWindow, "SDL_DestroyWindow");
     CreateHookOrDie(GetProcAddress(sdl, "SDL_SetWindowRelativeMouseMode"), &hkSdlSetWindowRelativeMouseMode,
                     &oSdlSetWindowRelativeMouseMode, "SDL_SetWindowRelativeMouseMode");
+    CreateHookOrDie(GetProcAddress(sdl, "SDL_WarpMouseInWindow"), &hkSdlWarpMouseInWindow, &oSdlWarpMouseInWindow,
+                    "SDL_WarpMouseInWindow");
 
     if (g_minHookEnabled.load(std::memory_order_acquire)) {
         MH_EnableHook(MH_ALL_HOOKS);

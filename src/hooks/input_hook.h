@@ -82,6 +82,10 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
 
 InputHandlerResult HandleMouseCoordinateTranslationPhase(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM& lParam);
 
+// Inverse of HandleMouseCoordinateTranslationPhase: maps a point in the game's client space (the mode size the
+// game believes its window is) to where it is presented in the real window's client area.
+bool MapGameClientPointToWindowClient(HWND hWnd, int& x, int& y);
+
 InputHandlerResult HandleKeyRebinding(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
 InputHandlerResult HandleCustomKeyNoRebind(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
