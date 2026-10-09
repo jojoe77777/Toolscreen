@@ -138,6 +138,12 @@ static_assert(offsetof(MirrorFragmentPushConstants, sourceTexel) == 56);
 static_assert(offsetof(MirrorFragmentPushConstants, crop) == 64);
 static_assert(sizeof(MirrorFragmentPushConstants) == 80);
 
+// ImGui geometry that Toolscreen draws with one of its own pipelines (see AddToolscreenPipelineDraw).
+struct ToolscreenPipelineDraw {
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    MirrorFragmentPushConstants fragment;
+};
+
 struct OverlaySpecialization {
     int32_t keyCount = 0;
     float keys[8][3]{};
@@ -345,6 +351,8 @@ struct RendererState {
     PFN_vkDestroyPipeline destroyPipeline = nullptr;
     PFN_vkCmdBindPipeline cmdBindPipeline = nullptr;
     PFN_vkCmdPushConstants cmdPushConstants = nullptr;
+    PFN_vkCmdSetScissor cmdSetScissor = nullptr;
+    PFN_vkCmdDrawIndexed cmdDrawIndexed = nullptr;
     PFN_vkCreateComputePipelines createComputePipelines = nullptr;
     PFN_vkCmdBindDescriptorSets cmdBindDescriptorSets = nullptr;
     PFN_vkCmdDispatch cmdDispatch = nullptr;
@@ -470,8 +478,8 @@ struct RendererState {
     bool rebindIndicatorPreviousEnabled = false;
     std::chrono::steady_clock::time_point rebindIndicatorToggleTime{};
     float rebindIndicatorAlpha = 0.0f;
-    // Draw callbacks hold pointers into this, so it must not move elements on push_back.
-    std::deque<MirrorFragmentPushConstants> mirrorFragmentPushData;
+    // Draw callbacks hold pointers into this, so it must not move elements on emplace_back.
+    std::deque<ToolscreenPipelineDraw> pipelineDraws;
     std::shared_ptr<const Config> configSnapshot;
     uint64_t configVersion = 0;
     std::string publishedModeId;
@@ -537,6 +545,7 @@ std::atomic<bool> g_obsExportReady{ false };
 std::mutex g_obsCompositionMutex;
 thread_local bool g_obsCompositionPass = false;
 thread_local VkCommandBuffer g_activeImGuiCommandBuffer = VK_NULL_HANDLE;
+thread_local const ImDrawData* g_activeImGuiDrawData = nullptr;
 thread_local const VulkanRenderer::FinalBlitContext* g_activeFrameContext =
     nullptr;
 thread_local TimestampFrame* g_activeResourceTimestampFrame = nullptr;
@@ -1054,8 +1063,12 @@ bool CreateMirrorPipelineResources() {
     g_state.destroyPipeline = reinterpret_cast<PFN_vkDestroyPipeline>(load("vkDestroyPipeline"));
     g_state.cmdBindPipeline = reinterpret_cast<PFN_vkCmdBindPipeline>(load("vkCmdBindPipeline"));
     g_state.cmdPushConstants = reinterpret_cast<PFN_vkCmdPushConstants>(load("vkCmdPushConstants"));
+    g_state.cmdBindDescriptorSets = reinterpret_cast<PFN_vkCmdBindDescriptorSets>(load("vkCmdBindDescriptorSets"));
+    g_state.cmdSetScissor = reinterpret_cast<PFN_vkCmdSetScissor>(load("vkCmdSetScissor"));
+    g_state.cmdDrawIndexed = reinterpret_cast<PFN_vkCmdDrawIndexed>(load("vkCmdDrawIndexed"));
     if (!g_state.createShaderModule || !g_state.createDescriptorSetLayout || !g_state.createPipelineLayout ||
-        !g_state.createGraphicsPipelines || !g_state.cmdBindPipeline) {
+        !g_state.createGraphicsPipelines || !g_state.cmdBindPipeline || !g_state.cmdPushConstants ||
+        !g_state.cmdBindDescriptorSets || !g_state.cmdSetScissor || !g_state.cmdDrawIndexed) {
         return false;
     }
 
@@ -1589,24 +1602,84 @@ VkPipeline GetOverlayPipeline(
     return pipeline;
 }
 
-void BindMirrorPipelineCallback(const ImDrawList*, const ImDrawCmd* command) {
-    if (!g_activeImGuiCommandBuffer || !g_state.cmdBindPipeline) return;
-    const VkPipeline pipeline = reinterpret_cast<VkPipeline>(command->UserCallbackData);
-    if (pipeline) {
-        g_state.cmdBindPipeline(g_activeImGuiCommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-    }
-}
+void SeparateDrawCallback(const ImDrawList*, const ImDrawCmd*) {}
 
-void PushMirrorFragmentDataCallback(const ImDrawList*, const ImDrawCmd* command) {
-    if (!g_activeImGuiCommandBuffer || !g_state.cmdPushConstants ||
-        !g_state.mirrorPipelineLayout || !command->UserCallbackData) {
+// Draws one ImGui geometry command with a Toolscreen pipeline, in place of ImGui. The pipelines use mirrorPipelineLayout,
+// whose fragment push-constant range ImGui's own layout lacks, so ImGui's texture and push-constant bindings would not be
+// compatible with them. This binds both through mirrorPipelineLayout and draws from ImGui's vertex and index buffers.
+void DrawWithToolscreenPipelineCallback(const ImDrawList* list, const ImDrawCmd* command) {
+    const auto* draw = static_cast<const ToolscreenPipelineDraw*>(command->UserCallbackData);
+    const ImDrawData* drawData = g_activeImGuiDrawData;
+    const VkCommandBuffer commandBuffer = g_activeImGuiCommandBuffer;
+    if (!draw || !draw->pipeline || !drawData || !commandBuffer || !g_state.mirrorPipelineLayout ||
+        command->ElemCount == 0) {
         return;
     }
-    const auto* push = static_cast<const MirrorFragmentPushConstants*>(
-        command->UserCallbackData);
-    g_state.cmdPushConstants(
-        g_activeImGuiCommandBuffer, g_state.mirrorPipelineLayout,
-        VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(float) * 4, sizeof(*push), push);
+
+    // ImGui uploads every list's vertices and indices into one buffer pair, in draw-data order.
+    int globalVtxOffset = 0;
+    int globalIdxOffset = 0;
+    for (const ImDrawList* other : drawData->CmdLists) {
+        if (other == list) break;
+        globalVtxOffset += other->VtxBuffer.Size;
+        globalIdxOffset += other->IdxBuffer.Size;
+    }
+
+    // The scissor and transform ImGui_ImplVulkan_RenderDrawData would use for this command.
+    const ImVec2 clipOffset = drawData->DisplayPos;
+    const ImVec2 clipScale = drawData->FramebufferScale;
+    const float framebufferWidth = static_cast<float>(static_cast<int>(drawData->DisplaySize.x * clipScale.x));
+    const float framebufferHeight = static_cast<float>(static_cast<int>(drawData->DisplaySize.y * clipScale.y));
+    const ImVec2 clipMin((std::max)(0.0f, (command->ClipRect.x - clipOffset.x) * clipScale.x),
+                         (std::max)(0.0f, (command->ClipRect.y - clipOffset.y) * clipScale.y));
+    const ImVec2 clipMax((std::min)(framebufferWidth, (command->ClipRect.z - clipOffset.x) * clipScale.x),
+                         (std::min)(framebufferHeight, (command->ClipRect.w - clipOffset.y) * clipScale.y));
+    if (clipMax.x <= clipMin.x || clipMax.y <= clipMin.y) return;
+    VkRect2D scissor{};
+    scissor.offset = { static_cast<int32_t>(clipMin.x), static_cast<int32_t>(clipMin.y) };
+    scissor.extent = { static_cast<uint32_t>(clipMax.x - clipMin.x), static_cast<uint32_t>(clipMax.y - clipMin.y) };
+    const float scaleX = 2.0f / drawData->DisplaySize.x;
+    const float scaleY = 2.0f / drawData->DisplaySize.y;
+    const float vertexPush[4] = { scaleX, scaleY, -1.0f - drawData->DisplayPos.x * scaleX,
+                                  -1.0f - drawData->DisplayPos.y * scaleY };
+    const VkDescriptorSet texture = reinterpret_cast<VkDescriptorSet>(command->GetTexID());
+
+    g_state.cmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, draw->pipeline);
+    g_state.cmdSetScissor(commandBuffer, 0, 1, &scissor);
+    g_state.cmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, g_state.mirrorPipelineLayout, 0, 1,
+                                  &texture, 0, nullptr);
+    g_state.cmdPushConstants(commandBuffer, g_state.mirrorPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0,
+                             sizeof(vertexPush), vertexPush);
+    g_state.cmdPushConstants(commandBuffer, g_state.mirrorPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT,
+                             sizeof(vertexPush), sizeof(draw->fragment), &draw->fragment);
+    g_state.cmdDrawIndexed(commandBuffer, command->ElemCount, 1, command->IdxOffset + globalIdxOffset,
+                           static_cast<int32_t>(command->VtxOffset) + globalVtxOffset, 0);
+}
+
+// Adds the geometry addGeometry builds to draw, but draws it with pipeline through DrawWithToolscreenPipelineCallback
+// instead of letting ImGui draw it. Follow it with ImDrawCallback_ResetRenderState before ImGui draws anything else.
+template <typename AddGeometry>
+void AddToolscreenPipelineDraw(ImDrawList* draw, VkPipeline pipeline, const MirrorFragmentPushConstants& fragment,
+                               AddGeometry&& addGeometry) {
+    ToolscreenPipelineDraw& entry = g_state.pipelineDraws.emplace_back();
+    entry.pipeline = pipeline;
+    entry.fragment = fragment;
+    // ImGui merges new geometry into the previous command when its texture and clip match, unless that command is a
+    // callback, so a callback here keeps the geometry in commands of its own.
+    draw->AddCallback(SeparateDrawCallback, nullptr);
+    const int firstCommand = draw->CmdBuffer.Size - 1;
+    addGeometry();
+    for (int i = firstCommand; i < draw->CmdBuffer.Size; ++i) {
+        ImDrawCmd& command = draw->CmdBuffer[i];
+        if (command.UserCallback || command.ElemCount == 0) continue;
+        // A callback command keeps its texture, clip and index range, and ImGui calls it instead of drawing it.
+        command.UserCallback = DrawWithToolscreenPipelineCallback;
+        command.UserCallbackData = &entry;
+        command.UserCallbackDataSize = 0;
+        command.UserCallbackDataOffset = -1;
+    }
+    // Later geometry must not join a converted command, and AddCallback requires a last command without a callback.
+    if (draw->CmdBuffer.back().UserCallback) draw->AddDrawCmd();
 }
 
 VkPipeline GetColorKeyPipeline(
@@ -4650,13 +4723,7 @@ void DrawMirrors(const VulkanRenderer::FinalBlitContext& context, SampledImage* 
 
             const VkPipeline pipeline = GetMirrorPipeline(specialization);
             if (pipeline) {
-                draw->AddCallback(BindMirrorPipelineCallback,
-                                  reinterpret_cast<void*>(pipeline));
                 geometryPush.gradientTime = gradientElapsed > 0.0f ? gradientElapsed : 0.0f;
-                g_state.mirrorFragmentPushData.push_back(geometryPush);
-                draw->AddCallback(
-                    PushMirrorFragmentDataCallback,
-                    &g_state.mirrorFragmentPushData.back());
                 uint32_t contentQuery = UINT32_MAX;
                 if (timestampFrame && g_state.mirrorQueryPool &&
                     g_state.cmdBeginQuery && g_state.cmdEndQuery &&
@@ -4668,22 +4735,24 @@ void DrawMirrors(const VulkanRenderer::FinalBlitContext& context, SampledImage* 
                         BeginMirrorQueryCallback,
                         reinterpret_cast<void*>(static_cast<uintptr_t>(contentQuery) + 1u));
                 }
-                if (mirror.colorPassthrough) {
-                    draw->AddImage(texture, outputMinimum, outputMaximum, uv0, uv1, IM_COL32_WHITE);
-                } else if (mirror.gradientOutput && mirror.gradient.gradientStops.size() >= 2) {
-                    draw->AddImage(
-                        texture, outputMinimum, outputMaximum, uv0, uv1,
-                        IM_COL32_WHITE);
-                } else {
-                    const Color& color = mirror.colors.output;
-                    const ImU32 outputColor = ImGui::ColorConvertFloat4ToU32(
-                        // Keep vertex alpha nonzero so the draw (and therefore
-                        // its content query) is emitted even when the selected
-                        // output color is fully transparent. Shader outputA
-                        // carries the configured opacity.
-                        ImVec4(color.r, color.g, color.b, 1.0f));
-                    draw->AddImage(texture, outputMinimum, outputMaximum, uv0, uv1, outputColor);
-                }
+                AddToolscreenPipelineDraw(draw, pipeline, geometryPush, [&] {
+                    if (mirror.colorPassthrough) {
+                        draw->AddImage(texture, outputMinimum, outputMaximum, uv0, uv1, IM_COL32_WHITE);
+                    } else if (mirror.gradientOutput && mirror.gradient.gradientStops.size() >= 2) {
+                        draw->AddImage(
+                            texture, outputMinimum, outputMaximum, uv0, uv1,
+                            IM_COL32_WHITE);
+                    } else {
+                        const Color& color = mirror.colors.output;
+                        const ImU32 outputColor = ImGui::ColorConvertFloat4ToU32(
+                            // Keep vertex alpha nonzero so the draw (and therefore
+                            // its content query) is emitted even when the selected
+                            // output color is fully transparent. Shader outputA
+                            // carries the configured opacity.
+                            ImVec4(color.r, color.g, color.b, 1.0f));
+                        draw->AddImage(texture, outputMinimum, outputMaximum, uv0, uv1, outputColor);
+                    }
+                });
                 if (contentQuery != UINT32_MAX) {
                     draw->AddCallback(
                         EndMirrorQueryCallback,
@@ -4735,21 +4804,16 @@ void DrawMirrors(const VulkanRenderer::FinalBlitContext& context, SampledImage* 
                     static_cast<float>(quadWidth);
                 push.staticBorderQuadSize[1] =
                     static_cast<float>(quadHeight);
-                g_state.mirrorFragmentPushData.push_back(push);
-                draw->AddCallback(
-                    BindMirrorPipelineCallback,
-                    reinterpret_cast<void*>(borderPipeline));
-                draw->AddCallback(
-                    PushMirrorFragmentDataCallback,
-                    &g_state.mirrorFragmentPushData.back());
-                draw->AddImage(
-                    texture,
-                    ImVec2(static_cast<float>(quadX),
-                           static_cast<float>(quadY)),
-                    ImVec2(static_cast<float>(quadX + quadWidth),
-                           static_cast<float>(quadY + quadHeight)),
-                    ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f),
-                    IM_COL32_WHITE);
+                AddToolscreenPipelineDraw(draw, borderPipeline, push, [&] {
+                    draw->AddImage(
+                        texture,
+                        ImVec2(static_cast<float>(quadX),
+                               static_cast<float>(quadY)),
+                        ImVec2(static_cast<float>(quadX + quadWidth),
+                               static_cast<float>(quadY + quadHeight)),
+                        ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f),
+                        IM_COL32_WHITE);
+                });
                 draw->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
             }
         }
@@ -4871,21 +4935,21 @@ void DrawImages(
         const float rounding = image.border.enabled
             ? static_cast<float>((std::max)(0, image.border.radius))
             : 0.0f;
+        auto addImage = [&] {
+            if (rounding > 0.0f) {
+                draw->AddImageRounded(
+                    texture, minimum, maximum, uv0, uv1, tint, rounding);
+            } else {
+                draw->AddImage(texture, minimum, maximum, uv0, uv1, tint);
+            }
+        };
         const VkPipeline colorKeyPipeline =
             GetColorKeyPipeline(image.enableColorKey, image.colorKeys);
         if (colorKeyPipeline) {
-            draw->AddCallback(
-                BindMirrorPipelineCallback,
-                reinterpret_cast<void*>(colorKeyPipeline));
-        }
-        if (rounding > 0.0f) {
-            draw->AddImageRounded(
-                texture, minimum, maximum, uv0, uv1, tint, rounding);
-        } else {
-            draw->AddImage(texture, minimum, maximum, uv0, uv1, tint);
-        }
-        if (colorKeyPipeline) {
+            AddToolscreenPipelineDraw(draw, colorKeyPipeline, MirrorFragmentPushConstants{}, addImage);
             draw->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
+        } else {
+            addImage();
         }
 
         if (!asset.isFullyTransparent && image.border.enabled &&
@@ -5006,21 +5070,21 @@ void DrawBrowserOverlays(
         const float rounding = config->border.enabled
             ? static_cast<float>((std::max)(0, config->border.radius))
             : 0.0f;
+        auto addImage = [&] {
+            if (rounding > 0.0f) {
+                draw->AddImageRounded(
+                    texture, minimum, maximum, uv0, uv1, tint, rounding);
+            } else {
+                draw->AddImage(texture, minimum, maximum, uv0, uv1, tint);
+            }
+        };
         const VkPipeline colorKeyPipeline =
             GetColorKeyPipeline(config->enableColorKey, config->colorKeys);
         if (colorKeyPipeline) {
-            draw->AddCallback(
-                BindMirrorPipelineCallback,
-                reinterpret_cast<void*>(colorKeyPipeline));
-        }
-        if (rounding > 0.0f) {
-            draw->AddImageRounded(
-                texture, minimum, maximum, uv0, uv1, tint, rounding);
-        } else {
-            draw->AddImage(texture, minimum, maximum, uv0, uv1, tint);
-        }
-        if (colorKeyPipeline) {
+            AddToolscreenPipelineDraw(draw, colorKeyPipeline, MirrorFragmentPushConstants{}, addImage);
             draw->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
+        } else {
+            addImage();
         }
         if (config->border.enabled && config->border.width > 0) {
             const Color& border = config->border.color;
@@ -5142,21 +5206,21 @@ void DrawWindowOverlays(
         const float rounding = config->border.enabled
             ? static_cast<float>((std::max)(0, config->border.radius))
             : 0.0f;
+        auto addImage = [&] {
+            if (rounding > 0.0f) {
+                draw->AddImageRounded(
+                    texture, minimum, maximum, uv0, uv1, tint, rounding);
+            } else {
+                draw->AddImage(texture, minimum, maximum, uv0, uv1, tint);
+            }
+        };
         const VkPipeline colorKeyPipeline =
             GetColorKeyPipeline(config->enableColorKey, config->colorKeys);
         if (colorKeyPipeline) {
-            draw->AddCallback(
-                BindMirrorPipelineCallback,
-                reinterpret_cast<void*>(colorKeyPipeline));
-        }
-        if (rounding > 0.0f) {
-            draw->AddImageRounded(
-                texture, minimum, maximum, uv0, uv1, tint, rounding);
-        } else {
-            draw->AddImage(texture, minimum, maximum, uv0, uv1, tint);
-        }
-        if (colorKeyPipeline) {
+            AddToolscreenPipelineDraw(draw, colorKeyPipeline, MirrorFragmentPushConstants{}, addImage);
             draw->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
+        } else {
+            addImage();
         }
         if (config->border.enabled && config->border.width > 0) {
             const Color& border = config->border.color;
@@ -5776,63 +5840,61 @@ void DrawCursorVisuals(const VulkanRenderer::FinalBlitContext& context) {
                         frame->sampled.linearDescriptor));
             }
         }
-        VkPipeline trailPipeline = VK_NULL_HANDLE;
-        if (trail.blendMode == "Additive") {
-            trailPipeline = GetOverlayPipeline(
-                OverlaySpecialization{}, OverlayBlendMode::Additive);
-            if (trailPipeline) {
-                draw->AddCallback(
-                    BindMirrorPipelineCallback,
-                    reinterpret_cast<void*>(trailPipeline));
+        auto addStamps = [&] {
+            for (size_t i = 0; i < g_state.cursorTrailCount; ++i) {
+                const CursorTrailPoint& stamp =
+                    g_state.cursorTrailPoints[
+                        (g_state.cursorTrailStart + i) %
+                        g_state.cursorTrailPoints.size()];
+                const float age = std::clamp(
+                    static_cast<float>(nowMs - stamp.timeMs) /
+                        static_cast<float>((std::max)(1, trail.lifetimeMs)),
+                    0.0f, 1.0f);
+                const float headAmount = 1.0f - age;
+                const Color color = trail.useGradient
+                    ? Color{
+                          trail.tailColor.r +
+                              (trail.color.r - trail.tailColor.r) * headAmount,
+                          trail.tailColor.g +
+                              (trail.color.g - trail.tailColor.g) * headAmount,
+                          trail.tailColor.b +
+                              (trail.color.b - trail.tailColor.b) * headAmount,
+                          1.0f }
+                    : trail.color;
+                const float sizeScale =
+                    std::clamp(trail.tailSizeScale, 0.0f, 2.0f) +
+                    (1.0f -
+                     std::clamp(trail.tailSizeScale, 0.0f, 2.0f)) *
+                        headAmount;
+                const float radius =
+                    static_cast<float>((std::max)(1, trail.spriteSizePx)) *
+                    sizeScale * stamp.sizeBoost * 0.5f;
+                const ImU32 tint = ImGui::ColorConvertFloat4ToU32(ImVec4(
+                    color.r, color.g, color.b,
+                    std::clamp(trail.opacity, 0.0f, 1.0f) * headAmount));
+                if (trailTexture) {
+                    draw->AddImage(
+                        trailTexture,
+                        ImVec2(
+                            stamp.position.x - radius,
+                            stamp.position.y - radius),
+                        ImVec2(
+                            stamp.position.x + radius,
+                            stamp.position.y + radius),
+                        ImVec2(0.0f, 1.0f), ImVec2(1.0f, 0.0f), tint);
+                } else {
+                    draw->AddCircleFilled(stamp.position, radius, tint);
+                }
             }
-        }
-        for (size_t i = 0; i < g_state.cursorTrailCount; ++i) {
-            const CursorTrailPoint& stamp =
-                g_state.cursorTrailPoints[
-                    (g_state.cursorTrailStart + i) %
-                    g_state.cursorTrailPoints.size()];
-            const float age = std::clamp(
-                static_cast<float>(nowMs - stamp.timeMs) /
-                    static_cast<float>((std::max)(1, trail.lifetimeMs)),
-                0.0f, 1.0f);
-            const float headAmount = 1.0f - age;
-            const Color color = trail.useGradient
-                ? Color{
-                      trail.tailColor.r +
-                          (trail.color.r - trail.tailColor.r) * headAmount,
-                      trail.tailColor.g +
-                          (trail.color.g - trail.tailColor.g) * headAmount,
-                      trail.tailColor.b +
-                          (trail.color.b - trail.tailColor.b) * headAmount,
-                      1.0f }
-                : trail.color;
-            const float sizeScale =
-                std::clamp(trail.tailSizeScale, 0.0f, 2.0f) +
-                (1.0f -
-                 std::clamp(trail.tailSizeScale, 0.0f, 2.0f)) *
-                    headAmount;
-            const float radius =
-                static_cast<float>((std::max)(1, trail.spriteSizePx)) *
-                sizeScale * stamp.sizeBoost * 0.5f;
-            const ImU32 tint = ImGui::ColorConvertFloat4ToU32(ImVec4(
-                color.r, color.g, color.b,
-                std::clamp(trail.opacity, 0.0f, 1.0f) * headAmount));
-            if (trailTexture) {
-                draw->AddImage(
-                    trailTexture,
-                    ImVec2(
-                        stamp.position.x - radius,
-                        stamp.position.y - radius),
-                    ImVec2(
-                        stamp.position.x + radius,
-                        stamp.position.y + radius),
-                    ImVec2(0.0f, 1.0f), ImVec2(1.0f, 0.0f), tint);
-            } else {
-                draw->AddCircleFilled(stamp.position, radius, tint);
-            }
-        }
+        };
+        const VkPipeline trailPipeline = trail.blendMode == "Additive"
+            ? GetOverlayPipeline(OverlaySpecialization{}, OverlayBlendMode::Additive)
+            : VK_NULL_HANDLE;
         if (trailPipeline) {
+            AddToolscreenPipelineDraw(draw, trailPipeline, MirrorFragmentPushConstants{}, addStamps);
             draw->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
+        } else {
+            addStamps();
         }
     }
     if (!trail.enabled && !g_obsCompositionPass) {
@@ -5908,16 +5970,15 @@ void DrawCursorVisuals(const VulkanRenderer::FinalBlitContext& context) {
                 if (VkPipeline invertPipeline = GetOverlayPipeline(
                         OverlaySpecialization{},
                         OverlayBlendMode::Invert)) {
-                    draw->AddCallback(
-                        BindMirrorPipelineCallback,
-                        reinterpret_cast<void*>(invertPipeline));
-                    draw->AddImage(
-                        static_cast<ImTextureID>(
-                            reinterpret_cast<uintptr_t>(
-                                cursorInvertFrame->sampled.descriptor)),
-                        topLeft,
-                        ImVec2(topLeft.x + width, topLeft.y + height),
-                        ImVec2(0.0f, 1.0f), ImVec2(1.0f, 0.0f));
+                    AddToolscreenPipelineDraw(draw, invertPipeline, MirrorFragmentPushConstants{}, [&] {
+                        draw->AddImage(
+                            static_cast<ImTextureID>(
+                                reinterpret_cast<uintptr_t>(
+                                    cursorInvertFrame->sampled.descriptor)),
+                            topLeft,
+                            ImVec2(topLeft.x + width, topLeft.y + height),
+                            ImVec2(0.0f, 1.0f), ImVec2(1.0f, 0.0f));
+                    });
                     draw->AddCallback(
                         ImDrawCallback_ResetRenderState, nullptr);
                 }
@@ -6042,7 +6103,7 @@ void GenerateImGui(const VulkanRenderer::FinalBlitContext& context, SampledImage
     }
     ReleaseRetiredToolscreenAtlasTextures();
     ImGui::NewFrame();
-    g_state.mirrorFragmentPushData.clear();
+    g_state.pipelineDraws.clear();
     g_state.pickerTextureId = mirrorSource
         ? reinterpret_cast<uintptr_t>(mirrorSource->descriptor)
         : 0;
@@ -6830,7 +6891,9 @@ bool RecordVirtualCameraFrame(
 void RenderDrawDataWithoutTextureUpdates(ImDrawData* drawData, VkCommandBuffer commandBuffer) {
     ImVector<ImTextureData*>* textures = drawData->Textures;
     drawData->Textures = nullptr;
+    g_activeImGuiDrawData = drawData;
     ImGui_ImplVulkan_RenderDrawData(drawData, commandBuffer);
+    g_activeImGuiDrawData = nullptr;
     drawData->Textures = textures;
 }
 

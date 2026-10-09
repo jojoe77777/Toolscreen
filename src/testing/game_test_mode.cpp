@@ -255,6 +255,8 @@ constexpr const char* kTestMirrorMatchNone = "GameTestMirrorMatchNone";
 constexpr const char* kTestMirrorAdded = "GameTestMirrorAdded";
 constexpr const char* kTestMirrorOpaqueRealtime = "GameTestMirrorOpaqueRealtime";
 constexpr const char* kTestMirrorOpaqueLimited = "GameTestMirrorOpaqueLimited";
+constexpr const char* kTestMirrorStaticBorder = "GameTestMirrorStaticBorder";
+constexpr const char* kTestColorKeyOverlay = "GameTestColorKeyOverlay";
 
 void RemoveTestFixtureOnRenderThread() {
     std::erase_if(g_config.mirrors, [](const MirrorConfig& mirror) {
@@ -1069,6 +1071,118 @@ void TestVulkanMirrorsDrawGameOpaque() {
     }
 }
 
+// Static mirror borders and color-keyed overlays draw with Toolscreen's own pipelines, whose layout has a fragment
+// push-constant range that ImGui's lacks. Their texture and push constants must go through that layout, so the
+// presented frame must show the border in its configured color and the overlay with its keyed color removed.
+void TestVulkanToolscreenPipelineDraws() {
+    WaitUntil([] { return GetRenderBackend() != RenderBackend::Unknown; }, std::chrono::seconds(20));
+    if (GetRenderBackend() != RenderBackend::Vulkan) Skip("This reads back the Vulkan renderer's presented frame.");
+    Require(WaitForFrames(60, std::chrono::seconds(20)), "Frames stopped before the test started.");
+
+    const auto samplePresented = [](int x, int y, std::array<float, 4>& color) {
+        return WaitUntil([&] { return RunOnRenderThread([&] { return VulkanRenderer::TryGetPresentedPixelForTests(x, y, color); }); },
+                         std::chrono::seconds(3));
+    };
+    const auto rgbDistance = [](const std::array<float, 4>& a, const std::array<float, 4>& b) {
+        return (std::max)({ std::abs(a[0] - b[0]), std::abs(a[1] - b[1]), std::abs(a[2] - b[2]) });
+    };
+    const auto describe = [](const std::array<float, 4>& c) {
+        std::ostringstream out;
+        out << c[0] << "," << c[1] << "," << c[2] << "," << c[3];
+        return out.str();
+    };
+
+    // A 2x2 capture scaled to 32x32 at (40, 40), with a magenta static border 6 pixels thick around it.
+    constexpr int kMirrorX = 40, kMirrorY = 40, kMirrorSize = 32, kBorderThickness = 6;
+    // A 16x16 frame scaled to 64x64 at (120, 40): the left half is green, which the overlay keys out, the right red.
+    constexpr int kOverlayX = 120, kOverlayY = 40, kOverlayFrame = 16, kOverlayScale = 4;
+    constexpr int kOverlaySize = kOverlayFrame * kOverlayScale;
+    const std::array<float, 4> magenta{ 1.0f, 0.0f, 1.0f, 1.0f }, green{ 0.0f, 1.0f, 0.0f, 1.0f }, red{ 1.0f, 0.0f, 0.0f, 1.0f };
+    const int borderX = kMirrorX - kBorderThickness / 2, borderY = kMirrorY + kMirrorSize / 2;
+    const int keyedX = kOverlayX + kOverlaySize / 4, keptX = kOverlayX + kOverlaySize * 3 / 4, overlayY = kOverlayY + kOverlaySize / 2;
+
+    std::array<float, 4> underKeyed{};
+    Require(samplePresented(keyedX, overlayY, underKeyed), "Could not read the presented frame.");
+    if (rgbDistance(underKeyed, green) < 0.3f) Skip("The frame under the overlay is too close to the keyed green.");
+
+    WindowOverlayConfig overlay;
+    overlay.name = kTestColorKeyOverlay;
+    overlay.windowTitle = "Toolscreen game test window that does not exist";
+    overlay.x = kOverlayX;
+    overlay.y = kOverlayY;
+    overlay.scale = static_cast<float>(kOverlayScale);
+    overlay.pixelatedScaling = true;
+    overlay.enableColorKey = true;
+    overlay.colorKeys = { ColorKeyConfig{ Color{ 0.0f, 1.0f, 0.0f, 1.0f }, 0.05f } };
+    std::vector<unsigned char> pixels(static_cast<size_t>(kOverlayFrame) * kOverlayFrame * 4);
+    for (int y = 0; y < kOverlayFrame; ++y) {
+        for (int x = 0; x < kOverlayFrame; ++x) {
+            unsigned char* pixel = &pixels[(static_cast<size_t>(y) * kOverlayFrame + x) * 4];
+            pixel[0] = x < kOverlayFrame / 2 ? 0 : 255;
+            pixel[1] = x < kOverlayFrame / 2 ? 255 : 0;
+            pixel[2] = 0;
+            pixel[3] = 255;
+        }
+    }
+
+    const std::string modeId = GetPublishedCurrentModeId();
+    RunOnRenderThread([&] {
+        MirrorConfig mirror;
+        mirror.name = kTestMirrorStaticBorder;
+        mirror.captureWidth = 2;
+        mirror.captureHeight = 2;
+        mirror.rawOutput = true;
+        mirror.border.type = MirrorBorderType::Static;
+        mirror.border.staticThickness = kBorderThickness;
+        mirror.border.staticColor = Color{ 1.0f, 0.0f, 1.0f, 1.0f };
+        mirror.input.push_back(MirrorCaptureConfig{ 0, 0, "topLeftScreen" });
+        mirror.output.relativeTo = "topLeftScreen";
+        mirror.output.x = kMirrorX;
+        mirror.output.y = kMirrorY;
+        mirror.output.scale = static_cast<float>(kMirrorSize / 2);
+        AddMirrorToCurrentMode(std::move(mirror));
+        g_config.windowOverlays.push_back(overlay);
+        for (ModeConfig& mode : g_config.modes) {
+            if (EqualsIgnoreCase(mode.id, modeId)) mode.sources.push_back({ ModeSourceType::WindowOverlay, kTestColorKeyOverlay });
+        }
+        g_configIsDirty = true;
+        PublishGuiConfigSnapshot();
+    });
+    struct Cleanup {
+        ~Cleanup() {
+            try {
+                RunOnRenderThread([] {
+                    for (ModeConfig& mode : g_config.modes) {
+                        RemoveAllModeSources(mode, ModeSourceType::Mirror, kTestMirrorStaticBorder);
+                        RemoveAllModeSources(mode, ModeSourceType::WindowOverlay, kTestColorKeyOverlay);
+                    }
+                    std::erase_if(g_config.mirrors, [](const MirrorConfig& m) { return m.name == kTestMirrorStaticBorder; });
+                    std::erase_if(g_config.windowOverlays, [](const WindowOverlayConfig& o) { return o.name == kTestColorKeyOverlay; });
+                    g_configIsDirty = true;
+                    PublishGuiConfigSnapshot();
+                });
+            } catch (...) {}
+            RemoveWindowOverlayFromCache(kTestColorKeyOverlay);
+        }
+    } cleanup;
+    Require(StageWindowOverlayTestFrame(overlay, pixels, kOverlayFrame, kOverlayFrame), "Could not stage a window overlay frame.");
+    Require(WaitUntil([] { return RunOnRenderThread([] {
+                return VulkanRenderer::GetStreamingTextureStats(std::string("window:") + kTestColorKeyOverlay).slots > 0;
+            }); }, std::chrono::seconds(10)),
+            "The color-keyed overlay never got a streaming texture.");
+    Require(WaitForFrames(30, std::chrono::seconds(5)), "Frames stopped after adding the mirror and overlay.");
+
+    std::array<float, 4> border{}, keyed{}, kept{};
+    Require(samplePresented(borderX, borderY, border), "Could not read the presented frame at the mirror border.");
+    Require(samplePresented(keyedX, overlayY, keyed), "Could not read the presented frame at the keyed half of the overlay.");
+    Require(samplePresented(keptX, overlayY, kept), "Could not read the presented frame at the kept half of the overlay.");
+    Log("[GAME TEST] Toolscreen pipeline draws: border=" + describe(border) + " keyed=" + describe(keyed) + " over " +
+        describe(underKeyed) + " kept=" + describe(kept) + " in mode " + modeId);
+    Require(rgbDistance(border, magenta) < 0.03f, "The static mirror border showed " + describe(border) + " instead of magenta.");
+    Require(rgbDistance(keyed, green) > 0.3f, "The overlay's keyed green half was drawn (" + describe(keyed) + ").");
+    Require(rgbDistance(kept, red) < 0.03f, "The overlay's red half showed " + describe(kept) + " instead of red.");
+}
+
 // Manual check, skipped unless TOOLSCREEN_GAME_TEST_SCREENSHOT_DIR is set: switches to EyeZoom and saves the presented
 // frame as <dir>\<TOOLSCREEN_GAME_TEST_SCREENSHOT_TAG>.bmp. Reads the frame from the Vulkan renderer, so other windows
 // and focus do not matter. With TOOLSCREEN_GAME_TEST_SCREENSHOT_SLIDE_OUT set it leaves EyeZoom with a slide transition
@@ -1772,6 +1886,7 @@ const TestCase kTests[] = {
     { "vulkan.mirror_content_detection", &TestVulkanMirrorContentDetection },
     { "mirror.add_to_current_mode", &TestAddMirrorToCurrentMode },
     { "vulkan.mirrors_draw_game_opaque", &TestVulkanMirrorsDrawGameOpaque },
+    { "vulkan.toolscreen_pipeline_draws", &TestVulkanToolscreenPipelineDraws },
     { "manual.eyezoom_screenshots", &TestEyeZoomScreenshots },
     { "config.save_round_trip", &TestConfigSaveRoundTrip },
     { "config.load_error_screen", &TestConfigLoadErrorScreen },
