@@ -1131,7 +1131,6 @@ void SubmitFrameCapture(GLuint gameTexture, int width, int height) {
     glDisable(GL_DITHER);
     if (hasFramebufferSRGB) { glDisable(GL_FRAMEBUFFER_SRGB); }
 
-    // Only resize the WRITE texture, not the read texture that other threads may be using
     int writeIndex = g_copyTextureWriteIndex.load(std::memory_order_acquire);
     bool dimensionsChanged = (width != g_copyTextureW || height != g_copyTextureH);
 
@@ -1154,15 +1153,9 @@ void SubmitFrameCapture(GLuint gameTexture, int width, int height) {
         }
         BindTextureDirect(GL_TEXTURE_2D, 0);
 
-        // Use fence + flush instead of glFinish() to avoid blocking the game thread.
-        // cause visible hitches on some GPU/driver combinations (especially iGPUs).
-        // A fence only waits for the texture reallocation commands specifically.
-        GLsync resizeFence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
-        glFlush(); // Ensure fence and resize commands are submitted to GPU
-        if (resizeFence) {
-            glClientWaitSync(resizeFence, GL_SYNC_FLUSH_COMMANDS_BIT, 500000000ULL);
-            if (glIsSync(resizeFence)) { glDeleteSync(resizeFence); }
-        }
+        // No CPU wait here: every reader of these textures uses the game's own context, which orders the
+        // reallocation before the blit below. A fence would wait for the whole frame queued before it, the first one
+        // at the new size, and stall the game on every resize, such as an EyeZoom toggle while OBS captures it.
 
         g_copyTextureW = width;
         g_copyTextureH = height;
