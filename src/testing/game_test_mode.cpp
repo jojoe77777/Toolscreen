@@ -280,6 +280,12 @@ bool SwitchModeOnRenderThread(const std::string& modeId) {
     return RunOnRenderThread([modeId] { return SwitchToMode(modeId, "game test", true); });
 }
 
+// Like SwitchModeOnRenderThread, but plays the configured transition instead of forcing a cut.
+bool SlideToModeOnRenderThread(const std::string& modeId) {
+    if (EqualsIgnoreCase(GetPublishedCurrentModeId(), modeId)) return true;
+    return RunOnRenderThread([modeId] { return SwitchToMode(modeId, "game test", false); });
+}
+
 bool WaitForPublishedMode(const std::string& modeId, std::chrono::milliseconds timeout) {
     return WaitUntil([&] { return EqualsIgnoreCase(GetPublishedCurrentModeId(), modeId); }, timeout);
 }
@@ -465,21 +471,39 @@ void TestEyeZoomRendersAndSwitches() {
     Require(WaitForFrames(60, std::chrono::seconds(10)), "Frames stopped after rapid EyeZoom toggling.");
 }
 
-// Sets the game transition of the named modes and publishes the config. Returns the previous values. Render thread only.
-std::vector<std::pair<std::string, GameTransitionType>> SetGameTransitionsOnRenderThread(
-    const std::vector<std::pair<std::string, GameTransitionType>>& transitions) {
-    std::vector<std::pair<std::string, GameTransitionType>> previous;
-    for (const auto& [modeId, type] : transitions) {
+struct ModeTransitionSetting {
+    std::string modeId;
+    GameTransitionType gameTransition = GameTransitionType::Cut;
+    int durationMs = 0;
+};
+
+// Sets the game transition and its duration of the named modes and publishes the config. Returns the previous values.
+// Render thread only.
+std::vector<ModeTransitionSetting> SetGameTransitionsOnRenderThread(const std::vector<ModeTransitionSetting>& transitions) {
+    std::vector<ModeTransitionSetting> previous;
+    for (const ModeTransitionSetting& setting : transitions) {
         for (ModeConfig& mode : g_config.modes) {
-            if (!EqualsIgnoreCase(mode.id, modeId)) continue;
-            previous.emplace_back(mode.id, mode.gameTransition);
-            mode.gameTransition = type;
+            if (!EqualsIgnoreCase(mode.id, setting.modeId)) continue;
+            previous.push_back({ mode.id, mode.gameTransition, mode.transitionDurationMs });
+            mode.gameTransition = setting.gameTransition;
+            mode.transitionDurationMs = setting.durationMs;
         }
     }
     g_configIsDirty = true;
     PublishGuiConfigSnapshot();
     return previous;
 }
+
+// Restores transitions changed by SetGameTransitionsOnRenderThread when it goes out of scope.
+struct RestoreGameTransitions {
+    std::vector<ModeTransitionSetting> values;
+    ~RestoreGameTransitions() {
+        if (values.empty()) return;
+        try {
+            RunOnRenderThread([values = values] { SetGameTransitionsOnRenderThread(values); });
+        } catch (...) {}
+    }
+};
 
 // A slide (Bounce) transition out of EyeZoom keeps drawing the zoom from a frozen snapshot while the game resizes.
 void TestEyeZoomSlideTransitions() {
@@ -493,42 +517,75 @@ void TestEyeZoomSlideTransitions() {
     Require(SwitchModeOnRenderThread(defaultMode), "Could not start from the default mode.");
     Require(WaitForPublishedMode(defaultMode, std::chrono::seconds(5)), "The default mode was not published.");
 
-    const auto previous = RunOnRenderThread([defaultMode] {
-        return SetGameTransitionsOnRenderThread({ { defaultMode, GameTransitionType::Bounce }, { "EyeZoom", GameTransitionType::Bounce } });
+    // On Vulkan the slide out draws from a snapshot of the area EyeZoom magnifies, kept only while a slide can use it.
+    const bool vulkan = GetRenderBackend() == RenderBackend::Vulkan;
+    const auto snapshotStats = [] { return RunOnRenderThread([] { return VulkanRenderer::GetEyeZoomSnapshotStatsForTests(); }); };
+    const bool configSlidesOut = std::any_of(snapshot->modes.begin(), snapshot->modes.end(), [](const ModeConfig& mode) {
+        return !EqualsIgnoreCase(mode.id, "EyeZoom") && mode.gameTransition == GameTransitionType::Bounce;
     });
-    struct RestoreTransitions {
-        std::vector<std::pair<std::string, GameTransitionType>> values;
-        ~RestoreTransitions() {
-            try {
-                RunOnRenderThread([this] { SetGameTransitionsOnRenderThread(values); });
-            } catch (...) {}
-        }
-    } restore{ previous };
+    if (vulkan && !configSlidesOut) {
+        Require(SwitchModeOnRenderThread("EyeZoom"), "SwitchToMode refused EyeZoom with Cut transitions.");
+        Require(WaitForPublishedMode("EyeZoom", std::chrono::seconds(5)), "EyeZoom was not published with Cut transitions.");
+        Require(WaitUntil([] { return g_showEyeZoom.load(std::memory_order_acquire); }, std::chrono::seconds(5)),
+                "EyeZoom never showed with Cut transitions.");
+        Require(WaitForFrames(20, std::chrono::seconds(5)), "Frames stopped in EyeZoom with Cut transitions.");
+        const VulkanRenderer::EyeZoomSnapshotStats stats = snapshotStats();
+        Require(stats.allocatedSlots == 0, "EyeZoom kept " + std::to_string(stats.allocatedSlots) +
+                                               " snapshot images although no transition can slide it out.");
+        Require(SwitchModeOnRenderThread(defaultMode), "SwitchToMode refused the default mode after Cut EyeZoom.");
+        Require(WaitForPublishedMode(defaultMode, std::chrono::seconds(5)), "The default mode was not published after Cut EyeZoom.");
+    }
+    const ModeConfig* eyeZoomMode = GetModeFromSnapshotOrFallback(*snapshot, "EyeZoom");
+    const int cloneW = std::clamp(snapshot->eyezoom.cloneWidth, 1, (std::max)(1, eyeZoomMode ? eyeZoomMode->width : 1));
+    const int cloneH = std::clamp(snapshot->eyezoom.cloneHeight, 1, (std::max)(1, eyeZoomMode ? eyeZoomMode->height : 1));
 
-    // Full slide in and out, three times.
+    // Long enough that the game renders frames at the new size before the slide ends, even when it lags.
+    constexpr int kSlideMs = 600;
+    RestoreGameTransitions restore;
+    restore.values = RunOnRenderThread([defaultMode] {
+        return SetGameTransitionsOnRenderThread(
+            { { defaultMode, GameTransitionType::Bounce, kSlideMs }, { "EyeZoom", GameTransitionType::Bounce, kSlideMs } });
+    });
+
+    // Full slide in and out, three times. Test switches are cuts unless they ask for the configured transition.
     bool sawSlideOut = false;
     for (int round = 0; round < 3; ++round) {
-        Require(SwitchModeOnRenderThread("EyeZoom"), "SwitchToMode refused EyeZoom (round " + std::to_string(round) + ").");
+        Require(SlideToModeOnRenderThread("EyeZoom"), "SwitchToMode refused EyeZoom (round " + std::to_string(round) + ").");
         Require(WaitUntil([] { return g_showEyeZoom.load(std::memory_order_acquire); }, std::chrono::seconds(5)),
                 "EyeZoom never showed with a slide transition (round " + std::to_string(round) + ").");
         Require(WaitUntil([] { return !IsModeTransitionActive(); }, std::chrono::seconds(5)),
                 "The slide into EyeZoom never finished (round " + std::to_string(round) + ").");
         Require(WaitForFrames(20, std::chrono::seconds(5)), "Frames stopped in EyeZoom after a slide in.");
+        if (vulkan) {
+            const VulkanRenderer::EyeZoomSnapshotStats stats = snapshotStats();
+            Require(stats.latestWidth == cloneW && stats.latestHeight == cloneH,
+                    "The EyeZoom snapshot is " + std::to_string(stats.latestWidth) + "x" + std::to_string(stats.latestHeight) +
+                        " instead of the " + std::to_string(cloneW) + "x" + std::to_string(cloneH) + " area EyeZoom magnifies.");
+        }
 
-        Require(SwitchModeOnRenderThread(defaultMode), "SwitchToMode refused the default mode (round " + std::to_string(round) + ").");
+        const uint64_t snapshotFramesBefore = vulkan ? snapshotStats().framesShown : 0;
+        Require(SlideToModeOnRenderThread(defaultMode), "SwitchToMode refused the default mode (round " + std::to_string(round) + ").");
         sawSlideOut |= WaitUntil([] { return g_isTransitioningFromEyeZoom.load(std::memory_order_acquire); }, std::chrono::seconds(2));
         Require(WaitUntil([] { return !IsModeTransitionActive() && !g_isTransitioningFromEyeZoom.load(std::memory_order_acquire) &&
                                       !g_showEyeZoom.load(std::memory_order_acquire); },
                           std::chrono::seconds(5)),
                 "The slide out of EyeZoom never finished (round " + std::to_string(round) + ").");
         Require(WaitForFrames(20, std::chrono::seconds(5)), "Frames stopped after a slide out of EyeZoom.");
+        if (vulkan) {
+            // The small images stay for the next entry, but no frame of this one may show in a later slide.
+            const VulkanRenderer::EyeZoomSnapshotStats stats = snapshotStats();
+            Require(stats.framesShown > snapshotFramesBefore,
+                    "The slide out of EyeZoom never used the EyeZoom snapshot (round " + std::to_string(round) + ").");
+            Require(stats.allocatedSlots > 0, "The EyeZoom snapshot images were freed on leaving EyeZoom.");
+            Require(stats.latestWidth == 0, "The EyeZoom snapshot still offers a frame after EyeZoom ended.");
+        }
     }
     Require(sawSlideOut, "Leaving EyeZoom with a slide transition never reported the EyeZoom exit transition.");
 
     // Reverse each slide part-way through, so a new transition starts while the frozen snapshot is still in use.
     for (int i = 0; i < 20; ++i) {
         const std::string target = (i % 2 == 0) ? std::string("EyeZoom") : defaultMode;
-        Require(SwitchModeOnRenderThread(target), "SwitchToMode refused " + target + " mid-slide (step " + std::to_string(i) + ").");
+        Require(SlideToModeOnRenderThread(target), "SwitchToMode refused " + target + " mid-slide (step " + std::to_string(i) + ").");
         Require(WaitForFrames(static_cast<uint64_t>(2 + i % 5), std::chrono::seconds(5)),
                 "Frames stopped while reversing slides (step " + std::to_string(i) + ").");
     }

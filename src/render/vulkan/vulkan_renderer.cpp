@@ -53,7 +53,6 @@ constexpr uint32_t kObsCompositionSlotCount = 4;
 constexpr VkDeviceSize kPickerReadbackStride = 16;
 // The presented-pixel test readback shares each frame's picker slot; a pixel is at most 8 bytes.
 constexpr VkDeviceSize kPresentedReadbackOffset = 8;
-constexpr int kEyeZoomSnapshotFpsKey = 9999;
 constexpr const char* kRebindIndicatorEnabledTextureId =
     "__vulkan_rebind_indicator_enabled";
 constexpr const char* kRebindIndicatorDisabledTextureId =
@@ -430,6 +429,11 @@ struct RendererState {
     std::unordered_map<VkImage, SampledImage> sourceImageResources;
     std::unordered_map<VkImage, MirrorCopyImage> mirrorCopyImages;
     std::unordered_map<int, MirrorSnapshotState> mirrorSnapshots;
+    // The area EyeZoom magnifies in its last frame, for the slide out of EyeZoom. Its slots are only that area, so
+    // they stay allocated across EyeZoom exits.
+    MirrorSnapshotState eyeZoomSnapshot;
+    // Frames that chose eyeZoomSnapshot as EyeZoom's source, for the in-game tests.
+    uint64_t eyeZoomSnapshotFramesShown = 0;
     std::vector<RetiredMirrorSnapshot> retiredMirrorSnapshots;
     std::unordered_map<std::string, TextureAsset> textureAssets;
     // Bundled GUI icons already handed to the decode queue but not yet uploaded.
@@ -1923,6 +1927,93 @@ bool CanCopyPreparedMirrorSource(
     return (context.sourceMetadata->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0;
 }
 
+// Copies metadata.extent texels at sourceOffset of the prepared game image into a free slot of state, making the slot's
+// image match metadata first. Returns false when every slot is still in flight or the image cannot be created.
+bool RecordSnapshotCopy(
+    const VulkanRenderer::FinalBlitContext& context, SampledImage* sampled,
+    VkImageLayout sampleLayout, MirrorSnapshotState& state,
+    const ImageMetadata& metadata, VkOffset3D sourceOffset,
+    TimestampFrame* timestampFrame) {
+    size_t writableSlot = std::numeric_limits<size_t>::max();
+    for (size_t i = 0; i < state.slots.size(); ++i) {
+        if (state.slots[i].pendingFrameMask == 0) {
+            writableSlot = i;
+            break;
+        }
+    }
+    if (writableSlot == std::numeric_limits<size_t>::max()) {
+        // Every slot is referenced by an actual in-flight Minecraft frame.
+        return false;
+    }
+
+    MirrorSnapshotSlot& destination = state.slots[writableSlot];
+    if (destination.image.sampled.image &&
+        !MirrorCopyMatches(destination.image, metadata)) {
+        DestroyMirrorCopyImage(destination.image);
+    }
+    if (!destination.image.sampled.image &&
+        !CreateMirrorCopyImage(metadata, destination.image)) {
+        return false;
+    }
+
+    const VkImageLayout preparedLayout =
+        sampleLayout != VK_IMAGE_LAYOUT_UNDEFINED
+            ? sampleLayout
+            : sampled->descriptorLayout;
+    VkImageMemoryBarrier sourceToTransfer = MakeBarrier(
+        sampled->image, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+        preparedLayout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    VkImageMemoryBarrier destinationToTransfer = MakeBarrier(
+        destination.image.sampled.image,
+        destination.image.initialized ? VK_ACCESS_SHADER_READ_BIT : VK_ACCESS_NONE,
+        VK_ACCESS_TRANSFER_WRITE_BIT,
+        destination.image.initialized
+            ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+            : VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    const VkImageMemoryBarrier toTransfer[] = {
+        sourceToTransfer, destinationToTransfer
+    };
+    g_state.dispatch.cmdPipelineBarrier(
+        context.commandBuffer, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr,
+        static_cast<uint32_t>(std::size(toTransfer)), toTransfer);
+
+    VkImageCopy copy{};
+    copy.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    copy.srcSubresource.layerCount = 1;
+    copy.srcOffset = sourceOffset;
+    copy.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    copy.dstSubresource.layerCount = 1;
+    copy.extent = metadata.extent;
+    g_state.cmdCopyImage(
+        context.commandBuffer, sampled->image,
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        destination.image.sampled.image,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+
+    VkImageMemoryBarrier sourceToShader = MakeBarrier(
+        sampled->image, VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT,
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, preparedLayout);
+    VkImageMemoryBarrier destinationToShader = MakeBarrier(
+        destination.image.sampled.image, VK_ACCESS_TRANSFER_WRITE_BIT,
+        VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    const VkImageMemoryBarrier toShader[] = {
+        sourceToShader, destinationToShader
+    };
+    g_state.dispatch.cmdPipelineBarrier(
+        context.commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr,
+        static_cast<uint32_t>(std::size(toShader)), toShader);
+
+    destination.image.initialized = true;
+    // The copy runs in this frame even when nothing samples the slot this frame, so keep the slot until it completes.
+    destination.pendingFrameMask |= TimestampFrameBit(timestampFrame);
+    state.latestSlot = writableSlot;
+    return true;
+}
+
 bool UpdateMirrorSnapshot(
     const VulkanRenderer::FinalBlitContext& context, SampledImage* sampled,
     VkImageLayout sampleLayout, int fps, TimestampFrame* timestampFrame) {
@@ -1955,83 +2046,12 @@ bool UpdateMirrorSnapshot(
             now - state.lastUpdate).count() >= (1000 / (std::max)(1, fps));
     if (!updateDue) return true;
 
-    size_t writableSlot = std::numeric_limits<size_t>::max();
-    for (size_t i = 0; i < state.slots.size(); ++i) {
-        if (state.slots[i].pendingFrameMask == 0) {
-            writableSlot = i;
-            break;
-        }
-    }
-    if (writableSlot == std::numeric_limits<size_t>::max()) {
-        // Every slot is referenced by an actual in-flight Minecraft frame.
+    if (!RecordSnapshotCopy(
+            context, sampled, sampleLayout, state, *context.sourceMetadata,
+            VkOffset3D{}, timestampFrame)) {
         // Retain the previous snapshot and try again next frame.
         return initialized;
     }
-
-    MirrorSnapshotSlot& destination = state.slots[writableSlot];
-    if (destination.image.sampled.image &&
-        !MirrorCopyMatches(destination.image, *context.sourceMetadata)) {
-        DestroyMirrorCopyImage(destination.image);
-    }
-    if (!destination.image.sampled.image &&
-        !CreateMirrorCopyImage(*context.sourceMetadata, destination.image)) {
-        return initialized;
-    }
-
-    const VkImageLayout preparedLayout =
-        sampleLayout != VK_IMAGE_LAYOUT_UNDEFINED
-            ? sampleLayout
-            : sampled->descriptorLayout;
-    VkImageMemoryBarrier sourceToTransfer = MakeBarrier(
-        sampled->image, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT,
-        preparedLayout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-    VkImageMemoryBarrier destinationToTransfer = MakeBarrier(
-        destination.image.sampled.image,
-        destination.image.initialized ? VK_ACCESS_SHADER_READ_BIT : VK_ACCESS_NONE,
-        VK_ACCESS_TRANSFER_WRITE_BIT,
-        destination.image.initialized
-            ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-            : VK_IMAGE_LAYOUT_UNDEFINED,
-        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-    const VkImageMemoryBarrier toTransfer[] = {
-        sourceToTransfer, destinationToTransfer
-    };
-    g_state.dispatch.cmdPipelineBarrier(
-        context.commandBuffer, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-        VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr,
-        static_cast<uint32_t>(std::size(toTransfer)), toTransfer);
-
-    VkImageCopy copy{};
-    copy.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    copy.srcSubresource.layerCount = 1;
-    copy.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    copy.dstSubresource.layerCount = 1;
-    copy.extent = context.sourceMetadata->extent;
-    g_state.cmdCopyImage(
-        context.commandBuffer, sampled->image,
-        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        destination.image.sampled.image,
-        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
-
-    VkImageMemoryBarrier sourceToShader = MakeBarrier(
-        sampled->image, VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT,
-        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, preparedLayout);
-    VkImageMemoryBarrier destinationToShader = MakeBarrier(
-        destination.image.sampled.image, VK_ACCESS_TRANSFER_WRITE_BIT,
-        VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    const VkImageMemoryBarrier toShader[] = {
-        sourceToShader, destinationToShader
-    };
-    g_state.dispatch.cmdPipelineBarrier(
-        context.commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
-        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr,
-        static_cast<uint32_t>(std::size(toShader)), toShader);
-
-    destination.image.initialized = true;
-    // The copy runs in this frame even when nothing samples the slot this frame, so keep the slot until it completes.
-    destination.pendingFrameMask |= TimestampFrameBit(timestampFrame);
-    state.latestSlot = writableSlot;
     state.lastUpdate = now;
     return true;
 }
@@ -2094,51 +2114,98 @@ void PublishEyeZoomFrameState() {
         isTransitioningFromEyeZoom, std::memory_order_release);
 }
 
-SampledImage* PrepareEyeZoomSource(
+// What DrawEyeZoom magnifies: the live game image, or the snapshot of the last EyeZoom frame, which holds only the
+// magnified area.
+struct EyeZoomSource {
+    SampledImage* image = nullptr;
+    // The magnified texels of image, and the size of image.
+    VkRect2D area{};
+    VkExtent2D extent{};
+};
+
+// The texels of a width x height game image that EyeZoom magnifies: cloneWidth x cloneHeight around the centre. The game
+// image is stored bottom row first, so the zoom's top edge is the area's last row.
+VkRect2D EyeZoomCloneArea(const EyeZoomConfig& zoom, int width, int height) {
+    const int cloneW = std::clamp(zoom.cloneWidth, 1, width);
+    const int cloneH = std::clamp(zoom.cloneHeight, 1, height);
+    const int captureX = (width - cloneW) / 2;
+    const int captureY = (height - cloneH) / 2;
+    VkRect2D area{};
+    area.offset = { captureX, height - captureY - cloneH };
+    area.extent = { static_cast<uint32_t>(cloneW), static_cast<uint32_t>(cloneH) };
+    return area;
+}
+
+// The slide out of EyeZoom is the snapshot's only reader, and leaving EyeZoom slides only when the target mode's game
+// transition is Bounce.
+bool EyeZoomExitCanSlide() {
+    if (!g_state.configSnapshot) return false;
+    const std::vector<ModeConfig>& modes = g_state.configSnapshot->modes;
+    return std::any_of(modes.begin(), modes.end(), [](const ModeConfig& mode) {
+        return !EqualsIgnoreCase(mode.id, "EyeZoom") &&
+               mode.gameTransition == GameTransitionType::Bounce;
+    });
+}
+
+EyeZoomSource PrepareEyeZoomSource(
     const VulkanRenderer::FinalBlitContext& context, SampledImage* realtime,
     VkImageLayout sampleLayout, TimestampFrame* timestampFrame) {
+    EyeZoomSource live;
+    if (realtime && context.sourceMetadata && g_state.configSnapshot &&
+        context.sourceMetadata->extent.width > 0 &&
+        context.sourceMetadata->extent.height > 0) {
+        live.image = realtime;
+        live.extent = {
+            context.sourceMetadata->extent.width,
+            context.sourceMetadata->extent.height };
+        live.area = EyeZoomCloneArea(
+            g_state.configSnapshot->eyezoom,
+            static_cast<int>(live.extent.width),
+            static_cast<int>(live.extent.height));
+    }
     const bool showEyeZoom =
         g_showEyeZoom.load(std::memory_order_acquire);
     const bool transitioningFromEyeZoom =
         g_isTransitioningFromEyeZoom.load(std::memory_order_acquire);
-    auto snapshotIt =
-        g_state.mirrorSnapshots.find(kEyeZoomSnapshotFpsKey);
+    MirrorSnapshotState& state = g_state.eyeZoomSnapshot;
 
     if (!showEyeZoom && !transitioningFromEyeZoom) {
-        if (snapshotIt != g_state.mirrorSnapshots.end()) {
-            RetireMirrorSnapshotState(snapshotIt->second);
-            g_state.mirrorSnapshots.erase(snapshotIt);
-        }
-        return realtime;
+        // Keep the slots for the next EyeZoom entry, but never slide out with a frame from an earlier one.
+        state.latestSlot = std::numeric_limits<size_t>::max();
+        return live;
     }
 
-    if (!transitioningFromEyeZoom && realtime && timestampFrame) {
-        UpdateMirrorSnapshot(
-            context, realtime, sampleLayout, kEyeZoomSnapshotFpsKey,
-            timestampFrame);
-        snapshotIt =
-            g_state.mirrorSnapshots.find(kEyeZoomSnapshotFpsKey);
-        if (snapshotIt != g_state.mirrorSnapshots.end() &&
-            snapshotIt->second.latestSlot !=
-                std::numeric_limits<size_t>::max()) {
-            snapshotIt->second
-                .slots[snapshotIt->second.latestSlot]
-                .pendingFrameMask |= TimestampFrameBit(timestampFrame);
+    if (!transitioningFromEyeZoom) {
+        if (live.image && timestampFrame && EyeZoomExitCanSlide() &&
+            CanCopyPreparedMirrorSource(context, realtime)) {
+            const size_t requiredSlots =
+                static_cast<size_t>(g_state.activeTimestampFrames) + 1;
+            if (state.slots.size() < requiredSlots) {
+                state.slots.resize(requiredSlots);
+            }
+            ImageMetadata metadata = *context.sourceMetadata;
+            metadata.extent = { live.area.extent.width, live.area.extent.height, 1 };
+            RecordSnapshotCopy(
+                context, realtime, sampleLayout, state, metadata,
+                VkOffset3D{ live.area.offset.x, live.area.offset.y, 0 },
+                timestampFrame);
         }
-        return realtime;
+        return live;
     }
 
-    if (snapshotIt == g_state.mirrorSnapshots.end() ||
-        snapshotIt->second.latestSlot ==
-            std::numeric_limits<size_t>::max() ||
+    if (state.latestSlot == std::numeric_limits<size_t>::max() ||
         !timestampFrame) {
-        return realtime;
+        return live;
     }
-    MirrorSnapshotSlot& snapshot =
-        snapshotIt->second.slots[snapshotIt->second.latestSlot];
-    if (!snapshot.image.initialized) return realtime;
+    MirrorSnapshotSlot& snapshot = state.slots[state.latestSlot];
+    if (!snapshot.image.initialized) return live;
     snapshot.pendingFrameMask |= TimestampFrameBit(timestampFrame);
-    return &snapshot.image.sampled;
+    ++g_state.eyeZoomSnapshotFramesShown;
+    EyeZoomSource frozen;
+    frozen.image = &snapshot.image.sampled;
+    frozen.extent = { snapshot.image.extent.width, snapshot.image.extent.height };
+    frozen.area.extent = frozen.extent;
+    return frozen;
 }
 
 SampledImage* ResolveMirrorSample(
@@ -3200,6 +3267,9 @@ void HarvestTimestamps() {
                     slot.pendingFrameMask &= ~completedFrameBit;
                 }
             }
+            for (MirrorSnapshotSlot& slot : g_state.eyeZoomSnapshot.slots) {
+                slot.pendingFrameMask &= ~completedFrameBit;
+            }
             for (RetiredMirrorSnapshot& retired :
                  g_state.retiredMirrorSnapshots) {
                 retired.pendingFrameMask &= ~completedFrameBit;
@@ -3737,11 +3807,7 @@ void RefreshModeCache(int screenW, int screenH, int sourceW, int sourceH) {
                 return !MirrorUsesEveryFrameUpdates(mirror.fps) &&
                        mirror.fps == it->first;
             });
-        const bool retainedEyeZoomSnapshot =
-            it->first == kEyeZoomSnapshotFpsKey &&
-            (g_showEyeZoom.load(std::memory_order_acquire) ||
-             g_isTransitioningFromEyeZoom.load(std::memory_order_acquire));
-        if (stillActive || retainedEyeZoomSnapshot) {
+        if (stillActive) {
             ++it;
         } else {
             RetireMirrorSnapshotState(it->second);
@@ -5104,7 +5170,7 @@ void DrawWindowOverlays(
 }
 
 void DrawEyeZoom(
-    const VulkanRenderer::FinalBlitContext& context, SampledImage* source) {
+    const VulkanRenderer::FinalBlitContext& context, const EyeZoomSource& source) {
     PROFILE_SCOPE_CAT("Vulkan EyeZoom", "Vulkan");
     const bool showEyeZoom =
         g_showEyeZoom.load(std::memory_order_acquire);
@@ -5115,15 +5181,13 @@ void DrawEyeZoom(
     const bool transitioningFromEyeZoom =
         animationsVisible &&
         g_isTransitioningFromEyeZoom.load(std::memory_order_acquire);
-    if (!source || !context.sourceMetadata || !g_state.configSnapshot ||
+    if (!source.image || !g_state.configSnapshot ||
         (!showEyeZoom && !transitioningFromEyeZoom)) {
         return;
     }
     const EyeZoomConfig& zoom = g_state.configSnapshot->eyezoom;
     const int screenW = static_cast<int>(context.swapchain->extent.width);
     const int screenH = static_cast<int>(context.swapchain->extent.height);
-    const int sourceW = static_cast<int>(context.sourceMetadata->extent.width);
-    const int sourceH = static_cast<int>(context.sourceMetadata->extent.height);
     const int targetViewportX =
         (std::max)(0, (screenW - zoom.windowWidth) / 2);
     int outputW = 0;
@@ -5166,24 +5230,24 @@ void DrawEyeZoom(
         g_eyeZoomFadeOpacity.load(std::memory_order_acquire), 0.0f, 1.0f);
     if (opacity <= 0.0f) return;
 
-    const int cloneW = std::clamp(zoom.cloneWidth, 1, sourceW);
-    const int cloneH = std::clamp(zoom.cloneHeight, 1, sourceH);
-    const int captureX = (sourceW - cloneW) / 2;
-    const int captureY = (sourceH - cloneH) / 2;
+    // The grid labels the magnified texels, which the snapshot keeps even when the live image has another size.
+    const int cloneW = static_cast<int>(source.area.extent.width);
+    const float imageW = static_cast<float>(source.extent.width);
+    const float imageH = static_cast<float>(source.extent.height);
     const ImVec2 minimum(
         static_cast<float>(outputX), static_cast<float>(finalY));
     const ImVec2 maximum(
         static_cast<float>(outputX + outputW),
         static_cast<float>(finalY + outputH));
+    // The image is stored bottom row first, so the zoom's top edge samples the area's last row.
     const ImVec2 uv0(
-        static_cast<float>(captureX) / static_cast<float>(sourceW),
-        1.0f - static_cast<float>(captureY) / static_cast<float>(sourceH));
+        static_cast<float>(source.area.offset.x) / imageW,
+        static_cast<float>(source.area.offset.y + static_cast<int>(source.area.extent.height)) / imageH);
     const ImVec2 uv1(
-        static_cast<float>(captureX + cloneW) / static_cast<float>(sourceW),
-        1.0f -
-            static_cast<float>(captureY + cloneH) / static_cast<float>(sourceH));
+        static_cast<float>(source.area.offset.x + cloneW) / imageW,
+        static_cast<float>(source.area.offset.y) / imageH);
     const ImTextureID texture = static_cast<ImTextureID>(
-        reinterpret_cast<uintptr_t>(source->descriptor));
+        reinterpret_cast<uintptr_t>(source.image->descriptor));
     ImDrawList* draw = ImGui::GetBackgroundDrawList();
     draw->AddImage(
         texture, minimum, maximum, uv0, uv1,
@@ -5946,7 +6010,7 @@ void ReleaseRetiredToolscreenAtlasTextures() {
 }
 
 void GenerateImGui(const VulkanRenderer::FinalBlitContext& context, SampledImage* mirrorSource,
-                    SampledImage* eyeZoomSource,
+                    const EyeZoomSource& eyeZoomSource,
                     TimestampFrame* timestampFrame) {
     PROFILE_SCOPE_CAT("Vulkan ImGui generation", "Vulkan");
     const bool obsPass = g_obsCompositionPass;
@@ -6814,7 +6878,7 @@ bool RecordDrawData(
 bool FinishObsComposition(
     const VulkanRenderer::FinalBlitContext& context,
     ObsCompositionSlot& slot, uint32_t slotIndex,
-    SampledImage* mirrorSource, SampledImage* eyeZoomSource) {
+    SampledImage* mirrorSource, const EyeZoomSource& eyeZoomSource) {
     VulkanRenderer::FinalBlitContext obsContext = context;
     obsContext.destinationImage = slot.image.sampled.image;
     obsContext.destinationLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -7083,7 +7147,7 @@ bool RecordAfterFinalBlit(const FinalBlitContext& context, PFN_vkCmdBlitImage or
     PrepareMirrorSource(context, mirrorSampleLayout, mirrorSource);
     PrepareMirrorSnapshots(
         context, mirrorSource, mirrorSampleLayout, timestamp);
-    SampledImage* eyeZoomSource = PrepareEyeZoomSource(
+    const EyeZoomSource eyeZoomSource = PrepareEyeZoomSource(
         context, mirrorSource, mirrorSampleLayout, timestamp);
     WriteTimestamp(
         context.commandBuffer, timestamp, 2, VK_PIPELINE_STAGE_TRANSFER_BIT);
@@ -7543,6 +7607,10 @@ void Shutdown() {
         }
     }
     g_state.mirrorSnapshots.clear();
+    for (MirrorSnapshotSlot& slot : g_state.eyeZoomSnapshot.slots) {
+        DestroyMirrorCopyImage(slot.image);
+    }
+    g_state.eyeZoomSnapshot = {};
     for (RetiredMirrorSnapshot& retired : g_state.retiredMirrorSnapshots) {
         DestroyMirrorCopyImage(retired.image);
     }
@@ -7704,6 +7772,20 @@ bool GetMirrorHasContentForTests(const std::string& mirrorName, bool& hasContent
     if (it == g_state.mirrorHasContent.end()) return false;
     hasContent = it->second;
     return true;
+}
+
+EyeZoomSnapshotStats GetEyeZoomSnapshotStatsForTests() {
+    EyeZoomSnapshotStats stats;
+    stats.framesShown = g_state.eyeZoomSnapshotFramesShown;
+    const MirrorSnapshotState& state = g_state.eyeZoomSnapshot;
+    for (const MirrorSnapshotSlot& slot : state.slots) {
+        if (slot.image.sampled.image) ++stats.allocatedSlots;
+    }
+    if (state.latestSlot < state.slots.size()) {
+        stats.latestWidth = static_cast<int>(state.slots[state.latestSlot].image.extent.width);
+        stats.latestHeight = static_cast<int>(state.slots[state.latestSlot].image.extent.height);
+    }
+    return stats;
 }
 
 } // namespace VulkanRenderer
