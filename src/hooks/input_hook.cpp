@@ -1190,6 +1190,7 @@ static void SyncWindowMetricsFromMessage(HWND hWnd, UINT uMsg, WPARAM wParam, LP
     constexpr int kFullscreenTolPx = 1;
     bool shouldInvalidateScreenMetrics = false;
     bool shouldRequestRecalc = false;
+    bool shouldRequestRecalcIfClientChanged = false;
     bool shouldInvalidateImGui = false;
     bool shouldRecenterGui = false;
     bool shouldResetGameTexture = false;
@@ -1205,7 +1206,10 @@ static void SyncWindowMetricsFromMessage(HWND hWnd, UINT uMsg, WPARAM wParam, LP
     case WM_SIZE:
         shouldInvalidateScreenMetrics = true;
         shouldInvalidateImGui = true;
-        shouldRequestRecalc = true;
+        // Toolscreen sizes modes by posting WM_SIZE with the mode size, which differs from the real client whenever the
+        // mode does (EyeZoom, for example). A recalc for such a post re-requests the mode size and posts WM_SIZE again,
+        // so a lagging game would loop through a config republish every frame. Only a real client size change needs one.
+        shouldRequestRecalcIfClientChanged = true;
         sizeMayHaveChanged = (wParam != SIZE_MINIMIZED);
         break;
 
@@ -1287,7 +1291,7 @@ static void SyncWindowMetricsFromMessage(HWND hWnd, UINT uMsg, WPARAM wParam, LP
     }
 
     if (shouldInvalidateScreenMetrics) { InvalidateCachedScreenMetrics(); }
-    if (shouldRequestRecalc) { RequestScreenMetricsRecalculation(); }
+    if (shouldRequestRecalc || (shouldRequestRecalcIfClientChanged && clientSizeChanged)) { RequestScreenMetricsRecalculation(); }
     if (shouldInvalidateImGui) { InvalidateImGuiCache(); }
     if (shouldResetGameTexture && clientSizeChanged) { InvalidateTrackedGameTextureId(false, false); }
     if (clientSizeChanged) { shouldRecenterGui = true; }

@@ -70,6 +70,8 @@ std::mutex s_renderTasksMutex;
 std::deque<std::function<void()>> s_renderTasks;
 
 std::atomic<bool> s_forceSharedObsFrame{ false };
+// Sleeps the render thread this long in every hooked frame, to make the game lag like a slow machine.
+std::atomic<int> s_renderFrameDelayMs{ 0 };
 // TOOLSCREEN_GAME_TEST_EXIT: after the tests, close the game normally so DLL_PROCESS_DETACH runs.
 // "plain" just closes it; "log_lock" first leaves g_logFileMutex held by a thread that process exit will kill.
 std::string s_exitMode;
@@ -1578,6 +1580,47 @@ void TestResponsiveThroughEyeZoomToggles() {
     Require(!keyStuck, "A key stayed down after the test released it: " + stats.str());
 }
 
+// A lagging game must not make Toolscreen republish its config every frame. The window keeps its real size in EyeZoom,
+// so a screen-metrics recalc that compares the window with the mode size must not keep re-requesting it.
+void TestEyeZoomConfigStableWhenLagging() {
+    if (!IsResolutionChangeSupported(g_gameVersion)) Skip("Resolution changes are not supported on this game version.");
+    const auto snapshot = GetConfigSnapshot();
+    const bool hasEyeZoom = snapshot && std::any_of(snapshot->modes.begin(), snapshot->modes.end(),
+                                                    [](const ModeConfig& mode) { return EqualsIgnoreCase(mode.id, "EyeZoom"); });
+    if (!hasEyeZoom) Skip("The config has no EyeZoom mode.");
+    const std::string defaultMode = DefaultModeId();
+    Require(SwitchModeOnRenderThread(defaultMode), "Could not start from the default mode.");
+    Require(WaitForPublishedMode(defaultMode, std::chrono::seconds(5)), "The default mode was not published.");
+
+    // Lag first, so the resize that entering EyeZoom posts is handled at the lagging frame rate.
+    constexpr int kDelayMs = 80;
+    constexpr uint64_t kFrames = 30;
+    struct StopLag {
+        ~StopLag() { s_renderFrameDelayMs.store(0, std::memory_order_relaxed); }
+    } stopLag;
+    s_renderFrameDelayMs.store(kDelayMs, std::memory_order_relaxed);
+    Require(WaitForFrames(3, std::chrono::seconds(5)), "Frames stopped once the render thread lagged.");
+    Require(SwitchModeOnRenderThread("EyeZoom"), "SwitchToMode refused EyeZoom.");
+    Require(WaitForPublishedMode("EyeZoom", std::chrono::seconds(5)), "EyeZoom was not published as current.");
+    // Let the switch's own recalc and republish land before counting.
+    Require(WaitForFrames(5, std::chrono::seconds(5)), "Frames stopped after entering EyeZoom.");
+    const uint64_t versionBefore = g_configSnapshotVersion.load(std::memory_order_acquire);
+    const auto start = std::chrono::steady_clock::now();
+    Require(WaitForFrames(kFrames, std::chrono::seconds(15)), "Frames stopped while the render thread lagged in EyeZoom.");
+    const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+    const uint64_t republished = g_configSnapshotVersion.load(std::memory_order_acquire) - versionBefore;
+    s_renderFrameDelayMs.store(0, std::memory_order_relaxed);
+
+    Require(SwitchModeOnRenderThread(defaultMode), "SwitchToMode refused the default mode.");
+    Require(WaitForPublishedMode(defaultMode, std::chrono::seconds(5)), "Leaving EyeZoom did not publish the default mode.");
+    Log("[GAME TEST] Config republished " + std::to_string(republished) + " times in " + std::to_string(kFrames) +
+        " lagging EyeZoom frames (" + std::to_string(elapsedMs) + " ms).");
+    Require(elapsedMs >= static_cast<long long>(kFrames) * kDelayMs * 9 / 10,
+            "The render thread did not lag: " + std::to_string(kFrames) + " frames took " + std::to_string(elapsedMs) + " ms.");
+    Require(republished <= 2, "The config was republished " + std::to_string(republished) + " times in " + std::to_string(kFrames) +
+                                  " lagging EyeZoom frames with nothing changing.");
+}
+
 struct TestCase {
     const char* name;
     void (*fn)();
@@ -1592,6 +1635,7 @@ const TestCase kTests[] = {
     { "mode.switch_resizes_game", &TestModeSwitchResizesGame },
     { "mode.eyezoom_renders_and_switches", &TestEyeZoomRendersAndSwitches },
     { "mode.eyezoom_slide_transitions", &TestEyeZoomSlideTransitions },
+    { "mode.eyezoom_config_stable_when_lagging", &TestEyeZoomConfigStableWhenLagging },
     { "input.hotkey_switches_mode", &TestHotkeySwitchesMode },
     { "input.low_level_hook_dedicated_thread", &TestLowLevelHookOnDedicatedThread },
     { "input.real_key_passes_through_once", &TestRealKeyPassesThroughOnce },
@@ -1769,6 +1813,7 @@ void OnRenderThreadFrame() {
         tasks.swap(s_renderTasks);
     }
     for (auto& task : tasks) { task(); }
+    if (const int delayMs = s_renderFrameDelayMs.load(std::memory_order_relaxed); delayMs > 0) Sleep(static_cast<DWORD>(delayMs));
 }
 
 void RecordDetachComplete() {
