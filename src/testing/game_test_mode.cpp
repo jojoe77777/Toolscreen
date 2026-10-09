@@ -9,6 +9,7 @@
 #include "hooks/hook_chain.h"
 #include "hooks/input_hook.h"
 #include "render/mirror_thread.h"
+#include "render/obs_thread.h"
 #include "render/render.h"
 #include "render/render_backend.h"
 #include "render/vulkan/vulkan_renderer.h"
@@ -42,6 +43,7 @@ bool ReadPublishedObsComposePixelForTests(int x, int y, unsigned char outRgba[4]
 void GetPublishedObsComposeSizeForTests(int& width, int& height);
 extern std::atomic<bool> g_configLoaded;
 extern std::atomic<void*> g_lastSdlCursorWindow;
+extern std::atomic<bool> g_nativeCursorGrabbed;
 
 namespace ToolscreenVulkanLayerTest {
 bool GetTrackedDevice(VkDevice& device, PFN_vkGetDeviceProcAddr& layerGdpa, PFN_vkGetDeviceProcAddr& nextGdpa);
@@ -72,6 +74,11 @@ std::deque<std::function<void()>> s_renderTasks;
 std::atomic<bool> s_forceSharedObsFrame{ false };
 // Sleeps the render thread this long in every hooked frame, to make the game lag like a slow machine.
 std::atomic<int> s_renderFrameDelayMs{ 0 };
+// OpenGL only: 4096x4096 blits added to every frame, and video memory held in textures, to make the GPU act like a
+// weak one. The memory is held in whole textures of kGlVramHogTextureMb and released when s_glVramHogMb drops to 0.
+std::atomic<int> s_glGpuLoadBlits{ 0 };
+std::atomic<int> s_glVramHogMb{ 0 };
+constexpr int kGlVramHogTextureMb = 256;
 // TOOLSCREEN_GAME_TEST_EXIT: after the tests, close the game normally so DLL_PROCESS_DETACH runs.
 // "plain" just closes it; "log_lock" first leaves g_logFileMutex held by a thread that process exit will kill.
 std::string s_exitMode;
@@ -84,6 +91,62 @@ std::string s_windowMode;
 std::thread s_runnerThread;
 std::atomic<bool> s_stopRequested{ false };
 HWND s_gameWindow = NULL;
+
+// Render thread, OpenGL only. Applies s_glVramHogMb and s_glGpuLoadBlits. Calls from this DLL bypass Toolscreen's GL
+// hooks, and every binding it changes is put back so the game's GL state cache stays valid.
+void ApplyGlGpuPressure() {
+    const int blits = s_glGpuLoadBlits.load(std::memory_order_relaxed);
+    const int vramMb = s_glVramHogMb.load(std::memory_order_relaxed);
+    static std::vector<GLuint> s_vramTextures;
+    if ((blits <= 0 && vramMb <= 0 && s_vramTextures.empty()) || GetRenderBackend() != RenderBackend::OpenGL ||
+        !wglGetCurrentContext()) {
+        return;
+    }
+    if (!glCreateTextures || !glTextureStorage2D || !glClearTexImage || !glCreateFramebuffers || !glNamedFramebufferTexture) {
+        return;
+    }
+
+    while (static_cast<int>(s_vramTextures.size()) * kGlVramHogTextureMb < vramMb) {
+        // 8192x8192 RGBA8 is 256 MiB; clearing it makes the driver back it with memory.
+        GLuint texture = 0;
+        glCreateTextures(GL_TEXTURE_2D, 1, &texture);
+        glTextureStorage2D(texture, 1, GL_RGBA8, 8192, 8192);
+        const GLubyte zero[4] = {};
+        glClearTexImage(texture, 0, GL_RGBA, GL_UNSIGNED_BYTE, zero);
+        s_vramTextures.push_back(texture);
+    }
+    if (vramMb <= 0 && !s_vramTextures.empty()) {
+        glDeleteTextures(static_cast<GLsizei>(s_vramTextures.size()), s_vramTextures.data());
+        s_vramTextures.clear();
+    }
+
+    if (blits <= 0) return;
+    constexpr int kSize = 4096;
+    static GLuint s_textures[2] = {};
+    static GLuint s_framebuffers[2] = {};
+    if (!s_framebuffers[0]) {
+        glCreateTextures(GL_TEXTURE_2D, 2, s_textures);
+        glCreateFramebuffers(2, s_framebuffers);
+        for (int i = 0; i < 2; ++i) {
+            glTextureStorage2D(s_textures[i], 1, GL_RGBA8, kSize, kSize);
+            glNamedFramebufferTexture(s_framebuffers[i], GL_COLOR_ATTACHMENT0, s_textures[i], 0);
+        }
+    }
+    GLint readFramebuffer = 0;
+    GLint drawFramebuffer = 0;
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &readFramebuffer);
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &drawFramebuffer);
+    const GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
+    glDisable(GL_SCISSOR_TEST);
+    for (int i = 0; i < blits; ++i) {
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, s_framebuffers[i % 2]);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, s_framebuffers[1 - i % 2]);
+        BlitFramebufferDirect(0, 0, kSize, kSize, 0, 0, kSize, kSize, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    }
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, readFramebuffer);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, drawFramebuffer);
+    if (scissor) glEnable(GL_SCISSOR_TEST);
+}
 
 std::string ReadEnvUtf8(const wchar_t* name) {
     wchar_t buffer[2048] = {};
@@ -1816,6 +1879,183 @@ void TestResponsiveThroughEyeZoomToggles() {
     Require(!keyStuck, "A key stayed down after the test released it: " + stats.str());
 }
 
+// Manual stress check, skipped unless TOOLSCREEN_GAME_TEST_STRESS_SECONDS is set. In a loaded world it presses the
+// EyeZoom hotkey over and over while the camera sweeps around and down, the way the 26.3 EyeZoom freeze was reported.
+// Run it with a high render distance and -TestTimeoutSeconds above the stress time; it fails with thread stacks if
+// frames stop. Options:
+// - TOOLSCREEN_GAME_TEST_STRESS_NO_MDI: presses F3+M so 26.x draws terrain without multi-draw-indirect, through the
+//   "Chunk Sections UBO" ring buffer from the report. 26.x only handles F3+M when the JVM has
+//   -DMC_DEBUG_ENABLED=true -DMC_DEBUG_HOTKEYS=true, e.g. through JAVA_TOOL_OPTIONS.
+// - TOOLSCREEN_GAME_TEST_STRESS_FORCE_OBS (OpenGL only): runs the per-frame OBS capture and compose as if OBS game
+//   capture were hooked.
+// - TOOLSCREEN_GAME_TEST_STRESS_FRAME_DELAY_MS: sleeps the render thread this long every frame (a slow CPU).
+// - TOOLSCREEN_GAME_TEST_STRESS_GL_GPU_BLITS (OpenGL only): adds this many 4096x4096 blits to every frame (a slow GPU).
+// - TOOLSCREEN_GAME_TEST_STRESS_GL_VRAM_MB (OpenGL only): holds this much video memory, rounded up to 256 MiB, until
+//   the test ends (a GPU short on memory).
+void TestEyeZoomStressLookAround() {
+    const std::string secondsText = ReadEnvUtf8(L"TOOLSCREEN_GAME_TEST_STRESS_SECONDS");
+    if (secondsText.empty()) Skip("TOOLSCREEN_GAME_TEST_STRESS_SECONDS is not set.");
+    const int seconds = (std::max)(10, std::atoi(secondsText.c_str()));
+    if (!IsResolutionChangeSupported(g_gameVersion)) Skip("Resolution changes are not supported on this game version.");
+    const bool disableMdi = !ReadEnvUtf8(L"TOOLSCREEN_GAME_TEST_STRESS_NO_MDI").empty();
+    if (disableMdi) {
+        const std::string jvmOptions = WideToUtf8(GetCommandLineW()) + " " + ReadEnvUtf8(L"JAVA_TOOL_OPTIONS");
+        if (jvmOptions.find("-DMC_DEBUG_ENABLED=true") == std::string::npos ||
+            jvmOptions.find("-DMC_DEBUG_HOTKEYS=true") == std::string::npos) {
+            Skip("TOOLSCREEN_GAME_TEST_STRESS_NO_MDI needs -DMC_DEBUG_ENABLED=true -DMC_DEBUG_HOTKEYS=true in JAVA_TOOL_OPTIONS.");
+        }
+    }
+    const bool forceObs = !ReadEnvUtf8(L"TOOLSCREEN_GAME_TEST_STRESS_FORCE_OBS").empty();
+    WaitUntil([] { return GetRenderBackend() != RenderBackend::Unknown; }, std::chrono::seconds(20));
+    if (forceObs && GetRenderBackend() != RenderBackend::OpenGL) {
+        Skip("TOOLSCREEN_GAME_TEST_STRESS_FORCE_OBS only drives the OpenGL capture path.");
+    }
+    const int frameDelayMs = std::atoi(ReadEnvUtf8(L"TOOLSCREEN_GAME_TEST_STRESS_FRAME_DELAY_MS").c_str());
+    const int gpuBlits = std::atoi(ReadEnvUtf8(L"TOOLSCREEN_GAME_TEST_STRESS_GL_GPU_BLITS").c_str());
+    const int vramMb = std::atoi(ReadEnvUtf8(L"TOOLSCREEN_GAME_TEST_STRESS_GL_VRAM_MB").c_str());
+    if ((gpuBlits > 0 || vramMb > 0) && GetRenderBackend() != RenderBackend::OpenGL) {
+        Skip("The GPU load options only apply to OpenGL.");
+    }
+    const auto snapshot = GetConfigSnapshot();
+    DWORD eyeZoomVk = 0;
+    std::string mainMode;
+    if (snapshot) {
+        for (const HotkeyConfig& hotkey : snapshot->hotkeys) {
+            if (hotkey.keys.size() == 1 && EqualsIgnoreCase(hotkey.secondaryMode, "EyeZoom")) {
+                eyeZoomVk = hotkey.keys[0];
+                mainMode = hotkey.mainMode;
+                break;
+            }
+        }
+    }
+    if (eyeZoomVk == 0) Skip("The config has no single-key EyeZoom hotkey.");
+
+    const HWND hwnd = g_subclassedHwnd.load(std::memory_order_acquire);
+    Require(hwnd != NULL, "No subclassed game window to send input to.");
+    // Let the world load and far chunks build before stressing it.
+    Require(WaitForFrames(600, std::chrono::seconds(120)), "Frames stopped before the stress test started.");
+    if (s_gameWindow) SetForegroundWindow(s_gameWindow);
+    if (!WaitUntil([&] { return IsWindowInForegroundTree(hwnd); }, std::chrono::seconds(2))) {
+        Skip("The game window is not in the foreground, so injected input would go elsewhere.");
+    }
+    if (!g_nativeCursorGrabbed.load(std::memory_order_acquire)) {
+        // A pause screen is open (focus was elsewhere when the world loaded); Escape closes it and grabs the mouse.
+        PressRealKey(VK_ESCAPE, std::chrono::milliseconds(40));
+        WaitUntil([] { return g_nativeCursorGrabbed.load(std::memory_order_acquire); }, std::chrono::seconds(3));
+    }
+    Require(g_nativeCursorGrabbed.load(std::memory_order_acquire), "The game never grabbed the mouse, so the camera cannot be turned.");
+    if (disableMdi) {
+        if (!IsWindowInForegroundTree(hwnd)) Skip("The game window lost focus before F3+M.");
+        struct HeldF3 {
+            INPUT input{};
+            HeldF3() {
+                input.type = INPUT_KEYBOARD;
+                input.ki.wVk = VK_F3;
+                input.ki.wScan = static_cast<WORD>(MapVirtualKeyW(VK_F3, MAPVK_VK_TO_VSC));
+                SendInput(1, &input, sizeof(input));
+            }
+            // PressRealKey skips (throws) when focus is lost, so release F3 on every path.
+            ~HeldF3() {
+                input.ki.dwFlags = KEYEVENTF_KEYUP;
+                SendInput(1, &input, sizeof(input));
+            }
+        };
+        {
+            HeldF3 f3;
+            std::this_thread::sleep_for(std::chrono::milliseconds(80));
+            PressRealKey('M', std::chrono::milliseconds(60));
+        }
+        Require(WaitForFrames(30, std::chrono::seconds(10)), "Frames stopped after F3+M.");
+    }
+    Require(SwitchModeOnRenderThread(mainMode), "Could not start from the EyeZoom hotkey's main mode.");
+    Require(WaitForPublishedMode(mainMode, std::chrono::seconds(5)), "The main mode was not published.");
+
+    const auto moveMouse = [](int dx, int dy) {
+        INPUT input{};
+        input.type = INPUT_MOUSE;
+        input.mi.dx = dx;
+        input.mi.dy = dy;
+        input.mi.dwFlags = MOUSEEVENTF_MOVE;
+        SendInput(1, &input, sizeof(input));
+    };
+    // Look down first: the report says the freeze is easiest to hit while looking downward.
+    for (int i = 0; i < 20; ++i) {
+        moveMouse(0, 40);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    if (forceObs) s_forceSharedObsFrame.store(true, std::memory_order_relaxed);
+    struct ClearForcedObs {
+        bool active;
+        ~ClearForcedObs() { if (active) s_forceSharedObsFrame.store(false, std::memory_order_relaxed); }
+    } clearForcedObs{ forceObs };
+    struct StopLag {
+        ~StopLag() {
+            s_renderFrameDelayMs.store(0, std::memory_order_relaxed);
+            s_glGpuLoadBlits.store(0, std::memory_order_relaxed);
+            s_glVramHogMb.store(0, std::memory_order_relaxed);
+        }
+    } stopLag;
+    s_glVramHogMb.store((std::max)(0, vramMb), std::memory_order_relaxed);
+    s_glGpuLoadBlits.store((std::max)(0, gpuBlits), std::memory_order_relaxed);
+    s_renderFrameDelayMs.store((std::max)(0, frameDelayMs), std::memory_order_relaxed);
+
+    FreezeWatchdog watchdog(hwnd);
+    s_realKeyStats = RealKeyStats{};
+    int presses = 0;
+    int modeChanges = 0;
+    std::string lastMode = GetPublishedCurrentModeId();
+    const uint64_t framesAtStart = s_renderFrames.load(std::memory_order_acquire);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
+    while (std::chrono::steady_clock::now() < deadline) {
+        const auto pressStart = std::chrono::steady_clock::now();
+        const uint64_t framesBefore = s_renderFrames.load(std::memory_order_acquire);
+        PressRealKey(eyeZoomVk, std::chrono::milliseconds(20 + (presses % 3) * 15));
+        ++presses;
+        // Sweep the camera between presses: a varying pitch and yaw keeps changing the visible chunk sections.
+        const int steps = 2 + presses % 6;
+        for (int step = 0; step < steps; ++step) {
+            const int dx = ((presses / 4) % 2 == 0 ? 1 : -1) * (30 + (presses * 17) % 50);
+            const int dy = ((presses / 7) % 2 == 0 ? 1 : -1) * ((presses * 13) % 25);
+            moveMouse(dx, dy);
+            std::this_thread::sleep_for(std::chrono::milliseconds(8));
+        }
+        if (!WaitUntil([&] { return s_renderFrames.load(std::memory_order_acquire) > framesBefore; }, std::chrono::seconds(10))) {
+            ReportRenderThreadStall("no frame for 10 s while spamming EyeZoom (press " + std::to_string(presses) + ")");
+            Require(false, "Rendering stopped while spamming EyeZoom after " + std::to_string(presses) + " presses.");
+        }
+        const std::string mode = GetPublishedCurrentModeId();
+        if (!EqualsIgnoreCase(mode, lastMode)) ++modeChanges;
+        lastMode = mode;
+        // Space presses just past the hotkey's 100 ms debounce, by a varying amount so they land at different points
+        // of the previous resize.
+        const auto interval = std::chrono::milliseconds(105 + (presses % 4) * 20);
+        const auto elapsed = std::chrono::steady_clock::now() - pressStart;
+        if (elapsed < interval) std::this_thread::sleep_for(interval - elapsed);
+    }
+
+    // Leave EyeZoom and make sure the game still renders.
+    const double averageFps = static_cast<double>(s_renderFrames.load(std::memory_order_acquire) - framesAtStart) / seconds;
+    const bool left = SwitchModeOnRenderThread(mainMode) && WaitForPublishedMode(mainMode, std::chrono::seconds(5));
+    const bool settled = WaitForFrames(60, std::chrono::seconds(10));
+    watchdog.Stop();
+    const int heldVramMb = vramMb > 0 ? (vramMb + kGlVramHogTextureMb - 1) / kGlVramHogTextureMb * kGlVramHogTextureMb : 0;
+    std::ostringstream stats;
+    stats << presses << " presses, " << modeChanges << " mode changes, " << averageFps << " fps, max frame gap " << watchdog.MaxFrameGapMs()
+          << " ms, max window message latency " << watchdog.MaxMessageLatencyMs() << " ms, message timeouts "
+          << watchdog.MessageTimeouts() << ", presses without focus " << s_realKeyStats.pressedWithoutFocus << ", frame delay "
+          << frameDelayMs << " ms, GL blits " << gpuBlits << ", GL VRAM held " << heldVramMb << " MiB";
+    const VulkanRenderer::FrameTrackingStats tracking = VulkanRenderer::GetFrameTrackingStats();
+    stats << ", vulkan frames completed " << tracking.completedFrames << ", untracked " << tracking.untrackedFrames;
+    Log("[GAME TEST] EyeZoom stress: " + stats.str());
+    if (!settled) ReportRenderThreadStall("no frames after the EyeZoom stress test");
+    Require(settled, "Frames stopped after the EyeZoom stress test: " + stats.str());
+    Require(left, "Could not leave EyeZoom after the stress test: " + stats.str());
+    // A lagging game can handle two presses between polls, so only require that the hotkey switched modes at all.
+    Require(modeChanges > 0, "The EyeZoom hotkey never switched modes: " + stats.str());
+    Require(watchdog.MaxFrameGapMs() < 5000, "Rendering stalled during the EyeZoom stress test: " + stats.str());
+}
+
 // A lagging game must not make Toolscreen republish its config every frame. The window keeps its real size in EyeZoom,
 // so a screen-metrics recalc that compares the window with the mode size must not keep re-requesting it.
 void TestEyeZoomConfigStableWhenLagging() {
@@ -1888,6 +2128,7 @@ const TestCase kTests[] = {
     { "vulkan.mirrors_draw_game_opaque", &TestVulkanMirrorsDrawGameOpaque },
     { "vulkan.toolscreen_pipeline_draws", &TestVulkanToolscreenPipelineDraws },
     { "manual.eyezoom_screenshots", &TestEyeZoomScreenshots },
+    { "manual.eyezoom_stress_look_around", &TestEyeZoomStressLookAround },
     { "config.save_round_trip", &TestConfigSaveRoundTrip },
     { "config.load_error_screen", &TestConfigLoadErrorScreen },
     { "config.recovered_from_backup", &TestConfigRecoveredFromBackup },
@@ -2050,6 +2291,7 @@ void OnRenderThreadFrame() {
         tasks.swap(s_renderTasks);
     }
     for (auto& task : tasks) { task(); }
+    ApplyGlGpuPressure();
     if (const int delayMs = s_renderFrameDelayMs.load(std::memory_order_relaxed); delayMs > 0) Sleep(static_cast<DWORD>(delayMs));
 }
 
