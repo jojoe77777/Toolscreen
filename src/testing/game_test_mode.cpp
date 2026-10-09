@@ -1071,49 +1071,114 @@ void TestVulkanMirrorsDrawGameOpaque() {
 
 // Manual check, skipped unless TOOLSCREEN_GAME_TEST_SCREENSHOT_DIR is set: switches to EyeZoom and saves the presented
 // frame as <dir>\<TOOLSCREEN_GAME_TEST_SCREENSHOT_TAG>.bmp. Reads the frame from the Vulkan renderer, so other windows
-// and focus do not matter.
+// and focus do not matter. With TOOLSCREEN_GAME_TEST_SCREENSHOT_SLIDE_OUT set it leaves EyeZoom with a slide transition
+// and also saves a frame of the slide out as <tag>-slide-out.bmp.
 void TestEyeZoomScreenshots() {
     const std::wstring dir = Utf8ToWide(ReadEnvUtf8(L"TOOLSCREEN_GAME_TEST_SCREENSHOT_DIR"));
     if (dir.empty()) Skip("TOOLSCREEN_GAME_TEST_SCREENSHOT_DIR is not set.");
     const std::wstring tag = Utf8ToWide(ReadEnvUtf8(L"TOOLSCREEN_GAME_TEST_SCREENSHOT_TAG"));
+    const bool slideOut = !ReadEnvUtf8(L"TOOLSCREEN_GAME_TEST_SCREENSHOT_SLIDE_OUT").empty();
     WaitUntil([] { return GetRenderBackend() != RenderBackend::Unknown; }, std::chrono::seconds(20));
     if (GetRenderBackend() != RenderBackend::Vulkan) Skip("Frame capture reads the Vulkan renderer's presented frame.");
     // Give distant chunks time to load so fog at the render distance is visible.
     Require(WaitForFrames(900, std::chrono::seconds(60)), "Frames stopped before the screenshot.");
 
+    const std::string defaultMode = DefaultModeId();
+    RestoreGameTransitions restore;
+    // The game frame shows the slide only with animations visible in game.
+    struct RestoreHideAnimations {
+        bool active = false;
+        bool value = false;
+        ~RestoreHideAnimations() {
+            if (!active) return;
+            try {
+                RunOnRenderThread([value = value] {
+                    g_config.hideAnimationsInGame = value;
+                    g_configIsDirty = true;
+                    PublishGuiConfigSnapshot();
+                });
+            } catch (...) {}
+        }
+    } restoreHideAnimations;
+    if (slideOut) {
+        restore.values = RunOnRenderThread([defaultMode] {
+            return SetGameTransitionsOnRenderThread(
+                { { defaultMode, GameTransitionType::Bounce, 1000 }, { "EyeZoom", GameTransitionType::Bounce, 1000 } });
+        });
+        restoreHideAnimations.value = RunOnRenderThread([] {
+            const bool previous = g_config.hideAnimationsInGame;
+            g_config.hideAnimationsInGame = false;
+            g_configIsDirty = true;
+            PublishGuiConfigSnapshot();
+            return previous;
+        });
+        restoreHideAnimations.active = true;
+    }
+
     Require(SwitchModeOnRenderThread("EyeZoom"), "SwitchToMode refused EyeZoom.");
     Require(WaitForPublishedMode("EyeZoom", std::chrono::seconds(5)), "EyeZoom was not published as current.");
+    Require(WaitUntil([] { return !IsModeTransitionActive(); }, std::chrono::seconds(5)), "The switch into EyeZoom never finished.");
     Require(WaitForFrames(120, std::chrono::seconds(10)), "Frames stopped while EyeZoom was showing.");
+
+    const auto capture = [](std::vector<uint8_t>& rgba, int& width, int& height) {
+        RunOnRenderThread([] { VulkanRenderer::RequestFrameCaptureForTests(); });
+        return WaitUntil([&] {
+            return RunOnRenderThread([&] { return VulkanRenderer::TryGetFrameCaptureForTests(rgba, width, height); });
+        }, std::chrono::seconds(5)) && width > 0 && height > 0;
+    };
+    const auto save = [&](const std::wstring& name, std::vector<uint8_t>& rgba, int width, int height) {
+        BITMAPINFOHEADER info{};
+        info.biSize = sizeof(info);
+        info.biWidth = width;
+        info.biHeight = -height;
+        info.biPlanes = 1;
+        info.biBitCount = 32;
+        info.biCompression = BI_RGB;
+        for (size_t i = 0; i < rgba.size(); i += 4) {
+            std::swap(rgba[i], rgba[i + 2]);
+            rgba[i + 3] = 255;
+        }
+        BITMAPFILEHEADER file{};
+        file.bfType = 0x4D42;
+        file.bfOffBits = sizeof(file) + sizeof(info);
+        file.bfSize = file.bfOffBits + static_cast<DWORD>(rgba.size());
+        std::ofstream out(std::filesystem::path(dir + L"\\" + name + L".bmp"), std::ios::binary);
+        out.write(reinterpret_cast<const char*>(&file), sizeof(file));
+        out.write(reinterpret_cast<const char*>(&info), sizeof(info));
+        out.write(reinterpret_cast<const char*>(rgba.data()), static_cast<std::streamsize>(rgba.size()));
+        Require(out.good(), "Could not write the screenshot.");
+    };
 
     std::vector<uint8_t> rgba;
     int width = 0, height = 0;
-    RunOnRenderThread([] { VulkanRenderer::RequestFrameCaptureForTests(); });
-    const bool captured = WaitUntil([&] {
-        return RunOnRenderThread([&] { return VulkanRenderer::TryGetFrameCaptureForTests(rgba, width, height); });
-    }, std::chrono::seconds(5));
-    SwitchModeOnRenderThread(DefaultModeId());
-    Require(captured && width > 0 && height > 0, "The presented frame was never captured.");
-
-    BITMAPINFOHEADER info{};
-    info.biSize = sizeof(info);
-    info.biWidth = width;
-    info.biHeight = -height;
-    info.biPlanes = 1;
-    info.biBitCount = 32;
-    info.biCompression = BI_RGB;
-    for (size_t i = 0; i < rgba.size(); i += 4) {
-        std::swap(rgba[i], rgba[i + 2]);
-        rgba[i + 3] = 255;
+    const bool captured = capture(rgba, width, height);
+    std::vector<uint8_t> slideRgba;
+    int slideWidth = 0, slideHeight = 0;
+    bool slideCaptured = false;
+    if (slideOut && captured) {
+        const uint64_t shownBefore =
+            RunOnRenderThread([] { return VulkanRenderer::GetEyeZoomSnapshotStatsForTests().framesShown; });
+        Require(SlideToModeOnRenderThread(defaultMode), "SwitchToMode refused the default mode.");
+        // Capture the frame after the first one drawn from the snapshot, early in the slide while the zoom is on screen.
+        const bool requested = WaitUntil([&] {
+            return RunOnRenderThread([&] {
+                if (VulkanRenderer::GetEyeZoomSnapshotStatsForTests().framesShown == shownBefore) return false;
+                VulkanRenderer::RequestFrameCaptureForTests();
+                return true;
+            });
+        }, std::chrono::seconds(2));
+        Require(requested, "The slide out of EyeZoom never used the EyeZoom snapshot.");
+        slideCaptured = WaitUntil([&] {
+            return RunOnRenderThread([&] { return VulkanRenderer::TryGetFrameCaptureForTests(slideRgba, slideWidth, slideHeight); });
+        }, std::chrono::seconds(5)) && slideWidth > 0 && slideHeight > 0;
     }
-    BITMAPFILEHEADER file{};
-    file.bfType = 0x4D42;
-    file.bfOffBits = sizeof(file) + sizeof(info);
-    file.bfSize = file.bfOffBits + static_cast<DWORD>(rgba.size());
-    std::ofstream out(std::filesystem::path(dir + L"\\" + tag + L".bmp"), std::ios::binary);
-    out.write(reinterpret_cast<const char*>(&file), sizeof(file));
-    out.write(reinterpret_cast<const char*>(&info), sizeof(info));
-    out.write(reinterpret_cast<const char*>(rgba.data()), static_cast<std::streamsize>(rgba.size()));
-    Require(out.good(), "Could not write the screenshot.");
+    SwitchModeOnRenderThread(defaultMode);
+    Require(captured, "The presented frame was never captured.");
+    save(tag, rgba, width, height);
+    if (slideOut) {
+        Require(slideCaptured, "No frame of the slide out was captured.");
+        save(tag + L"-slide-out", slideRgba, slideWidth, slideHeight);
+    }
 }
 
 // With the OBS compose pass running and the settings GUI open, ImGui must build one frame per swap: the OBS pass
