@@ -34,30 +34,31 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Resolve liblogger SignPath version
-        id: signpath_version
-        if: ${{ matrix.sign_with_signpath }}
-        shell: pwsh
-        run: |
-          $versionFile = Join-Path $env:GITHUB_WORKSPACE 'liblogger/LibLoggerVersion.cmake'
-          $versionContent = Get-Content $versionFile -Raw
+      - parallel:
+          - name: Resolve liblogger SignPath version
+            id: signpath_version
+            if: ${{ matrix.sign_with_signpath }}
+            shell: pwsh
+            run: |
+              $versionFile = Join-Path $env:GITHUB_WORKSPACE 'liblogger/LibLoggerVersion.cmake'
+              $versionContent = Get-Content $versionFile -Raw
 
-          $majorMatch = [regex]::Match($versionContent, 'set\(LIBLOGGER_VERSION_MAJOR\s+(\d+)\)')
-          $minorMatch = [regex]::Match($versionContent, 'set\(LIBLOGGER_VERSION_MINOR\s+(\d+)\)')
-          $patchMatch = [regex]::Match($versionContent, 'set\(LIBLOGGER_VERSION_PATCH\s+(\d+)\)')
+              $majorMatch = [regex]::Match($versionContent, 'set\(LIBLOGGER_VERSION_MAJOR\s+(\d+)\)')
+              $minorMatch = [regex]::Match($versionContent, 'set\(LIBLOGGER_VERSION_MINOR\s+(\d+)\)')
+              $patchMatch = [regex]::Match($versionContent, 'set\(LIBLOGGER_VERSION_PATCH\s+(\d+)\)')
 
-          if (-not $majorMatch.Success -or -not $minorMatch.Success -or -not $patchMatch.Success) {
-            throw "Failed to parse version from $versionFile"
-          }
+              if (-not $majorMatch.Success -or -not $minorMatch.Success -or -not $patchMatch.Success) {
+                throw "Failed to parse version from $versionFile"
+              }
 
-          $version = '{0}.{1}.{2}' -f $majorMatch.Groups[1].Value, $minorMatch.Groups[1].Value, $patchMatch.Groups[1].Value
-          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+              $version = '{0}.{1}.{2}' -f $majorMatch.Groups[1].Value, $minorMatch.Groups[1].Value, $patchMatch.Groups[1].Value
+              "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-      - name: Set up Java 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
+          - name: Set up Java 17
+            uses: actions/setup-java@v4
+            with:
+              distribution: temurin
+              java-version: '17'
 
       - name: Configure standalone liblogger build
         shell: pwsh
@@ -136,106 +137,107 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Set up Java 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
+      - parallel:
+          - name: Set up Java 17
+            uses: actions/setup-java@v4
+            with:
+              distribution: temurin
+              java-version: '17'
 
-      - name: Install Linux liblogger dependencies
-        shell: bash
-        run: |
-          write_primary_sources() {
-            local architectures="$1"
-            printf '%s\n' \
-              'Types: deb' \
-              'URIs: http://azure.archive.ubuntu.com/ubuntu/' \
-              'Suites: noble noble-updates noble-backports' \
-              'Components: main restricted universe multiverse' \
-              "Architectures: ${architectures}" \
-              'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' \
-              '' \
-              'Types: deb' \
-              'URIs: http://security.ubuntu.com/ubuntu/' \
-              'Suites: noble-security' \
-              'Components: main restricted universe multiverse' \
-              "Architectures: ${architectures}" \
-              'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' \
-              | sudo tee /etc/apt/sources.list.d/ubuntu.sources >/dev/null
-          }
+          - name: Install Linux liblogger dependencies
+            shell: bash
+            run: |
+              write_primary_sources() {
+                local architectures="$1"
+                printf '%s\n' \
+                  'Types: deb' \
+                  'URIs: http://azure.archive.ubuntu.com/ubuntu/' \
+                  'Suites: noble noble-updates noble-backports' \
+                  'Components: main restricted universe multiverse' \
+                  "Architectures: ${architectures}" \
+                  'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' \
+                  '' \
+                  'Types: deb' \
+                  'URIs: http://security.ubuntu.com/ubuntu/' \
+                  'Suites: noble-security' \
+                  'Components: main restricted universe multiverse' \
+                  "Architectures: ${architectures}" \
+                  'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' \
+                  | sudo tee /etc/apt/sources.list.d/ubuntu.sources >/dev/null
+              }
 
-          write_ports_sources() {
-            local architecture="$1"
-            printf '%s\n' \
-              'Types: deb' \
-              'URIs: http://ports.ubuntu.com/ubuntu-ports/' \
-              'Suites: noble noble-updates noble-backports noble-security' \
-              'Components: main restricted universe multiverse' \
-              "Architectures: ${architecture}" \
-              'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' \
-              | sudo tee /etc/apt/sources.list.d/ubuntu-ports.sources >/dev/null
-          }
+              write_ports_sources() {
+                local architecture="$1"
+                printf '%s\n' \
+                  'Types: deb' \
+                  'URIs: http://ports.ubuntu.com/ubuntu-ports/' \
+                  'Suites: noble noble-updates noble-backports noble-security' \
+                  'Components: main restricted universe multiverse' \
+                  "Architectures: ${architecture}" \
+                  'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' \
+                  | sudo tee /etc/apt/sources.list.d/ubuntu-ports.sources >/dev/null
+              }
 
-          case "${{ matrix.target }}" in
-            x64)
-              sudo apt-get update
-              sudo apt-get install -y \
-                pkg-config \
-                clang \
-                binutils \
-                libssl-dev
-              ;;
-            x86)
-              write_primary_sources 'amd64 i386'
-              sudo dpkg --add-architecture i386
-              sudo apt-get update
-              sudo apt-get install -y \
-                pkg-config \
-                clang \
-                binutils \
-                gcc-multilib \
-                g++-multilib \
-                libc6-dev-i386 \
-                libssl-dev \
-                libssl-dev:i386
-              ;;
-            arm64)
-              write_primary_sources 'amd64'
-              write_ports_sources 'arm64'
-              sudo dpkg --add-architecture arm64
-              sudo apt-get update
-              sudo apt-get install -y \
-                pkg-config \
-                clang \
-                binutils \
-                binutils-aarch64-linux-gnu \
-                gcc-aarch64-linux-gnu \
-                g++-aarch64-linux-gnu \
-                libc6-dev-arm64-cross \
-                libssl-dev \
-                libssl-dev:arm64
-              ;;
-            arm32)
-              write_primary_sources 'amd64'
-              write_ports_sources 'armhf'
-              sudo dpkg --add-architecture armhf
-              sudo apt-get update
-              sudo apt-get install -y \
-                pkg-config \
-                clang \
-                binutils \
-                binutils-arm-linux-gnueabihf \
-                gcc-arm-linux-gnueabihf \
-                g++-arm-linux-gnueabihf \
-                libc6-dev-armhf-cross \
-                libssl-dev \
-                libssl-dev:armhf
-              ;;
-            *)
-              echo "Unsupported Linux liblogger target: ${{ matrix.target }}" >&2
-              exit 1
-              ;;
-          esac
+              case "${{ matrix.target }}" in
+                x64)
+                  sudo apt-get update
+                  sudo apt-get install -y \
+                    pkg-config \
+                    clang \
+                    binutils \
+                    libssl-dev
+                  ;;
+                x86)
+                  write_primary_sources 'amd64 i386'
+                  sudo dpkg --add-architecture i386
+                  sudo apt-get update
+                  sudo apt-get install -y \
+                    pkg-config \
+                    clang \
+                    binutils \
+                    gcc-multilib \
+                    g++-multilib \
+                    libc6-dev-i386 \
+                    libssl-dev \
+                    libssl-dev:i386
+                  ;;
+                arm64)
+                  write_primary_sources 'amd64'
+                  write_ports_sources 'arm64'
+                  sudo dpkg --add-architecture arm64
+                  sudo apt-get update
+                  sudo apt-get install -y \
+                    pkg-config \
+                    clang \
+                    binutils \
+                    binutils-aarch64-linux-gnu \
+                    gcc-aarch64-linux-gnu \
+                    g++-aarch64-linux-gnu \
+                    libc6-dev-arm64-cross \
+                    libssl-dev \
+                    libssl-dev:arm64
+                  ;;
+                arm32)
+                  write_primary_sources 'amd64'
+                  write_ports_sources 'armhf'
+                  sudo dpkg --add-architecture armhf
+                  sudo apt-get update
+                  sudo apt-get install -y \
+                    pkg-config \
+                    clang \
+                    binutils \
+                    binutils-arm-linux-gnueabihf \
+                    gcc-arm-linux-gnueabihf \
+                    g++-arm-linux-gnueabihf \
+                    libc6-dev-armhf-cross \
+                    libssl-dev \
+                    libssl-dev:armhf
+                  ;;
+                *)
+                  echo "Unsupported Linux liblogger target: ${{ matrix.target }}" >&2
+                  exit 1
+                  ;;
+              esac
 
       - name: Build Linux liblogger binaries
         shell: bash
@@ -285,53 +287,26 @@ jobs:
       - build-liblogger-macos
 
     steps:
-      - name: Download signed Windows liblogger artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: liblogger-windows-x64
-          path: collected/windows
+      - parallel:
+          - name: Download Windows liblogger artifacts
+            uses: actions/download-artifact@v4
+            with:
+              pattern: liblogger-windows-*
+              merge-multiple: true
+              path: collected/windows
 
-      - name: Download x86 Windows liblogger artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: liblogger-windows-x86
-          path: collected/windows
+          - name: Download Linux liblogger artifacts
+            uses: actions/download-artifact@v4
+            with:
+              pattern: liblogger-linux-*
+              merge-multiple: true
+              path: collected/linux
 
-      - name: Download ARM64 Windows liblogger artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: liblogger-windows-arm64
-          path: collected/windows
-
-      - name: Download Linux liblogger artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: liblogger-linux-x64
-          path: collected/linux
-
-      - name: Download x86 Linux liblogger artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: liblogger-linux-x86
-          path: collected/linux
-
-      - name: Download ARM64 Linux liblogger artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: liblogger-linux-arm64
-          path: collected/linux
-
-      - name: Download ARM32 Linux liblogger artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: liblogger-linux-arm32
-          path: collected/linux
-
-      - name: Download macOS liblogger artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: liblogger-macos
-          path: collected/macos
+          - name: Download macOS liblogger artifacts
+            uses: actions/download-artifact@v4
+            with:
+              name: liblogger-macos
+              path: collected/macos
 
       - name: Assemble combined liblogger bundle
         shell: bash
@@ -362,53 +337,54 @@ jobs:
             printf '%s  %s\n' "$hash" "$rel_path" >> "$manifest"
           done < <(find release -type f ! -name 'SHA512SUMS.txt' -print0 | sort -z)
 
-      - name: Publish latest signed Windows liblogger
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          LIBLOGGER_SIGNED_RELEASE_TAG: liblogger-signed-latest
-        run: |
-          set -euo pipefail
-          assets=(
-            release/windows/liblogger_x64.dll
-            release/windows/liblogger_x64.pdb
-            release/windows/liblogger_arm64.dll
-            release/windows/liblogger_arm64.pdb
-          )
+      - parallel:
+          - name: Publish latest signed Windows liblogger
+            shell: bash
+            env:
+              GH_TOKEN: ${{ github.token }}
+              GH_REPO: ${{ github.repository }}
+              LIBLOGGER_SIGNED_RELEASE_TAG: liblogger-signed-latest
+            run: |
+              set -euo pipefail
+              assets=(
+                release/windows/liblogger_x64.dll
+                release/windows/liblogger_x64.pdb
+                release/windows/liblogger_arm64.dll
+                release/windows/liblogger_arm64.pdb
+              )
 
-          for asset in "${assets[@]}"; do
-            test -f "$asset"
-          done
+              for asset in "${assets[@]}"; do
+                test -f "$asset"
+              done
 
-          if ! gh release view "$LIBLOGGER_SIGNED_RELEASE_TAG" >/dev/null 2>&1; then
-            gh release create "$LIBLOGGER_SIGNED_RELEASE_TAG" \
-              --target "$GITHUB_SHA" \
-              --title "Latest signed LibLogger" \
-              --notes "Latest signed Windows x64 and ARM64 LibLogger builds." \
-              --prerelease
-          fi
+              if ! gh release view "$LIBLOGGER_SIGNED_RELEASE_TAG" >/dev/null 2>&1; then
+                gh release create "$LIBLOGGER_SIGNED_RELEASE_TAG" \
+                  --target "$GITHUB_SHA" \
+                  --title "Latest signed LibLogger" \
+                  --notes "Latest signed Windows x64 and ARM64 LibLogger builds." \
+                  --prerelease
+              fi
 
-          gh release upload "$LIBLOGGER_SIGNED_RELEASE_TAG" "${assets[@]}" --clobber
+              gh release upload "$LIBLOGGER_SIGNED_RELEASE_TAG" "${assets[@]}" --clobber
 
-      - name: Upload combined liblogger zip artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: liblogger-all-platforms
-          if-no-files-found: error
-          retention-days: 14
-          path: release/bundle/liblogger-all-platforms.zip
+          - name: Upload combined liblogger zip artifact
+            uses: actions/upload-artifact@v4
+            with:
+              name: liblogger-all-platforms
+              if-no-files-found: error
+              retention-days: 14
+              path: release/bundle/liblogger-all-platforms.zip
 
-      - name: Upload collected liblogger artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: liblogger-release-artifacts
-          if-no-files-found: error
-          retention-days: 14
-          path: |
-            release/windows/*.dll
-            release/windows/*.pdb
-            release/linux/*.so
-            release/macos/*.dylib
-            release/bundle/liblogger-all-platforms.zip
-            release/SHA512SUMS.txt
+          - name: Upload collected liblogger artifacts
+            uses: actions/upload-artifact@v4
+            with:
+              name: liblogger-release-artifacts
+              if-no-files-found: error
+              retention-days: 14
+              path: |
+                release/windows/*.dll
+                release/windows/*.pdb
+                release/linux/*.so
+                release/macos/*.dylib
+                release/bundle/liblogger-all-platforms.zip
+                release/SHA512SUMS.txt

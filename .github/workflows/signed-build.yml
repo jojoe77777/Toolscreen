@@ -49,14 +49,6 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Set up MSVC developer command prompt
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: ${{ matrix.vs_arch }}
-
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
-
       - name: Validate signing configuration
         shell: pwsh
         run: |
@@ -64,50 +56,59 @@ jobs:
             throw 'Missing SIGNPATH_API_TOKEN secret for the signed release workflow.'
           }
 
-      - name: Resolve SignPath artifact version
-        id: signpath_version
-        shell: pwsh
-        run: |
-          $versionFile = Join-Path $env:GITHUB_WORKSPACE 'ToolscreenVersion.cmake'
-          $versionContent = Get-Content $versionFile -Raw
+      - parallel:
+          - name: Set up MSVC developer command prompt
+            uses: ilammy/msvc-dev-cmd@v1
+            with:
+              arch: ${{ matrix.vs_arch }}
 
-          $majorMatch = [regex]::Match($versionContent, 'set\(TOOLSCREEN_VERSION_MAJOR\s+(\d+)\)')
-          $minorMatch = [regex]::Match($versionContent, 'set\(TOOLSCREEN_VERSION_MINOR\s+(\d+)\)')
-          $patchMatch = [regex]::Match($versionContent, 'set\(TOOLSCREEN_VERSION_PATCH\s+(\d+)\)')
+          - name: Set up sccache
+            uses: mozilla-actions/sccache-action@v0.0.9
 
-          if (-not $majorMatch.Success -or -not $minorMatch.Success -or -not $patchMatch.Success) {
-            throw "Failed to parse version from $versionFile"
-          }
+          - name: Resolve SignPath artifact version
+            id: signpath_version
+            shell: pwsh
+            run: |
+              $versionFile = Join-Path $env:GITHUB_WORKSPACE 'ToolscreenVersion.cmake'
+              $versionContent = Get-Content $versionFile -Raw
 
-          $version = '{0}.{1}.{2}' -f $majorMatch.Groups[1].Value, $minorMatch.Groups[1].Value, $patchMatch.Groups[1].Value
-          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+              $majorMatch = [regex]::Match($versionContent, 'set\(TOOLSCREEN_VERSION_MAJOR\s+(\d+)\)')
+              $minorMatch = [regex]::Match($versionContent, 'set\(TOOLSCREEN_VERSION_MINOR\s+(\d+)\)')
+              $patchMatch = [regex]::Match($versionContent, 'set\(TOOLSCREEN_VERSION_PATCH\s+(\d+)\)')
 
-      - name: Restore CMake dependency cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ env.TOOLSCREEN_BUILD_DIR }}/_deps
-            ${{ env.TOOLSCREEN_BUILD_DIR }}/downloads
-          key: windows-${{ matrix.arch }}-signed-native-deps-v1-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'src/vcpkg.json') }}
-          restore-keys: |
-            windows-${{ matrix.arch }}-signed-native-deps-v1-
+              if (-not $majorMatch.Success -or -not $minorMatch.Success -or -not $patchMatch.Success) {
+                throw "Failed to parse version from $versionFile"
+              }
 
-      - name: Restore vcpkg binary cache
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
-          key: windows-${{ matrix.arch }}-vcpkg-binary-v2-${{ hashFiles('src/vcpkg.json') }}
-          restore-keys: |
-            windows-${{ matrix.arch }}-vcpkg-binary-v2-
+              $version = '{0}.{1}.{2}' -f $majorMatch.Groups[1].Value, $minorMatch.Groups[1].Value, $patchMatch.Groups[1].Value
+              "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-      - name: Restore prebuilt liblogger cache
-        id: prebuilt_liblogger_cache
-        uses: actions/cache@v4
-        with:
-          path: out/prebuilt-liblogger
-          key: windows-${{ matrix.arch }}-prebuilt-liblogger-v2-${{ hashFiles('liblogger/LibLoggerVersion.cmake', 'scripts/fetch_signed_liblogger.ps1') }}
-          restore-keys: |
-            windows-${{ matrix.arch }}-prebuilt-liblogger-v2-
+          - name: Restore CMake dependency cache
+            uses: actions/cache@v4
+            with:
+              path: |
+                ${{ env.TOOLSCREEN_BUILD_DIR }}/_deps
+                ${{ env.TOOLSCREEN_BUILD_DIR }}/downloads
+              key: windows-${{ matrix.arch }}-signed-native-deps-v1-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'src/vcpkg.json') }}
+              restore-keys: |
+                windows-${{ matrix.arch }}-signed-native-deps-v1-
+
+          - name: Restore vcpkg binary cache
+            uses: actions/cache@v4
+            with:
+              path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+              key: windows-${{ matrix.arch }}-vcpkg-binary-v2-${{ hashFiles('src/vcpkg.json') }}
+              restore-keys: |
+                windows-${{ matrix.arch }}-vcpkg-binary-v2-
+
+          - name: Restore prebuilt liblogger cache
+            id: prebuilt_liblogger_cache
+            uses: actions/cache@v4
+            with:
+              path: out/prebuilt-liblogger
+              key: windows-${{ matrix.arch }}-prebuilt-liblogger-v2-${{ hashFiles('liblogger/LibLoggerVersion.cmake', 'scripts/fetch_signed_liblogger.ps1') }}
+              restore-keys: |
+                windows-${{ matrix.arch }}-prebuilt-liblogger-v2-
 
       - name: Fetch latest signed liblogger artifacts
         if: ${{ steps.prebuilt_liblogger_cache.outputs.cache-hit != 'true' }}
@@ -254,14 +255,6 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Set up MSVC developer command prompt
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: ${{ matrix.vs_arch }}
-
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
-
       - name: Validate signing configuration
         shell: pwsh
         run: |
@@ -269,67 +262,76 @@ jobs:
             throw 'Missing SIGNPATH_API_TOKEN secret for the signed release workflow.'
           }
 
-      - name: Resolve SignPath artifact version
-        id: signpath_version
-        shell: pwsh
-        run: |
-          $versionFile = Join-Path $env:GITHUB_WORKSPACE 'ToolscreenVersion.cmake'
-          $versionContent = Get-Content $versionFile -Raw
+      - parallel:
+          - name: Set up MSVC developer command prompt
+            uses: ilammy/msvc-dev-cmd@v1
+            with:
+              arch: ${{ matrix.vs_arch }}
 
-          $majorMatch = [regex]::Match($versionContent, 'set\(TOOLSCREEN_VERSION_MAJOR\s+(\d+)\)')
-          $minorMatch = [regex]::Match($versionContent, 'set\(TOOLSCREEN_VERSION_MINOR\s+(\d+)\)')
-          $patchMatch = [regex]::Match($versionContent, 'set\(TOOLSCREEN_VERSION_PATCH\s+(\d+)\)')
+          - name: Set up sccache
+            uses: mozilla-actions/sccache-action@v0.0.9
 
-          if (-not $majorMatch.Success -or -not $minorMatch.Success -or -not $patchMatch.Success) {
-            throw "Failed to parse version from $versionFile"
-          }
+          - name: Resolve SignPath artifact version
+            id: signpath_version
+            shell: pwsh
+            run: |
+              $versionFile = Join-Path $env:GITHUB_WORKSPACE 'ToolscreenVersion.cmake'
+              $versionContent = Get-Content $versionFile -Raw
 
-          $version = '{0}.{1}.{2}' -f $majorMatch.Groups[1].Value, $minorMatch.Groups[1].Value, $patchMatch.Groups[1].Value
-          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+              $majorMatch = [regex]::Match($versionContent, 'set\(TOOLSCREEN_VERSION_MAJOR\s+(\d+)\)')
+              $minorMatch = [regex]::Match($versionContent, 'set\(TOOLSCREEN_VERSION_MINOR\s+(\d+)\)')
+              $patchMatch = [regex]::Match($versionContent, 'set\(TOOLSCREEN_VERSION_PATCH\s+(\d+)\)')
 
-      - name: Set up Java 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
+              if (-not $majorMatch.Success -or -not $minorMatch.Success -or -not $patchMatch.Success) {
+                throw "Failed to parse version from $versionFile"
+              }
 
-      - name: Restore packaging dependency cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ env.TOOLSCREEN_PACKAGING_BUILD_DIR }}/_deps
-            ${{ env.TOOLSCREEN_PACKAGING_BUILD_DIR }}/downloads
-          key: windows-${{ matrix.arch }}-signed-package-deps-v1-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'src/vcpkg.json') }}
-          restore-keys: |
-            windows-${{ matrix.arch }}-signed-package-deps-v1-
+              $version = '{0}.{1}.{2}' -f $majorMatch.Groups[1].Value, $minorMatch.Groups[1].Value, $patchMatch.Groups[1].Value
+              "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-      - name: Restore vcpkg binary cache
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
-          key: windows-${{ matrix.arch }}-vcpkg-binary-v2-${{ hashFiles('src/vcpkg.json') }}
-          restore-keys: |
-            windows-${{ matrix.arch }}-vcpkg-binary-v2-
+          - name: Set up Java 17
+            uses: actions/setup-java@v4
+            with:
+              distribution: temurin
+              java-version: '17'
 
-      - name: Restore Maven repository cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.m2/repository
-          key: windows-maven-v2-${{ hashFiles('CMakeLists.txt') }}
-          restore-keys: |
-            windows-maven-v2-
+          - name: Restore packaging dependency cache
+            uses: actions/cache@v4
+            with:
+              path: |
+                ${{ env.TOOLSCREEN_PACKAGING_BUILD_DIR }}/_deps
+                ${{ env.TOOLSCREEN_PACKAGING_BUILD_DIR }}/downloads
+              key: windows-${{ matrix.arch }}-signed-package-deps-v1-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'src/vcpkg.json') }}
+              restore-keys: |
+                windows-${{ matrix.arch }}-signed-package-deps-v1-
 
-      - name: Download signed x64 native payload
-        uses: actions/download-artifact@v4
-        with:
-          name: toolscreen-x64-signed-native-payload
-          path: out/signed-native/x64
+          - name: Restore vcpkg binary cache
+            uses: actions/cache@v4
+            with:
+              path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+              key: windows-${{ matrix.arch }}-vcpkg-binary-v2-${{ hashFiles('src/vcpkg.json') }}
+              restore-keys: |
+                windows-${{ matrix.arch }}-vcpkg-binary-v2-
 
-      - name: Download signed ARM64 native payload
-        uses: actions/download-artifact@v4
-        with:
-          name: toolscreen-arm64-signed-native-payload
-          path: out/signed-native/arm64
+          - name: Restore Maven repository cache
+            uses: actions/cache@v4
+            with:
+              path: ~/.m2/repository
+              key: windows-maven-v2-${{ hashFiles('CMakeLists.txt') }}
+              restore-keys: |
+                windows-maven-v2-
+
+          - name: Download signed x64 native payload
+            uses: actions/download-artifact@v4
+            with:
+              name: toolscreen-x64-signed-native-payload
+              path: out/signed-native/x64
+
+          - name: Download signed ARM64 native payload
+            uses: actions/download-artifact@v4
+            with:
+              name: toolscreen-arm64-signed-native-payload
+              path: out/signed-native/arm64
 
       - name: Validate signed native payloads
         shell: pwsh
@@ -434,29 +436,81 @@ jobs:
         shell: pwsh
         run: ctest --test-dir ${{ env.TOOLSCREEN_PACKAGING_BUILD_DIR }} --output-on-failure --tests-regex "^(toolscreen_exe_exists|toolscreen_exe_embeds_dll|toolscreen_exe_resources_readable|toolscreen_downloader_exe_exists|toolscreen_jar_exists|toolscreen_downloader_jar_exists)$"
 
-      - name: Upload main installer JAR for SignPath
-        id: signpath_jar_upload
-        uses: actions/upload-artifact@v4
-        with:
-          name: toolscreen-${{ matrix.arch }}-signpath-main-installer-jar-input
-          compression-level: 6
-          if-no-files-found: error
-          retention-days: 1
-          path: ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/Toolscreen-*-double-click-me.jar
+      - parallel:
+          - name: Upload main installer JAR for SignPath
+            id: signpath_jar_upload
+            uses: actions/upload-artifact@v4
+            with:
+              name: toolscreen-${{ matrix.arch }}-signpath-main-installer-jar-input
+              compression-level: 6
+              if-no-files-found: error
+              retention-days: 1
+              path: ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/Toolscreen-*-double-click-me.jar
 
-      - name: Submit main installer JAR to SignPath with origin verification
-        uses: signpath/github-action-submit-signing-request@v2
-        with:
-          api-token: ${{ env.SIGNPATH_API_TOKEN }}
-          organization-id: ${{ env.SIGNPATH_ORGANIZATION_ID }}
-          project-slug: ${{ env.SIGNPATH_PROJECT_SLUG }}
-          signing-policy-slug: ${{ env.SIGNPATH_SIGNING_POLICY_SLUG }}
-          artifact-configuration-slug: ${{ env.SIGNPATH_JAR_ARTIFACT_CONFIGURATION_SLUG }}
-          github-artifact-id: ${{ steps.signpath_jar_upload.outputs.artifact-id }}
-          wait-for-completion: true
-          output-artifact-directory: out/signpath-jar-output
-          parameters: |
-            version: ${{ toJSON(steps.signpath_version.outputs.version) }}
+          - name: Upload installer EXE for SignPath
+            id: signpath_installer_upload
+            uses: actions/upload-artifact@v4
+            with:
+              name: toolscreen-${{ matrix.arch }}-signpath-installer-exe-input
+              compression-level: 6
+              if-no-files-found: error
+              retention-days: 1
+              path: ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/Toolscreen-*-double-click-me.exe
+
+          - name: Upload downloader EXE for SignPath
+            id: signpath_downloader_upload
+            uses: actions/upload-artifact@v4
+            with:
+              name: toolscreen-${{ matrix.arch }}-signpath-downloader-exe-input
+              compression-level: 6
+              if-no-files-found: error
+              retention-days: 1
+              path: ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/toolscreen-downloader.exe
+
+      # Each signing request writes to its own output directory, so the three
+      # SignPath round trips can overlap instead of queueing behind each other.
+      - parallel:
+          - name: Submit main installer JAR to SignPath with origin verification
+            uses: signpath/github-action-submit-signing-request@v2
+            with:
+              api-token: ${{ env.SIGNPATH_API_TOKEN }}
+              organization-id: ${{ env.SIGNPATH_ORGANIZATION_ID }}
+              project-slug: ${{ env.SIGNPATH_PROJECT_SLUG }}
+              signing-policy-slug: ${{ env.SIGNPATH_SIGNING_POLICY_SLUG }}
+              artifact-configuration-slug: ${{ env.SIGNPATH_JAR_ARTIFACT_CONFIGURATION_SLUG }}
+              github-artifact-id: ${{ steps.signpath_jar_upload.outputs.artifact-id }}
+              wait-for-completion: true
+              output-artifact-directory: out/signpath-jar-output
+              parameters: |
+                version: ${{ toJSON(steps.signpath_version.outputs.version) }}
+
+          - name: Submit installer EXE to SignPath with origin verification
+            uses: signpath/github-action-submit-signing-request@v2
+            with:
+              api-token: ${{ env.SIGNPATH_API_TOKEN }}
+              organization-id: ${{ env.SIGNPATH_ORGANIZATION_ID }}
+              project-slug: ${{ env.SIGNPATH_PROJECT_SLUG }}
+              signing-policy-slug: ${{ env.SIGNPATH_SIGNING_POLICY_SLUG }}
+              artifact-configuration-slug: ${{ env.SIGNPATH_INSTALLER_ARTIFACT_CONFIGURATION_SLUG }}
+              github-artifact-id: ${{ steps.signpath_installer_upload.outputs.artifact-id }}
+              wait-for-completion: true
+              output-artifact-directory: out/signpath-installer-exe-output
+              parameters: |
+                version: ${{ toJSON(steps.signpath_version.outputs.version) }}
+
+          - name: Submit downloader EXE to SignPath with origin verification
+            uses: signpath/github-action-submit-signing-request@v2
+            with:
+              api-token: ${{ env.SIGNPATH_API_TOKEN }}
+              organization-id: ${{ env.SIGNPATH_ORGANIZATION_ID }}
+              project-slug: ${{ env.SIGNPATH_PROJECT_SLUG }}
+              signing-policy-slug: ${{ env.SIGNPATH_SIGNING_POLICY_SLUG }}
+              artifact-configuration-slug: ${{ env.SIGNPATH_DOWNLOADER_ARTIFACT_CONFIGURATION_SLUG }}
+              github-artifact-id: ${{ steps.signpath_downloader_upload.outputs.artifact-id }}
+              wait-for-completion: true
+              output-artifact-directory: out/signpath-downloader-exe-output
+              parameters: |
+                version: ${{ toJSON(steps.signpath_version.outputs.version) }}
 
       - name: Replace main installer JAR with origin-verified signed output
         shell: pwsh
@@ -475,30 +529,6 @@ jobs:
 
           Copy-Item -Path $signedJarMatches[0].FullName -Destination $jarMatches[0].FullName -Force
 
-      - name: Upload installer EXE for SignPath
-        id: signpath_installer_upload
-        uses: actions/upload-artifact@v4
-        with:
-          name: toolscreen-${{ matrix.arch }}-signpath-installer-exe-input
-          compression-level: 6
-          if-no-files-found: error
-          retention-days: 1
-          path: ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/Toolscreen-*-double-click-me.exe
-
-      - name: Submit installer EXE to SignPath with origin verification
-        uses: signpath/github-action-submit-signing-request@v2
-        with:
-          api-token: ${{ env.SIGNPATH_API_TOKEN }}
-          organization-id: ${{ env.SIGNPATH_ORGANIZATION_ID }}
-          project-slug: ${{ env.SIGNPATH_PROJECT_SLUG }}
-          signing-policy-slug: ${{ env.SIGNPATH_SIGNING_POLICY_SLUG }}
-          artifact-configuration-slug: ${{ env.SIGNPATH_INSTALLER_ARTIFACT_CONFIGURATION_SLUG }}
-          github-artifact-id: ${{ steps.signpath_installer_upload.outputs.artifact-id }}
-          wait-for-completion: true
-          output-artifact-directory: out/signpath-installer-exe-output
-          parameters: |
-            version: ${{ toJSON(steps.signpath_version.outputs.version) }}
-
       - name: Replace installer EXE with origin-verified signed output
         shell: pwsh
         run: |
@@ -515,30 +545,6 @@ jobs:
           }
 
           Copy-Item -Path $signedInstallerMatches[0].FullName -Destination $installerMatches[0].FullName -Force
-
-      - name: Upload downloader EXE for SignPath
-        id: signpath_downloader_upload
-        uses: actions/upload-artifact@v4
-        with:
-          name: toolscreen-${{ matrix.arch }}-signpath-downloader-exe-input
-          compression-level: 6
-          if-no-files-found: error
-          retention-days: 1
-          path: ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/toolscreen-downloader.exe
-
-      - name: Submit downloader EXE to SignPath with origin verification
-        uses: signpath/github-action-submit-signing-request@v2
-        with:
-          api-token: ${{ env.SIGNPATH_API_TOKEN }}
-          organization-id: ${{ env.SIGNPATH_ORGANIZATION_ID }}
-          project-slug: ${{ env.SIGNPATH_PROJECT_SLUG }}
-          signing-policy-slug: ${{ env.SIGNPATH_SIGNING_POLICY_SLUG }}
-          artifact-configuration-slug: ${{ env.SIGNPATH_DOWNLOADER_ARTIFACT_CONFIGURATION_SLUG }}
-          github-artifact-id: ${{ steps.signpath_downloader_upload.outputs.artifact-id }}
-          wait-for-completion: true
-          output-artifact-directory: out/signpath-downloader-exe-output
-          parameters: |
-            version: ${{ toJSON(steps.signpath_version.outputs.version) }}
 
       - name: Replace downloader EXE with origin-verified signed output
         shell: pwsh
@@ -644,32 +650,33 @@ jobs:
 
           Set-Content -Path $manifestPath -Value $manifestLines -Encoding utf8
 
-      - name: Upload signed release artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: toolscreen-${{ matrix.arch }}-signed-release-artifacts
-          compression-level: 6
-          if-no-files-found: error
-          retention-days: 14
-          path: |
-            ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/Toolscreen-not-legal-for-speedruns.dll
-            ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/Toolscreen-not-legal-for-speedruns.pdb
-            ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/${{ matrix.logger_name }}-not-legal-for-speedruns.dll
-            ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/${{ matrix.logger_name }}-not-legal-for-speedruns.pdb
-            ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/Toolscreen-*-double-click-me-not-legal-for-speedruns.jar
-            ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/Toolscreen-*-double-click-me-not-legal-for-speedruns.exe
-            ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/toolscreen-downloader-not-legal-for-speedruns.jar
-            ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/toolscreen-downloader-not-legal-for-speedruns.exe
-            ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/SHA512SUMS.txt
+      - parallel:
+          - name: Upload signed release artifacts
+            uses: actions/upload-artifact@v4
+            with:
+              name: toolscreen-${{ matrix.arch }}-signed-release-artifacts
+              compression-level: 6
+              if-no-files-found: error
+              retention-days: 14
+              path: |
+                ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/Toolscreen-not-legal-for-speedruns.dll
+                ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/Toolscreen-not-legal-for-speedruns.pdb
+                ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/${{ matrix.logger_name }}-not-legal-for-speedruns.dll
+                ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/${{ matrix.logger_name }}-not-legal-for-speedruns.pdb
+                ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/Toolscreen-*-double-click-me-not-legal-for-speedruns.jar
+                ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/Toolscreen-*-double-click-me-not-legal-for-speedruns.exe
+                ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/toolscreen-downloader-not-legal-for-speedruns.jar
+                ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/toolscreen-downloader-not-legal-for-speedruns.exe
+                ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/SHA512SUMS.txt
 
-      - name: Upload final signed JAR artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: toolscreen-${{ matrix.arch }}-final-signed-jar
-          compression-level: 6
-          if-no-files-found: error
-          retention-days: 14
-          path: ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/Toolscreen-*-double-click-me-not-legal-for-speedruns.jar
+          - name: Upload final signed JAR artifact
+            uses: actions/upload-artifact@v4
+            with:
+              name: toolscreen-${{ matrix.arch }}-final-signed-jar
+              compression-level: 6
+              if-no-files-found: error
+              retention-days: 14
+              path: ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/Toolscreen-*-double-click-me-not-legal-for-speedruns.jar
 
       - name: Show sccache stats
         if: ${{ always() }}
