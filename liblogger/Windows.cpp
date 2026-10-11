@@ -26,6 +26,7 @@
 #include <condition_variable>
 #include <cstring>
 #include <deque>
+#include <functional>
 #include <limits>
 #include <type_traits>
 #include <unordered_set>
@@ -1211,6 +1212,42 @@ std::wstring GetLoadedModulePath(HMODULE hModule) {
     return L"";
 }
 
+// Module analysis runs on one long-lived worker instead of a thread per module. Those threads exited moments after
+// the load that queued them, and LWJGL 3.2's lwjgl.dll crashes the game on DLL_THREAD_DETACH when a thread exits
+// between its load and its JNI_OnLoad: the handler calls GetEnv through a JavaVM pointer that JNI_OnLoad sets.
+std::mutex g_moduleAnalysisMutex;
+std::condition_variable g_moduleAnalysisCondition;
+std::deque<std::function<void()>> g_moduleAnalysisQueue;
+
+void QueueModuleAnalysis(std::function<void()> job) {
+    {
+        std::lock_guard<std::mutex> lock(g_moduleAnalysisMutex);
+        if (g_shuttingDown.load(std::memory_order_relaxed)) {
+            return;
+        }
+        g_moduleAnalysisQueue.push_back(std::move(job));
+    }
+    g_moduleAnalysisCondition.notify_one();
+}
+
+void RunModuleAnalysisWorker() {
+    while (true) {
+        std::function<void()> job;
+        {
+            std::unique_lock<std::mutex> lock(g_moduleAnalysisMutex);
+            g_moduleAnalysisCondition.wait(lock, [] {
+                return g_shuttingDown.load(std::memory_order_acquire) || !g_moduleAnalysisQueue.empty();
+            });
+            if (g_shuttingDown.load(std::memory_order_relaxed)) {
+                return;
+            }
+            job = std::move(g_moduleAnalysisQueue.front());
+            g_moduleAnalysisQueue.pop_front();
+        }
+        job();
+    }
+}
+
 void HandleLoadedModule(HMODULE hModule) noexcept {
     if (!hModule || IsProcessShuttingDown()) return;
 
@@ -1226,8 +1263,8 @@ void HandleLoadedModule(HMODULE hModule) noexcept {
             return;
         }
 
-        // Defer expensive module analysis to a background thread.
-        std::thread([path = std::move(loadedPath)]() {
+        // Defer expensive module analysis to the analysis worker.
+        QueueModuleAnalysis([path = std::move(loadedPath)]() {
             try {
                 std::wstring hashW = CalculateSHA512(path.c_str());
                 std::string hash = ConvertWcharToChar(hashW);
@@ -1249,7 +1286,7 @@ void HandleLoadedModule(HMODULE hModule) noexcept {
             } catch (...) {
                 LogErrorToMinecraft("ModuleAnalysisError", "Unknown exception");
             }
-        }).detach();
+        });
     } catch (const std::exception& e) {
         try {
             LogErrorToMinecraft("ModuleAnalysisError", std::string(e.what()));
@@ -1265,7 +1302,7 @@ void HandleLoadedModule(HMODULE hModule) noexcept {
 
 void HandleBlockedModule(const std::wstring& blockedPath) noexcept {
     try {
-        std::thread([path = blockedPath]() {
+        QueueModuleAnalysis([path = blockedPath]() {
             try {
                 ModuleInfo info = AnalyzeModule(path);
                 LogModuleToMinecraft(info, "moduleBlocked");
@@ -1274,7 +1311,7 @@ void HandleBlockedModule(const std::wstring& blockedPath) noexcept {
             } catch (...) {
                 LogErrorToMinecraft("BlockedModuleAnalysisError", "Unknown exception");
             }
-        }).detach();
+        });
     } catch (const std::exception& e) {
         try {
             LogErrorToMinecraft("BlockedModuleAnalysisError", std::string(e.what()));
@@ -1350,6 +1387,13 @@ HMODULE WINAPI DetourLoadLibraryExA(LPCSTR lpLibFileName, HANDLE hFile, DWORD dw
 
 void RunBackgroundWorkers() {
     try {
+        std::thread(RunModuleAnalysisWorker).detach();
+    } catch (const std::exception& e) {
+        LogErrorToMinecraft("ModuleAnalysisFatalError", std::string("Failed to start module analysis: ") + e.what());
+    } catch (...) {
+        LogErrorToMinecraft("ModuleAnalysisFatalError", "Failed to start module analysis: Unknown exception");
+    }
+    try {
         std::thread(RunInitialScanOptimized).detach();
     } catch (const std::exception& e) {
         LogErrorToMinecraft("InitialScanFatalError", std::string("Failed to start initial scan: ") + e.what());
@@ -1399,6 +1443,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
     } else if (ul_reason_for_call == DLL_PROCESS_DETACH) {
         g_shuttingDown.store(true, std::memory_order_release);
         g_jniLogCondition.notify_all();
+        g_moduleAnalysisCondition.notify_all();
         // The OS is already tearing down the process when lpReserved is set;
         // avoid loader-lock work that cannot provide any useful cleanup.
         if (lpReserved == nullptr) {
