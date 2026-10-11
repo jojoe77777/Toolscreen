@@ -523,7 +523,20 @@ void ResetGlobalTestState(const std::filesystem::path& root) {
     LoadLangs();
     Expect(!GetLangs().empty(), "Expected embedded language metadata to load.");
     Expect(LoadTranslation("en"), "Expected embedded English translations to load.");
-    UpdateCachedWindowMetricsFromSize(kWindowWidth, kWindowHeight);
+
+    // Seed the cache with the game window's client size, which is what GetCachedWindowWidth re-measures every
+    // 250 ms. Seeding the outer window size let a test read one width before LoadConfig and the loader resolve
+    // against another whenever that refresh landed in between.
+    int cachedWidth = kWindowWidth;
+    int cachedHeight = kWindowHeight;
+    RECT clientRect{};
+    const HWND gameHwnd = g_minecraftHwnd.load(std::memory_order_acquire);
+    if (gameHwnd != nullptr && GetClientRect(gameHwnd, &clientRect) && clientRect.right > clientRect.left &&
+        clientRect.bottom > clientRect.top) {
+        cachedWidth = clientRect.right - clientRect.left;
+        cachedHeight = clientRect.bottom - clientRect.top;
+    }
+    UpdateCachedWindowMetricsFromSize(cachedWidth, cachedHeight);
 }
 
 const ModeConfig* ResolveVisualNinjabrainPreviewMode() {
