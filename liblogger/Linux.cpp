@@ -52,7 +52,7 @@ struct ModuleInfo {
 using PtrJNI_GetCreatedJavaVMs = jint(JNICALL*)(JavaVM**, jsize, jsize*);
 
 #ifndef LIBLOGGER_VERSION_STR
-#define LIBLOGGER_VERSION_STR "1.1.0"
+#define LIBLOGGER_VERSION_STR "1.1.1"
 #endif
 static constexpr std::string_view kLibLoggerVersion = LIBLOGGER_VERSION_STR;
 static constexpr uintmax_t kMaxAnalyzedModuleSize = 512ULL * 1024ULL * 1024ULL;

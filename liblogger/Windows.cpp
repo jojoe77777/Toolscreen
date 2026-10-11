@@ -45,7 +45,7 @@ std::mutex g_seenHashesMutex;
 std::unordered_set<std::string> g_seenHashes;
 
 #ifndef LIBLOGGER_VERSION_STR
-#define LIBLOGGER_VERSION_STR "1.1.0"
+#define LIBLOGGER_VERSION_STR "1.1.1"
 #endif
 
 // Version number
