@@ -5,6 +5,7 @@
 #include "base64.h"
 #include <jni.h>
 #include <Windows.h>
+#include <winternl.h>
 #include <string>
 #include <vector>
 #include <sstream>
@@ -622,8 +623,23 @@ bool IsProcessShuttingDown() {
     return shutdownInProgress && shutdownInProgress() != FALSE;
 }
 
+// True while this thread holds the loader lock, e.g. a LoadLibrary call from inside another DLL's DllMain (glfw.dll
+// and JNA's dispatch DLL both do this during game startup). WinVerifyTrust can wait on a new thread-pool worker
+// there, and that worker cannot start until the loader lock is released, so the whole process deadlocks. Skip
+// signature work then; this matches the existing fail-open policy.
+bool CurrentThreadOwnsLoaderLock() {
+    const auto* peb = reinterpret_cast<const BYTE*>(NtCurrentTeb()->ProcessEnvironmentBlock);
+#ifdef _WIN64
+    constexpr size_t kLoaderLockOffset = 0x110;
+#else
+    constexpr size_t kLoaderLockOffset = 0xA0;
+#endif
+    const auto* loaderLock = *reinterpret_cast<RTL_CRITICAL_SECTION* const*>(peb + kLoaderLockOffset);
+    return loaderLock && HandleToULong(loaderLock->OwningThread) == GetCurrentThreadId();
+}
+
 bool IsBlockedLoadLibraryRequest(LPCWSTR requestedPath, std::wstring& blockedPath) {
-    if (g_isCheckingLoadSignature || IsProcessShuttingDown()) {
+    if (g_isCheckingLoadSignature || IsProcessShuttingDown() || CurrentThreadOwnsLoaderLock()) {
         return false;
     }
 
@@ -640,7 +656,7 @@ bool IsBlockedLoadLibraryRequest(LPCWSTR requestedPath, std::wstring& blockedPat
 }
 
 bool IsBlockedLoadLibraryRequest(LPCSTR requestedPath, std::wstring& blockedPath) {
-    if (g_isCheckingLoadSignature || IsProcessShuttingDown()) {
+    if (g_isCheckingLoadSignature || IsProcessShuttingDown() || CurrentThreadOwnsLoaderLock()) {
         return false;
     }
 
