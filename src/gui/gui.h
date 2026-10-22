@@ -31,7 +31,7 @@ struct Color {
 
 struct DecodedImageData {
     enum Type { Background, UserImage };
-    Type type;
+    Type type = UserImage;
     std::string id;
     int width = 0, height = 0, channels = 0;
     unsigned char* data = nullptr;
@@ -52,8 +52,10 @@ void LoadImageAsync(DecodedImageData::Type type, std::string id, std::string pat
 std::string WideToUtf8(const std::wstring& wide_string);
 void HandleImGuiContextReset();
 void InitializeImGuiContext(HWND hwnd);
+void SyncImGuiMouseCursorOwnership();
 std::recursive_mutex& GetImGuiContextMutex();
 void StartSupportersFetch();
+void StopSupportersFetch();
 bool IsGuiHotkeyPressed(WPARAM wParam);
 bool IsHotkeyBindingActive();
 bool IsRebindBindingActive();
@@ -179,6 +181,10 @@ struct GradientConfig {
 struct BackgroundConfig {
     std::string selectedMode = "color";
     std::string image;
+    std::string imageFit = ConfigDefaults::BACKGROUND_IMAGE_FIT;
+    float imageCenterScale = ConfigDefaults::BACKGROUND_IMAGE_CENTER_SCALE;
+    float imageTileScale = ConfigDefaults::BACKGROUND_IMAGE_TILE_SCALE;
+    int imageTileSpacing = ConfigDefaults::BACKGROUND_IMAGE_TILE_SPACING;
     Color color;
 
     std::vector<GradientColorStop> gradientStops;
@@ -1046,6 +1052,8 @@ struct Config {
     bool restoreWindowedModeOnFullscreenExit = ConfigDefaults::CONFIG_RESTORE_WINDOWED_MODE_ON_FULLSCREEN_EXIT;
     bool disableFullscreenPrompt = false;
     bool disableConfigurePrompt = false;
+    int startupIndicatorMode = ConfigDefaults::STARTUP_INDICATOR_MODE;
+    std::string startupIndicatorImagePath = ConfigDefaults::STARTUP_INDICATOR_IMAGE_PATH;
     NinjabrainOverlayConfig ninjabrainOverlay;
     KeystrokesConfig keystrokes;
 };
@@ -1186,6 +1194,11 @@ std::shared_ptr<const Config> GetConfigSnapshot();
 // Lock-free read of the published current mode id.
 // Render/input readers should prefer this over reading g_currentModeId directly.
 std::string GetPublishedCurrentModeId();
+// Publishes a new active mode ID to the lock-guarded double buffer read by GetPublishedCurrentModeId().
+void PublishCurrentModeIdBuffer(const std::string& modeId);
+// Copies the latest published game state (e.g. "inworld,unpaused").
+std::string GetPublishedGameState();
+void PublishGameStateBufferIfChanged(const std::string& state);
 
 // HOTKEY SECONDARY MODE STATE (separated from Config for thread safety)
 // state mutated by input_hook and logic_thread while Config is read elsewhere.
@@ -1363,17 +1376,22 @@ void ClearGuiTabSelectionOverride();
 
 extern std::atomic<bool> g_welcomeToastVisible;
 extern std::atomic<bool> g_configurePromptDismissedThisSession;
-void RenderWelcomeToast(bool isFullscreen);
+void RenderWelcomeToast(bool isFullscreen, int startupIndicatorMode, const std::string& customImagePath);
 
 void RenderRebindIndicator();
 bool IsRebindIndicatorVisible();
 void InvalidateRebindIndicatorTexture();
+void InvalidateStartupIndicatorTexture();
 
 void HandleConfigLoadFailed(HDC hDc, BOOL (*oWglSwapBuffers)(HDC));
 void RenderImGuiWithStateProtection(bool useFullProtection);
 void SyncImGuiDisplayMetrics(HWND hwnd);
+float ComputeGuiScaleFactorFromCachedWindowSize();
+void ConfigureImGuiFontsAndStyleForCurrentContext(float scaleFactor);
 void SaveConfig();
 void SaveConfigImmediate();
+// processExiting: called from DLL_PROCESS_DETACH at process exit, when every other thread is already gone.
+void SaveConfigImmediate(bool processExiting);
 bool WaitForConfigSaveIdle(int timeoutMs = 3000);
 void ApplyAppearanceConfig();
 void SaveTheme();

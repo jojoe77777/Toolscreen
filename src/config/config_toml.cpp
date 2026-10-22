@@ -4,13 +4,15 @@
 #include "gui/gui.h"
 #include "runtime/logic_thread.h"
 #include "common/utils.h"
-#include "platform/resource.h"
+#include "render/background_fit_layout.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <optional>
 #include <sstream>
 #include <unordered_set>
@@ -61,6 +63,17 @@ std::optional<double> GetNumericValue(const toml::table& tbl, const std::string&
 
 bool IsZeroOrOneValue(double value) {
     return value == 0.0 || value == 1.0;
+}
+
+int NumericDimensionToInt(double value, int fallback) {
+    if (!std::isfinite(value)) { return fallback; }
+    if (value <= static_cast<double>((std::numeric_limits<int>::min)())) {
+        return (std::numeric_limits<int>::min)();
+    }
+    if (value >= static_cast<double>((std::numeric_limits<int>::max)())) {
+        return (std::numeric_limits<int>::max)();
+    }
+    return static_cast<int>(value);
 }
 
 const char* EyeZoomFontSizeModeToTomlString(EyeZoomFontSizeMode mode) {
@@ -227,7 +240,7 @@ void ModeConfigFromTomlInternal(const toml::table& tbl, ModeConfig& cfg, const s
                     cfg.width = (std::max)(1, static_cast<int>(std::lround(cfg.relativeWidth * static_cast<float>(cachedScreenWidth))));
                 }
             } else {
-                cfg.width = static_cast<int>(*widthVal);
+                cfg.width = NumericDimensionToInt(*widthVal, ConfigDefaults::MODE_WIDTH);
             }
         }
     }
@@ -244,7 +257,7 @@ void ModeConfigFromTomlInternal(const toml::table& tbl, ModeConfig& cfg, const s
                     cfg.height = (std::max)(1, static_cast<int>(std::lround(cfg.relativeHeight * static_cast<float>(cachedScreenHeight))));
                 }
             } else {
-                cfg.height = static_cast<int>(*heightVal);
+                cfg.height = NumericDimensionToInt(*heightVal, ConfigDefaults::MODE_HEIGHT);
             }
         }
     }
@@ -255,10 +268,10 @@ void ModeConfigFromTomlInternal(const toml::table& tbl, ModeConfig& cfg, const s
     if (tbl.contains("useRelativeSize") || tbl.contains("relativeWidth") || tbl.contains("relativeHeight")) {
         cfg.useRelativeSize = GetOr(tbl, "useRelativeSize", false);
         if (auto relativeWidth = GetNumericValue(tbl, "relativeWidth")) {
-            cfg.relativeWidth = static_cast<float>(*relativeWidth);
+            cfg.relativeWidth = std::isfinite(*relativeWidth) ? static_cast<float>(*relativeWidth) : -1.0f;
         }
         if (auto relativeHeight = GetNumericValue(tbl, "relativeHeight")) {
-            cfg.relativeHeight = static_cast<float>(*relativeHeight);
+            cfg.relativeHeight = std::isfinite(*relativeHeight) ? static_cast<float>(*relativeHeight) : -1.0f;
         }
     } else if (widthIsPercentage || heightIsPercentage) {
         cfg.useRelativeSize = true;
@@ -668,6 +681,10 @@ void BackgroundConfigToToml(const BackgroundConfig& cfg, toml::table& out) {
 
     out.insert("selectedMode", cfg.selectedMode);
     out.insert("image", cfg.image);
+    out.insert("imageFit", cfg.imageFit);
+    out.insert("imageCenterScale", cfg.imageCenterScale);
+    out.insert("imageTileScale", cfg.imageTileScale);
+    out.insert("imageTileSpacing", cfg.imageTileSpacing);
     out.insert("color", ColorToTomlArray(cfg.color));
 
     GradientConfig gradientCfg;
@@ -682,6 +699,15 @@ void BackgroundConfigToToml(const BackgroundConfig& cfg, toml::table& out) {
 void BackgroundConfigFromToml(const toml::table& tbl, BackgroundConfig& cfg) {
     cfg.selectedMode = GetStringOr(tbl, "selectedMode", ConfigDefaults::BACKGROUND_SELECTED_MODE);
     cfg.image = GetStringOr(tbl, "image", "");
+    cfg.imageFit = BackgroundImageFitToString(ParseBackgroundImageFit(GetStringOr(tbl, "imageFit", ConfigDefaults::BACKGROUND_IMAGE_FIT)));
+    cfg.imageCenterScale = (std::min)(kBackgroundImageScaleMax,
+                                      (std::max)(kBackgroundImageScaleMin,
+                                                 GetOr(tbl, "imageCenterScale", ConfigDefaults::BACKGROUND_IMAGE_CENTER_SCALE)));
+    cfg.imageTileScale = (std::min)(kBackgroundImageScaleMax,
+                                    (std::max)(kBackgroundImageScaleMin,
+                                               GetOr(tbl, "imageTileScale", ConfigDefaults::BACKGROUND_IMAGE_TILE_SCALE)));
+    cfg.imageTileSpacing = (std::min)(kBackgroundImageSpacingMax,
+                                      (std::max)(0, GetOr(tbl, "imageTileSpacing", ConfigDefaults::BACKGROUND_IMAGE_TILE_SPACING)));
     cfg.color = ColorFromTomlArray(GetArray(tbl, "color"), { 0.0f, 0.0f, 0.0f });
 
     GradientConfig gradientCfg;
@@ -2333,7 +2359,10 @@ void ConfigToToml(const Config& config, toml::table& out) {
     out.insert("basicModeEnabled", config.basicModeEnabled);
     out.insert("restoreWindowedModeOnFullscreenExit", config.restoreWindowedModeOnFullscreenExit);
     out.insert("disableFullscreenPrompt", config.disableFullscreenPrompt);
-    out.insert("disableConfigurePrompt", config.disableConfigurePrompt);
+    out.insert("startupIndicatorMode", config.startupIndicatorMode);
+    if (!config.startupIndicatorImagePath.empty()) {
+        out.insert("startupIndicatorImagePath", config.startupIndicatorImagePath);
+    }
 
     toml::array guiHotkeyArr;
     for (const auto& key : config.guiHotkey) { guiHotkeyArr.push_back(static_cast<int64_t>(key)); }
@@ -2622,7 +2651,16 @@ void ConfigFromToml(const toml::table& tbl, Config& config) {
     config.restoreWindowedModeOnFullscreenExit =
         GetOr(tbl, "restoreWindowedModeOnFullscreenExit", ConfigDefaults::CONFIG_RESTORE_WINDOWED_MODE_ON_FULLSCREEN_EXIT);
     config.disableFullscreenPrompt = GetOr(tbl, "disableFullscreenPrompt", ConfigDefaults::CONFIG_DISABLE_FULLSCREEN_PROMPT);
-    config.disableConfigurePrompt = GetOr(tbl, "disableConfigurePrompt", ConfigDefaults::CONFIG_DISABLE_CONFIGURE_PROMPT);
+
+    if (tbl.contains("startupIndicatorMode")) {
+        int m = GetOr(tbl, "startupIndicatorMode", ConfigDefaults::STARTUP_INDICATOR_MODE);
+        if (m < 0 || m > 2) m = ConfigDefaults::STARTUP_INDICATOR_MODE;
+        config.startupIndicatorMode = m;
+    } else {
+        config.startupIndicatorMode = ConfigDefaults::STARTUP_INDICATOR_MODE;
+    }
+    config.startupIndicatorImagePath =
+        GetStringOr(tbl, "startupIndicatorImagePath", ConfigDefaults::STARTUP_INDICATOR_IMAGE_PATH);
 
     config.guiHotkey.clear();
     if (auto arr = GetArray(tbl, "guiHotkey")) {
@@ -3083,7 +3121,8 @@ const std::vector<std::string>& GetConfigTomlOrderedKeys() {
         "basicModeEnabled",
         "restoreWindowedModeOnFullscreenExit",
         "disableFullscreenPrompt",
-        "disableConfigurePrompt",
+        "startupIndicatorMode",
+        "startupIndicatorImagePath",
         "guiHotkey",
         "borderlessHotkey",
         "autoBorderless",
@@ -3480,27 +3519,7 @@ bool RepairLegacyArrayOfTablesConflicts(const std::string& source, std::string& 
 }
 
 bool ParseTomlTableFromString(const std::string& source, toml::table& tbl, std::string& errorDescription) {
-#if TOML_EXCEPTIONS
-    try {
-        tbl = toml::parse(source);
-        return true;
-    } catch (const toml::parse_error& e) {
-        errorDescription = e.what();
-        return false;
-    } catch (const std::exception& e) {
-        errorDescription = e.what();
-        return false;
-    }
-#else
-    toml::parse_result result = toml::parse(source);
-    if (!result) {
-        errorDescription = std::string(result.error().description());
-        return false;
-    }
-
-    tbl = std::move(result).table();
-    return true;
-#endif
+    return ParseTomlSource(source, tbl, errorDescription);
 }
 
 bool WriteConfigTomlDocument(std::ostream& out, const Config& config) {
@@ -3580,66 +3599,80 @@ bool SerializeConfigToTomlString(const Config& config, std::string& outToml) {
 
 bool SaveConfigToTomlFile(const Config& config, const std::wstring& path) {
     try {
-        // Do not pass UTF-8 narrow strings to std::ofstream.
-        // Use std::filesystem::path so the wide Win32 APIs are used under the hood.
-        std::ofstream file(std::filesystem::path(path), std::ios::binary | std::ios::trunc);
-        if (!file.is_open()) { return false; }
-        if (!WriteConfigTomlDocument(file, config)) {
-            return false;
-        }
-
-        file.close();
-        return file.good();
+        // Validated, flushed temp-file write that keeps the previous version as <path>.bak.
+        return WriteTomlFileSafely(path, [&config](std::ostream& out) { return WriteConfigTomlDocument(out, config); });
     } catch (const std::exception& e) {
         Log("ERROR: Failed to save config to TOML: " + std::string(e.what()));
         return false;
     }
 }
 
-bool LoadConfigFromTomlFile(const std::wstring& path, Config& config) {
-    try {
-        std::ifstream in(std::filesystem::path(path), std::ios::binary);
-        if (!in.is_open()) {
-            Log("ERROR: Failed to open config for reading: " + WideToUtf8(path));
-            return false;
-        }
+TomlFileLoadStatus LoadConfigFromTomlFileWithRecovery(const std::wstring& path, Config& config,
+                                                      const std::vector<std::wstring>& extraBackups, std::string* outError) {
+    Config loaded;
+    bool repairedLegacyArrayConflict = false;
+    bool cleanedAppearanceCustomColors = false;
 
-        std::ostringstream buffer;
-        buffer << in.rdbuf();
-
+    const auto parseConfig = [&](const std::string& source, std::string& error) {
         toml::table tbl;
-        std::string parseError;
-        const std::string source = buffer.str();
-        bool repairedLegacyArrayConflict = false;
-        if (!ParseTomlTableFromString(source, tbl, parseError)) {
+        repairedLegacyArrayConflict = false;
+        if (!ParseTomlTableFromString(source, tbl, error)) {
             std::string repairedSource;
-            if (parseError.find("cannot redefine existing array") != std::string::npos &&
-                RepairLegacyArrayOfTablesConflicts(source, repairedSource) &&
-                ParseTomlTableFromString(repairedSource, tbl, parseError)) {
-                repairedLegacyArrayConflict = true;
-                Log("WARNING: Repaired legacy TOML array-of-tables conflict while loading: " + WideToUtf8(path));
-            } else {
-                Log("ERROR: TOML parse error: " + parseError);
+            if (error.find("cannot redefine existing array") == std::string::npos ||
+                !RepairLegacyArrayOfTablesConflicts(source, repairedSource) ||
+                !ParseTomlTableFromString(repairedSource, tbl, error)) {
                 return false;
             }
+            repairedLegacyArrayConflict = true;
         }
 
-        const bool cleanedAppearanceCustomColors = SanitizeConfigAppearanceCustomColors(tbl);
+        cleanedAppearanceCustomColors = SanitizeConfigAppearanceCustomColors(tbl);
 
-        ConfigFromToml(tbl, config);
-
-        if (cleanedAppearanceCustomColors || repairedLegacyArrayConflict) {
-            if (!SaveConfigToTomlFile(config, path)) {
-                Log("WARNING: Failed to persist sanitized config/profile TOML after load: " + WideToUtf8(path));
-            } else if (cleanedAppearanceCustomColors) {
-                Log("WARNING: Removed invalid appearance.customColors entries while loading: " + WideToUtf8(path));
-            }
-        }
+        // Convert into a scratch copy so a rejected file leaves no partial state behind.
+        loaded = config;
+        ConfigFromToml(tbl, loaded);
         return true;
+    };
+
+    std::string loadError;
+    TomlFileLoadStatus status = TomlFileLoadStatus::Unrecoverable;
+    try {
+        status = LoadTomlFileWithRecovery(path, extraBackups, parseConfig, &loadError);
     } catch (const std::exception& e) {
-        Log("ERROR: Failed to load config from TOML: " + std::string(e.what()));
+        loadError = e.what();
+    }
+
+    if (status == TomlFileLoadStatus::Unrecoverable) {
+        Log("ERROR: Failed to load " + WideToUtf8(path) + ": " + loadError);
+        if (outError) *outError = loadError;
+        return status;
+    }
+    if (status == TomlFileLoadStatus::Missing) {
+        return status;
+    }
+
+    config = std::move(loaded);
+
+    if (repairedLegacyArrayConflict) {
+        Log("WARNING: Repaired legacy TOML array-of-tables conflict while loading: " + WideToUtf8(path));
+    }
+    if (cleanedAppearanceCustomColors || repairedLegacyArrayConflict) {
+        if (!SaveConfigToTomlFile(config, path)) {
+            Log("WARNING: Failed to persist sanitized config/profile TOML after load: " + WideToUtf8(path));
+        } else if (cleanedAppearanceCustomColors) {
+            Log("WARNING: Removed invalid appearance.customColors entries while loading: " + WideToUtf8(path));
+        }
+    }
+    return status;
+}
+
+bool LoadConfigFromTomlFile(const std::wstring& path, Config& config) {
+    const TomlFileLoadStatus status = LoadConfigFromTomlFileWithRecovery(path, config, {}, nullptr);
+    if (status == TomlFileLoadStatus::Missing) {
+        Log("ERROR: Failed to open config for reading: " + WideToUtf8(path));
         return false;
     }
+    return status != TomlFileLoadStatus::Unrecoverable;
 }
 
 static std::string s_embeddedConfigCache;

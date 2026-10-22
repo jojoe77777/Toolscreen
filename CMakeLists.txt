@@ -47,11 +47,37 @@ option(TOOLSCREEN_BUILD_DOWNLOADER_ARTIFACTS "Build the downloader jar and downl
 option(TOOLSCREEN_ENABLE_NINJABRAIN_API_MANUAL_TESTS "Enable the manual-only Ninjabrain API integration test target." OFF)
 option(TOOLSCREEN_USE_SCCACHE_FRIENDLY_DEBUG_INFO "Use /Z7 instead of /Zi for MSVC release-style builds so compiler launcher caches can hit." OFF)
 option(TOOLSCREEN_STAGE_LIBLOGGER_PDB "Stage the liblogger PDB into the build output directory." ON)
+set(TOOLSCREEN_TARGET_ARCH "" CACHE STRING "Target architecture (x64 or arm64); normally detected from the compiler")
 set(TOOLSCREEN_PACKAGING_DLL_PATH "" CACHE FILEPATH "Optional override DLL path used for jar and EXE packaging inputs")
 set(TOOLSCREEN_PACKAGING_LIBLOGGER_PATH "" CACHE FILEPATH "Optional override liblogger DLL path used for jar and EXE packaging inputs")
+set(TOOLSCREEN_PACKAGING_X64_DLL_PATH "" CACHE FILEPATH "x64 Toolscreen DLL to embed in universal installers")
+set(TOOLSCREEN_PACKAGING_ARM64_DLL_PATH "" CACHE FILEPATH "ARM64 Toolscreen DLL to embed in universal installers")
+set(TOOLSCREEN_PACKAGING_X64_LIBLOGGER_PATH "" CACHE FILEPATH "x64 liblogger DLL to embed in universal installers")
+set(TOOLSCREEN_PACKAGING_ARM64_LIBLOGGER_PATH "" CACHE FILEPATH "ARM64 liblogger DLL to embed in universal installers")
 set(TOOLSCREEN_PREBUILT_LIBLOGGER_DLL_PATH "" CACHE FILEPATH "Path to the signed prebuilt liblogger DLL to stage into build outputs")
 set(TOOLSCREEN_PREBUILT_LIBLOGGER_PDB_PATH "" CACHE FILEPATH "Path to the matching prebuilt liblogger PDB to stage into build outputs")
 option(TOOLSCREEN_BUILD_LIBLOGGER_FROM_SOURCE "Build liblogger locally instead of using a prebuilt signed artifact" OFF)
+
+if(NOT TOOLSCREEN_TARGET_ARCH)
+    if(CMAKE_GENERATOR_PLATFORM)
+        set(TOOLSCREEN_TARGET_ARCH "${CMAKE_GENERATOR_PLATFORM}")
+    elseif(MSVC_CXX_ARCHITECTURE_ID)
+        set(TOOLSCREEN_TARGET_ARCH "${MSVC_CXX_ARCHITECTURE_ID}")
+    else()
+        set(TOOLSCREEN_TARGET_ARCH "${CMAKE_SYSTEM_PROCESSOR}")
+    endif()
+endif()
+
+string(TOLOWER "${TOOLSCREEN_TARGET_ARCH}" TOOLSCREEN_TARGET_ARCH)
+if(TOOLSCREEN_TARGET_ARCH MATCHES "^(arm64|aarch64)$")
+    set(TOOLSCREEN_TARGET_ARCH "arm64")
+elseif(TOOLSCREEN_TARGET_ARCH MATCHES "^(x64|amd64|x86_64)$")
+    set(TOOLSCREEN_TARGET_ARCH "x64")
+else()
+    message(FATAL_ERROR "Unsupported Toolscreen target architecture '${TOOLSCREEN_TARGET_ARCH}'. Supported architectures are x64 and arm64.")
+endif()
+set(TOOLSCREEN_TARGET_ARCH "${TOOLSCREEN_TARGET_ARCH}" CACHE STRING "Target architecture (x64 or arm64); normally detected from the compiler" FORCE)
+message(STATUS "Toolscreen target architecture: ${TOOLSCREEN_TARGET_ARCH}")
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -68,7 +94,7 @@ function(toolscreen_configure_target_outputs target_name)
             LIBRARY_OUTPUT_DIRECTORY_${config_upper} "${TOOLSCREEN_ARTIFACT_ROOT}/${config}"
             ARCHIVE_OUTPUT_DIRECTORY_${config_upper} "${CMAKE_BINARY_DIR}/lib/${config}"
             PDB_OUTPUT_DIRECTORY_${config_upper} "${TOOLSCREEN_ARTIFACT_ROOT}/${config}"
-            COMPILE_PDB_OUTPUT_DIRECTORY_${config_upper} "${CMAKE_BINARY_DIR}/obj/${config}"
+            COMPILE_PDB_OUTPUT_DIRECTORY_${config_upper} "${CMAKE_BINARY_DIR}/obj/${config}/${target_name}"
         )
     endforeach()
 endfunction()
@@ -199,6 +225,15 @@ FetchContent_Declare(
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 
+# Header-only. The DLL resolves every Vulkan entry point at runtime, so this
+# does not introduce a Vulkan SDK or vulkan-1.dll runtime dependency.
+FetchContent_Declare(
+    vulkan_headers
+    GIT_REPOSITORY https://github.com/KhronosGroup/Vulkan-Headers.git
+    GIT_TAG v1.4.350
+    GIT_SHALLOW TRUE
+)
+
 FetchContent_GetProperties(glew)
 if(NOT glew_POPULATED)
     FetchContent_Populate(glew)
@@ -240,13 +275,14 @@ if(NOT webview2_sdk_POPULATED)
     FetchContent_Populate(webview2_sdk)
 endif()
 
+FetchContent_GetProperties(vulkan_headers)
+if(NOT vulkan_headers_POPULATED)
+    FetchContent_Populate(vulkan_headers)
+endif()
+
 set(TOOLSCREEN_WEBVIEW2_NATIVE_DIR "${webview2_sdk_SOURCE_DIR}/build/native")
 set(TOOLSCREEN_WEBVIEW2_INCLUDE_DIR "${TOOLSCREEN_WEBVIEW2_NATIVE_DIR}/include")
-if(CMAKE_SIZEOF_VOID_P EQUAL 8)
-    set(TOOLSCREEN_WEBVIEW2_ARCH_DIR "x64")
-else()
-    set(TOOLSCREEN_WEBVIEW2_ARCH_DIR "x86")
-endif()
+set(TOOLSCREEN_WEBVIEW2_ARCH_DIR "${TOOLSCREEN_TARGET_ARCH}")
 set(TOOLSCREEN_WEBVIEW2_LOADER_STATIC_LIB "${TOOLSCREEN_WEBVIEW2_NATIVE_DIR}/${TOOLSCREEN_WEBVIEW2_ARCH_DIR}/WebView2LoaderStatic.lib")
 
 if(NOT EXISTS "${TOOLSCREEN_WEBVIEW2_INCLUDE_DIR}/WebView2.h")
@@ -267,6 +303,7 @@ add_library(toolscreen_imgui STATIC
     ${TOOLSCREEN_IMGUI_DIR}/imgui_demo.cpp
     ${TOOLSCREEN_IMGUI_DIR}/misc/cpp/imgui_stdlib.cpp
     ${TOOLSCREEN_IMGUI_DIR}/backends/imgui_impl_opengl3.cpp
+    ${TOOLSCREEN_IMGUI_DIR}/backends/imgui_impl_vulkan.cpp
     ${TOOLSCREEN_IMGUI_DIR}/backends/imgui_impl_win32.cpp
 )
 
@@ -274,9 +311,13 @@ target_include_directories(toolscreen_imgui PUBLIC
     ${TOOLSCREEN_IMGUI_DIR}
     ${TOOLSCREEN_IMGUI_DIR}/backends
     ${TOOLSCREEN_IMGUI_DIR}/misc/cpp
+    ${vulkan_headers_SOURCE_DIR}/include
 )
 
-target_compile_definitions(toolscreen_imgui PUBLIC IMGUI_IMPL_OPENGL_LOADER_GLEW)
+target_compile_definitions(toolscreen_imgui PUBLIC
+    IMGUI_IMPL_OPENGL_LOADER_GLEW
+    IMGUI_IMPL_VULKAN_NO_PROTOTYPES
+)
 
 target_link_libraries(toolscreen_imgui PUBLIC
     Toolscreen::glew
@@ -304,7 +345,10 @@ set(TOOLSCREEN_MODULE_DIRS
     hooks
     platform
     render
+    render/vulkan
+    render/vulkan/layer
     runtime
+    testing
     third_party
 )
 
@@ -332,6 +376,7 @@ add_library(${PROJECT_NAME} SHARED
     ${TOOLSCREEN_HEADERS}
     ${TOOLSCREEN_GENERATED_VERSION_HEADER}
     ${CMAKE_CURRENT_SOURCE_DIR}/src/platform/resource.rc
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/render/vulkan/layer/toolscreen_vulkan_layer.def
 )
 
 add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
@@ -346,7 +391,10 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_CURRENT_SOURCE_DIR}/src/assets/fonts/OpenSans-Regular.ttf"
         "$<TARGET_FILE_DIR:${PROJECT_NAME}>/fonts/OpenSans-Regular.ttf"
-    COMMENT "Copying bundled fonts to output directory"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/render/vulkan/layer/VK_LAYER_TOOLSCREEN_obs_redirect.json"
+        "$<TARGET_FILE_DIR:${PROJECT_NAME}>/VK_LAYER_TOOLSCREEN_obs_redirect.json"
+    COMMENT "Copying bundled fonts and Vulkan layer manifest to output directory"
 )
 
 source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}/src" PREFIX "Source Files" FILES
@@ -362,10 +410,12 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     ${TOOLSCREEN_WEBVIEW2_INCLUDE_DIR}
     ${nlohmann_json_SOURCE_DIR}/single_include
     ${cpp_httplib_SOURCE_DIR}
+    ${vulkan_headers_SOURCE_DIR}/include
 )
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE
     TOOLSCREEN_EXPORTS
+    TOOLSCREEN_VULKAN_LAYER_EMBEDDED
     CMAKE_BUILD
     GLEW_STATIC
     NOMINMAX
@@ -407,16 +457,17 @@ endif()
 toolscreen_configure_target_outputs(${PROJECT_NAME})
 toolscreen_enable_release_symbols(${PROJECT_NAME})
 
-set(TOOLSCREEN_LIBLOGGER_ARTIFACT_DLL_PATH "${TOOLSCREEN_ARTIFACT_ROOT}/$<CONFIG>/liblogger_x64.dll")
-set(TOOLSCREEN_LIBLOGGER_ARTIFACT_PDB_PATH "${TOOLSCREEN_ARTIFACT_ROOT}/$<CONFIG>/liblogger_x64.pdb")
+set(TOOLSCREEN_LIBLOGGER_BASENAME "liblogger_${TOOLSCREEN_TARGET_ARCH}")
+set(TOOLSCREEN_LIBLOGGER_ARTIFACT_DLL_PATH "${TOOLSCREEN_ARTIFACT_ROOT}/$<CONFIG>/${TOOLSCREEN_LIBLOGGER_BASENAME}.dll")
+set(TOOLSCREEN_LIBLOGGER_ARTIFACT_PDB_PATH "${TOOLSCREEN_ARTIFACT_ROOT}/$<CONFIG>/${TOOLSCREEN_LIBLOGGER_BASENAME}.pdb")
 set(TOOLSCREEN_LIBLOGGER_BUILD_DEPENDENCY "")
 
 if(NOT TOOLSCREEN_PREBUILT_LIBLOGGER_DLL_PATH)
-    set(TOOLSCREEN_PREBUILT_LIBLOGGER_DLL_PATH "${CMAKE_CURRENT_SOURCE_DIR}/out/prebuilt-liblogger/liblogger_x64.dll")
+    set(TOOLSCREEN_PREBUILT_LIBLOGGER_DLL_PATH "${CMAKE_CURRENT_SOURCE_DIR}/out/prebuilt-liblogger/${TOOLSCREEN_LIBLOGGER_BASENAME}.dll")
 endif()
 
 if(NOT TOOLSCREEN_PREBUILT_LIBLOGGER_PDB_PATH)
-    set(TOOLSCREEN_PREBUILT_LIBLOGGER_PDB_PATH "${CMAKE_CURRENT_SOURCE_DIR}/out/prebuilt-liblogger/liblogger_x64.pdb")
+    set(TOOLSCREEN_PREBUILT_LIBLOGGER_PDB_PATH "${CMAKE_CURRENT_SOURCE_DIR}/out/prebuilt-liblogger/${TOOLSCREEN_LIBLOGGER_BASENAME}.pdb")
 endif()
 
 if(TOOLSCREEN_BUILD_LIBLOGGER_FROM_SOURCE)
@@ -449,7 +500,8 @@ else()
 
     add_custom_target(toolscreen_stage_liblogger_artifacts
         BYPRODUCTS ${TOOLSCREEN_LIBLOGGER_STAGE_BYPRODUCTS}
-        COMMAND ${CMAKE_COMMAND} -P "${CMAKE_CURRENT_BINARY_DIR}/cmake/stage_prebuilt_liblogger_$<CONFIG>.cmake"
+        COMMAND ${CMAKE_COMMAND} -E env "TOOLSCREEN_LIBLOGGER_ARCH=${TOOLSCREEN_TARGET_ARCH}"
+            ${CMAKE_COMMAND} -P "${CMAKE_CURRENT_BINARY_DIR}/cmake/stage_prebuilt_liblogger_$<CONFIG>.cmake"
         DEPENDS ${TOOLSCREEN_LIBLOGGER_STAGE_DEPENDENCIES}
         COMMENT "Fetching and staging prebuilt liblogger artifacts"
         VERBATIM
@@ -616,8 +668,7 @@ if(TOOLSCREEN_ENABLE_JAR_PACKAGING OR TOOLSCREEN_ENABLE_EXE_PACKAGING)
     FetchContent_Declare(
         easyinjectbundled
         GIT_REPOSITORY https://github.com/jojoe77777/EasyInjectBundled.git
-        # pinned commit isn't the branch tip, so no shallow clone (it can't reach it)
-        GIT_TAG 090fe9b7ed2241a3cfba3040f0cff32858ff8aad
+        GIT_TAG f59501eb8058b363bb5384d51c4434536ee35a6a
     )
 
     FetchContent_GetProperties(easyinjectbundled)
@@ -649,6 +700,38 @@ if(TOOLSCREEN_ENABLE_JAR_PACKAGING OR TOOLSCREEN_ENABLE_EXE_PACKAGING)
         set(TOOLSCREEN_PACKAGING_LOGGER_SOURCE "${TOOLSCREEN_PACKAGING_LIBLOGGER_PATH}")
     endif()
 
+    # Universal installers aggregate the products of both native builds. The
+    # current architecture may come from this build target; the other one is
+    # normally supplied by CI or found in the sibling local preset output.
+    if(NOT TOOLSCREEN_PACKAGING_X64_DLL_PATH)
+        if(TOOLSCREEN_TARGET_ARCH STREQUAL "x64")
+            set(TOOLSCREEN_PACKAGING_X64_DLL_PATH "${TOOLSCREEN_PACKAGING_DLL_SOURCE}")
+        else()
+            set(TOOLSCREEN_PACKAGING_X64_DLL_PATH "${CMAKE_CURRENT_SOURCE_DIR}/out/build/bin/Release/Toolscreen.dll")
+        endif()
+    endif()
+    if(NOT TOOLSCREEN_PACKAGING_ARM64_DLL_PATH)
+        if(TOOLSCREEN_TARGET_ARCH STREQUAL "arm64")
+            set(TOOLSCREEN_PACKAGING_ARM64_DLL_PATH "${TOOLSCREEN_PACKAGING_DLL_SOURCE}")
+        else()
+            set(TOOLSCREEN_PACKAGING_ARM64_DLL_PATH "${CMAKE_CURRENT_SOURCE_DIR}/out/build-arm64/bin/Release/Toolscreen.dll")
+        endif()
+    endif()
+    if(NOT TOOLSCREEN_PACKAGING_X64_LIBLOGGER_PATH)
+        if(TOOLSCREEN_TARGET_ARCH STREQUAL "x64")
+            set(TOOLSCREEN_PACKAGING_X64_LIBLOGGER_PATH "${TOOLSCREEN_PACKAGING_LOGGER_SOURCE}")
+        else()
+            set(TOOLSCREEN_PACKAGING_X64_LIBLOGGER_PATH "${CMAKE_CURRENT_SOURCE_DIR}/out/build/bin/Release/liblogger_x64.dll")
+        endif()
+    endif()
+    if(NOT TOOLSCREEN_PACKAGING_ARM64_LIBLOGGER_PATH)
+        if(TOOLSCREEN_TARGET_ARCH STREQUAL "arm64")
+            set(TOOLSCREEN_PACKAGING_ARM64_LIBLOGGER_PATH "${TOOLSCREEN_PACKAGING_LOGGER_SOURCE}")
+        else()
+            set(TOOLSCREEN_PACKAGING_ARM64_LIBLOGGER_PATH "${CMAKE_CURRENT_SOURCE_DIR}/out/build-arm64/bin/Release/liblogger_arm64.dll")
+        endif()
+    endif()
+
     set(TOOLSCREEN_PACKAGING_DEPENDENCIES)
     if(NOT TOOLSCREEN_PACKAGING_DLL_PATH)
         list(APPEND TOOLSCREEN_PACKAGING_DEPENDENCIES ${PROJECT_NAME})
@@ -662,10 +745,15 @@ if(TOOLSCREEN_ENABLE_JAR_PACKAGING OR TOOLSCREEN_ENABLE_EXE_PACKAGING)
             COMMAND ${CMAKE_COMMAND} -E make_directory "${easyinjectbundled_SOURCE_DIR}/custom-dlls"
             COMMAND ${CMAKE_COMMAND} -E make_directory "${easyinjectbundled_SOURCE_DIR}/src/main/resources/dlls"
             COMMAND ${CMAKE_COMMAND} -E make_directory "${TOOLSCREEN_ARTIFACT_ROOT}/$<CONFIG>"
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${TOOLSCREEN_PACKAGING_DLL_SOURCE}" "${easyinjectbundled_SOURCE_DIR}/custom-dlls/Toolscreen.dll"
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${TOOLSCREEN_PACKAGING_LOGGER_SOURCE}" "${easyinjectbundled_SOURCE_DIR}/src/main/resources/dlls/liblogger_x64.dll"
+            COMMAND ${CMAKE_COMMAND} -E rm -f "${easyinjectbundled_SOURCE_DIR}/custom-dlls/Toolscreen.dll"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${TOOLSCREEN_PACKAGING_X64_DLL_PATH}" "${easyinjectbundled_SOURCE_DIR}/custom-dlls/Toolscreen_x64.dll"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${TOOLSCREEN_PACKAGING_ARM64_DLL_PATH}" "${easyinjectbundled_SOURCE_DIR}/custom-dlls/Toolscreen_arm64.dll"
+            COMMAND ${CMAKE_COMMAND} -E rm -f "${easyinjectbundled_SOURCE_DIR}/custom-dlls/ToolscreenVulkanLayer.dll"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/src/render/vulkan/layer/VK_LAYER_TOOLSCREEN_obs_redirect.json" "${easyinjectbundled_SOURCE_DIR}/custom-dlls/VK_LAYER_TOOLSCREEN_obs_redirect.json"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${TOOLSCREEN_PACKAGING_X64_LIBLOGGER_PATH}" "${easyinjectbundled_SOURCE_DIR}/src/main/resources/dlls/liblogger_x64.dll"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${TOOLSCREEN_PACKAGING_ARM64_LIBLOGGER_PATH}" "${easyinjectbundled_SOURCE_DIR}/src/main/resources/dlls/liblogger_arm64.dll"
             COMMAND ${CMAKE_COMMAND} -E rm -f "${easyinjectbundled_SOURCE_DIR}/custom-dlls/WebView2Loader.dll"
-            COMMAND ${TOOLSCREEN_MAVEN_EXECUTABLE} -f "${easyinjectbundled_SOURCE_DIR}/pom.xml" -q --batch-mode --no-transfer-progress package
+            COMMAND ${TOOLSCREEN_MAVEN_EXECUTABLE} -f "${easyinjectbundled_SOURCE_DIR}/pom.xml" -q --batch-mode --no-transfer-progress clean package
                     -Dbrand.name=Toolscreen
             COMMAND ${CMAKE_COMMAND} -E copy_if_different "${easyinjectbundled_SOURCE_DIR}/target/${JAR_NAME}" "${JAR_OUTPUT}"
         )
@@ -695,8 +783,7 @@ if(TOOLSCREEN_ENABLE_JAR_PACKAGING OR TOOLSCREEN_ENABLE_EXE_PACKAGING)
         FetchContent_Declare(
             easyinjectbundled_exe
             GIT_REPOSITORY https://github.com/jojoe77777/EasyInjectBundled.git
-            GIT_TAG exe
-            GIT_SHALLOW TRUE
+            GIT_TAG f59501eb8058b363bb5384d51c4434536ee35a6a
         )
 
         FetchContent_GetProperties(easyinjectbundled_exe)
@@ -705,6 +792,7 @@ if(TOOLSCREEN_ENABLE_JAR_PACKAGING OR TOOLSCREEN_ENABLE_EXE_PACKAGING)
         endif()
 
         file(REMOVE "${easyinjectbundled_exe_SOURCE_DIR}/custom-dlls/WebView2Loader.dll")
+        file(REMOVE "${easyinjectbundled_exe_SOURCE_DIR}/custom-dlls/Toolscreen.dll")
 
         set(TOOLSCREEN_EASYINJECT_EXE_BRANDING_PROPERTIES "${easyinjectbundled_exe_SOURCE_DIR}/branding.properties")
         toolscreen_set_brand_version("${TOOLSCREEN_EASYINJECT_EXE_BRANDING_PROPERTIES}" "${PROJECT_VERSION}")
@@ -754,14 +842,25 @@ END
         )
 
         file(MAKE_DIRECTORY "${easyinjectbundled_exe_SOURCE_DIR}/custom-dlls")
+        # EasyInject enumerates optional support resources while configuring its
+        # native resource table, so seed the manifest before add_subdirectory.
+        # The preparation target below refreshes it again before compilation.
+        file(COPY_FILE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/render/vulkan/layer/VK_LAYER_TOOLSCREEN_obs_redirect.json"
+            "${easyinjectbundled_exe_SOURCE_DIR}/custom-dlls/VK_LAYER_TOOLSCREEN_obs_redirect.json"
+            ONLY_IF_DIFFERENT)
         add_subdirectory("${easyinjectbundled_exe_SOURCE_DIR}/exe" "${CMAKE_CURRENT_BINARY_DIR}/easyinjectbundled-exe")
         toolscreen_configure_target_outputs(EasyInjectExe)
 
         add_custom_target(toolscreen_prepare_easyinject_exe_inputs
             COMMAND ${CMAKE_COMMAND} -E make_directory "${easyinjectbundled_exe_SOURCE_DIR}/custom-dlls"
             COMMAND ${CMAKE_COMMAND} -E make_directory "${easyinjectbundled_exe_SOURCE_DIR}/src/main/resources/dlls"
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${TOOLSCREEN_PACKAGING_DLL_SOURCE}" "${easyinjectbundled_exe_SOURCE_DIR}/custom-dlls/Toolscreen.dll"
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${TOOLSCREEN_PACKAGING_LOGGER_SOURCE}" "${easyinjectbundled_exe_SOURCE_DIR}/src/main/resources/dlls/liblogger_x64.dll"
+            COMMAND ${CMAKE_COMMAND} -E rm -f "${easyinjectbundled_exe_SOURCE_DIR}/custom-dlls/Toolscreen.dll"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${TOOLSCREEN_PACKAGING_X64_DLL_PATH}" "${easyinjectbundled_exe_SOURCE_DIR}/custom-dlls/Toolscreen_x64.dll"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${TOOLSCREEN_PACKAGING_ARM64_DLL_PATH}" "${easyinjectbundled_exe_SOURCE_DIR}/custom-dlls/Toolscreen_arm64.dll"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/src/render/vulkan/layer/VK_LAYER_TOOLSCREEN_obs_redirect.json" "${easyinjectbundled_exe_SOURCE_DIR}/custom-dlls/VK_LAYER_TOOLSCREEN_obs_redirect.json"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${TOOLSCREEN_PACKAGING_X64_LIBLOGGER_PATH}" "${easyinjectbundled_exe_SOURCE_DIR}/src/main/resources/dlls/liblogger_x64.dll"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${TOOLSCREEN_PACKAGING_ARM64_LIBLOGGER_PATH}" "${easyinjectbundled_exe_SOURCE_DIR}/src/main/resources/dlls/liblogger_arm64.dll"
             COMMAND ${CMAKE_COMMAND} -E rm -f "${easyinjectbundled_exe_SOURCE_DIR}/custom-dlls/WebView2Loader.dll"
             DEPENDS ${TOOLSCREEN_PACKAGING_DEPENDENCIES}
             COMMENT "Preparing EasyInject exe packaging inputs"
@@ -782,8 +881,20 @@ END
 
         file(GENERATE
             OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/cmake/check_toolscreen_exe_embeds_dll_$<CONFIG>.cmake"
-            CONTENT "set(EMBED_DLL_INDEX_FILE \"${CMAKE_CURRENT_BINARY_DIR}/easyinjectbundled-exe/embedded_dll_index.txt\")\nif(NOT EXISTS \"${CMAKE_CURRENT_BINARY_DIR}/easyinjectbundled-exe/embedded_dll_index.txt\")\n  message(FATAL_ERROR \"Expected EasyInject embedded DLL index at '${CMAKE_CURRENT_BINARY_DIR}/easyinjectbundled-exe/embedded_dll_index.txt'\")\nendif()\nfile(READ \"${CMAKE_CURRENT_BINARY_DIR}/easyinjectbundled-exe/embedded_dll_index.txt\" EMBED_DLL_INDEX_CONTENT)\nif(NOT EMBED_DLL_INDEX_CONTENT MATCHES \"Toolscreen[.]dll\")\n  message(FATAL_ERROR \"Expected EasyInject EXE packaging metadata to embed Toolscreen.dll\")\nendif()\n"
+            CONTENT "set(EMBED_DLL_INDEX_FILE \"${CMAKE_CURRENT_BINARY_DIR}/easyinjectbundled-exe/embedded_dll_index.txt\")\nif(NOT EXISTS \"${CMAKE_CURRENT_BINARY_DIR}/easyinjectbundled-exe/embedded_dll_index.txt\")\n  message(FATAL_ERROR \"Expected EasyInject embedded resource index at '${CMAKE_CURRENT_BINARY_DIR}/easyinjectbundled-exe/embedded_dll_index.txt'\")\nendif()\nfile(READ \"${CMAKE_CURRENT_BINARY_DIR}/easyinjectbundled-exe/embedded_dll_index.txt\" EMBED_DLL_INDEX_CONTENT)\nforeach(REQUIRED_RESOURCE liblogger_x64.dll liblogger_arm64.dll Toolscreen_x64.dll Toolscreen_arm64.dll VK_LAYER_TOOLSCREEN_obs_redirect.json)\n  if(NOT EMBED_DLL_INDEX_CONTENT MATCHES \"\${REQUIRED_RESOURCE}\")\n    message(FATAL_ERROR \"Expected universal EasyInject EXE to embed \${REQUIRED_RESOURCE}\")\n  endif()\nendforeach()\n"
         )
+
+        if(TOOLSCREEN_TARGET_ARCH STREQUAL "x64")
+            file(SHA512
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/render/vulkan/layer/VK_LAYER_TOOLSCREEN_obs_redirect.json"
+                TOOLSCREEN_VULKAN_LAYER_MANIFEST_SHA512)
+            string(TOLOWER "${TOOLSCREEN_VULKAN_LAYER_MANIFEST_SHA512}"
+                TOOLSCREEN_VULKAN_LAYER_MANIFEST_SHA512)
+            file(GENERATE
+                OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/cmake/check_toolscreen_exe_resources_$<CONFIG>.cmake"
+                CONTENT "execute_process(COMMAND \"${EXE_OUTPUT}\" --info RESULT_VARIABLE INFO_RESULT OUTPUT_VARIABLE INFO_OUTPUT ERROR_VARIABLE INFO_ERROR)\nif(NOT INFO_RESULT EQUAL 0)\n  message(FATAL_ERROR \"EasyInject --info failed (\${INFO_RESULT}): \${INFO_ERROR}\")\nendif()\nstring(FIND \"\${INFO_OUTPUT}\" \"Name:   VK_LAYER_TOOLSCREEN_obs_redirect.json\" MANIFEST_NAME_INDEX)\nif(MANIFEST_NAME_INDEX LESS 0)\n  message(FATAL_ERROR \"EasyInject EXE did not report the Vulkan manifest:\\n\${INFO_OUTPUT}\")\nendif()\nstring(SUBSTRING \"\${INFO_OUTPUT}\" \${MANIFEST_NAME_INDEX} -1 MANIFEST_OUTPUT)\nstring(FIND \"\${MANIFEST_OUTPUT}\" \"Type:   support resource\" MANIFEST_TYPE_INDEX)\nstring(TOLOWER \"\${MANIFEST_OUTPUT}\" MANIFEST_OUTPUT_LOWER)\nstring(FIND \"\${MANIFEST_OUTPUT_LOWER}\" \"${TOOLSCREEN_VULKAN_LAYER_MANIFEST_SHA512}\" MANIFEST_HASH_INDEX)\nif(MANIFEST_TYPE_INDEX LESS 0 OR MANIFEST_HASH_INDEX LESS MANIFEST_TYPE_INDEX)\n  message(FATAL_ERROR \"EasyInject EXE did not report the Vulkan manifest as a readable, byte-exact support resource:\\n\${INFO_OUTPUT}\")\nendif()\n"
+            )
+        endif()
 
         add_test(
             NAME toolscreen_exe_exists
@@ -794,6 +905,13 @@ END
             NAME toolscreen_exe_embeds_dll
             COMMAND ${CMAKE_COMMAND} -P "${CMAKE_CURRENT_BINARY_DIR}/cmake/check_toolscreen_exe_embeds_dll_$<CONFIG>.cmake"
         )
+
+        if(TOOLSCREEN_TARGET_ARCH STREQUAL "x64")
+            add_test(
+                NAME toolscreen_exe_resources_readable
+                COMMAND ${CMAKE_COMMAND} -P "${CMAKE_CURRENT_BINARY_DIR}/cmake/check_toolscreen_exe_resources_$<CONFIG>.cmake"
+            )
+        endif()
 
         if(TOOLSCREEN_BUILD_DOWNLOADER_ARTIFACTS)
             set(TOOLSCREEN_DOWNLOADER_SOURCE_DIR "${easyinjectbundled_SOURCE_DIR}/toolscreen-installer-exe")
@@ -877,9 +995,43 @@ END
     endif()
 
     if(TOOLSCREEN_ENABLE_JAR_PACKAGING)
+        string(CONCAT TOOLSCREEN_JAR_CHECK_SCRIPT
+                "set(TOOLSCREEN_JAR \"${JAR_OUTPUT}\")\n"
+                "set(TOOLSCREEN_JAR_CHECK_DIR \"${CMAKE_CURRENT_BINARY_DIR}/jar-universal-dll-check-$<CONFIG>\")\n"
+                "if(NOT EXISTS \"\${TOOLSCREEN_JAR}\")\n"
+                "  message(FATAL_ERROR \"Expected Toolscreen jar at '\${TOOLSCREEN_JAR}'\")\n"
+                "endif()\n"
+                "file(REMOVE_RECURSE \"\${TOOLSCREEN_JAR_CHECK_DIR}\")\n"
+                "file(MAKE_DIRECTORY \"\${TOOLSCREEN_JAR_CHECK_DIR}\")\n"
+                "file(ARCHIVE_EXTRACT INPUT \"\${TOOLSCREEN_JAR}\" DESTINATION \"\${TOOLSCREEN_JAR_CHECK_DIR}\")\n"
+                "foreach(REQUIRED_DLL Toolscreen_x64.dll Toolscreen_arm64.dll liblogger_x64.dll liblogger_arm64.dll)\n"
+                "  if(NOT EXISTS \"\${TOOLSCREEN_JAR_CHECK_DIR}/dlls/\${REQUIRED_DLL}\")\n"
+                "    message(FATAL_ERROR \"Universal Toolscreen jar does not contain dlls/\${REQUIRED_DLL}\")\n"
+                "  endif()\n"
+                "endforeach()\n"
+                "foreach(SQLITE_ARCH x86_64 aarch64)\n"
+                "  if(NOT EXISTS \"\${TOOLSCREEN_JAR_CHECK_DIR}/org/sqlite/native/Windows/\${SQLITE_ARCH}/sqlitejdbc.dll\")\n"
+                "    message(FATAL_ERROR \"Universal Toolscreen jar does not contain Windows SQLite JNI for \${SQLITE_ARCH}\")\n"
+                "  endif()\n"
+                "endforeach()\n"
+                "if(EXISTS \"\${TOOLSCREEN_JAR_CHECK_DIR}/dlls/ToolscreenVulkanLayer.dll\")\n"
+                "  message(FATAL_ERROR \"Vulkan layer must be integrated into Toolscreen.dll, not packaged as ToolscreenVulkanLayer.dll\")\n"
+                "endif()\n"
+                "set(TOOLSCREEN_LAYER_MANIFEST \"\${TOOLSCREEN_JAR_CHECK_DIR}/dlls/VK_LAYER_TOOLSCREEN_obs_redirect.json\")\n"
+                "if(NOT EXISTS \"\${TOOLSCREEN_LAYER_MANIFEST}\")\n"
+                "  message(FATAL_ERROR \"Toolscreen jar does not contain the Vulkan layer manifest\")\n"
+                "endif()\n"
+                "file(READ \"\${TOOLSCREEN_LAYER_MANIFEST}\" TOOLSCREEN_LAYER_MANIFEST_CONTENT)\n"
+                "if(NOT TOOLSCREEN_LAYER_MANIFEST_CONTENT MATCHES \"Toolscreen[.]dll\")\n"
+                "  message(FATAL_ERROR \"Vulkan layer manifest does not target Toolscreen.dll\")\n"
+                "endif()\n"
+                "if(TOOLSCREEN_LAYER_MANIFEST_CONTENT MATCHES \"ToolscreenVulkanLayer[.]dll\")\n"
+                "  message(FATAL_ERROR \"Vulkan layer manifest still targets the retired separate Vulkan DLL\")\n"
+                "endif()\n"
+        )
         file(GENERATE
             OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/cmake/check_toolscreen_jar_$<CONFIG>.cmake"
-            CONTENT "if(NOT EXISTS \"${JAR_OUTPUT}\")\n  message(FATAL_ERROR \"Expected Toolscreen jar at '${JAR_OUTPUT}'\")\nendif()\n"
+            CONTENT "${TOOLSCREEN_JAR_CHECK_SCRIPT}"
         )
 
         add_test(
@@ -934,6 +1086,7 @@ target_compile_definitions(toolscreen_gui_integration_tests PRIVATE
     GLEW_STATIC
     NOMINMAX
     TOOLSCREEN_GUI_INTEGRATION_TESTS
+    TOOLSCREEN_VULKAN_LAYER_EMBEDDED
     UNICODE
     _UNICODE
 )
@@ -1050,6 +1203,10 @@ set(TOOLSCREEN_GUI_INTEGRATION_TEST_CASES
     key-rebind-runtime-disabled-rebind-ignored
     key-rebind-runtime-cursor-state-keyup-passthrough
     key-rebind-runtime-held-output-released-on-rebind-change
+    key-rebind-runtime-held-output-released-on-no-match-up
+    key-rebind-runtime-held-output-released-on-mouse-output-up
+    key-rebind-runtime-held-output-released-on-modifier-output-up
+    key-rebind-runtime-held-output-released-on-gui-open
     key-rebind-runtime-cursor-state-priority-and-fallback
     key-rebind-gui-keyboard-layout-full-bind-and-trigger
     key-rebind-gui-keyboard-layout-split-bind-and-trigger
@@ -1080,6 +1237,13 @@ set(TOOLSCREEN_GUI_INTEGRATION_TEST_CASES
     fullscreen-relative-gui-publish-preserves-recalculated-size
     config-load-preemptive-sync-existing-mode
     config-load-thin-min-width-enforced
+    config-load-recover-from-bak
+    config-load-recover-from-snapshot
+    config-load-empty-file-reset-to-defaults
+    config-load-binary-garbage-reset-to-defaults
+    config-load-invalid-without-backup-kept-in-place
+    config-load-snapshot-dedup
+    config-load-stale-temp-files-removed
     config-load-browser-overlay-defaults
     config-load-window-overlay-defaults
     config-load-image-defaults
@@ -1108,6 +1272,8 @@ set(TOOLSCREEN_GUI_INTEGRATION_TEST_CASES
     rebind-indicator-renders-below-settings-gui
     config-error-gui
     profiler-unspecified-breakdown
+    profiler-exited-thread-lifetime
+    ninjabrain-extreme-prediction-payload
     settings-gui-basic
     settings-gui-advanced
     settings-key-repeat-system-repeat-hides-local-controls
@@ -1154,6 +1320,9 @@ set(TOOLSCREEN_GUI_INTEGRATION_TEST_CASES
     profile-selective-switch-shared-fallback
     profile-case-insensitive-collisions
     profile-recover-missing-metadata
+    profile-recover-damaged-profile-file
+    profile-recover-damaged-metadata
+    profile-backup-follows-rename-and-delete
     profile-async-save-skip-deleted-profile
     profile-switch-ninjabrain-async-stop
     profile-switch-ninjabrain-async-restart
@@ -1238,12 +1407,138 @@ set(TOOLSCREEN_INTERACTIVE_CREATE_TEST_CASES
     fixed_pixels_use_viewport_anchor
     tiny_source_clamped_to_min
     huge_dest_scale_clamped
+    extreme_coordinates_saturate_without_overflow
 )
 
 foreach(test_case IN LISTS TOOLSCREEN_INTERACTIVE_CREATE_TEST_CASES)
     add_test(
         NAME toolscreen_interactive_create_${test_case}
         COMMAND $<TARGET_FILE:toolscreen_interactive_create_tests> --run ${test_case}
+    )
+endforeach()
+
+add_executable(toolscreen_path_sanitize_tests
+    tests/path_sanitize_tests.cpp
+)
+
+add_executable(toolscreen_startup_lifecycle_tests
+    tests/startup_lifecycle_tests.cpp
+)
+
+if(MSVC)
+    target_compile_options(toolscreen_startup_lifecycle_tests PRIVATE /W3 /MP /EHsc)
+endif()
+
+toolscreen_configure_target_outputs(toolscreen_startup_lifecycle_tests)
+toolscreen_enable_release_symbols(toolscreen_startup_lifecycle_tests)
+
+foreach(test_case IN ITEMS
+    glfw_destroy_recreate_rejects_stale_replay
+    late_glfw_discovery_does_not_classify_bootstrap_wgl
+    sdl_destroy_recreate_rejects_stale_window
+    late_sdl_discovery_accepts_owned_opengl_window
+    sdl_relative_mouse_mode_defers_while_gui_open
+    opengl_latches_only_after_initialization
+    vulkan_rejects_missing_exact_window
+    vulkan_teardown_waits_for_recording)
+    add_test(NAME toolscreen_startup_lifecycle_${test_case}
+        COMMAND $<TARGET_FILE:toolscreen_startup_lifecycle_tests> --run ${test_case})
+endforeach()
+
+target_include_directories(toolscreen_path_sanitize_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_compile_definitions(toolscreen_path_sanitize_tests PRIVATE
+    NOMINMAX
+    UNICODE
+    _UNICODE
+)
+
+if(MSVC)
+    target_compile_options(toolscreen_path_sanitize_tests PRIVATE
+        /W3
+        /MP
+        /EHsc
+    )
+endif()
+
+target_link_libraries(toolscreen_path_sanitize_tests PRIVATE
+    shell32
+    shlwapi
+    ole32
+)
+
+toolscreen_configure_target_outputs(toolscreen_path_sanitize_tests)
+toolscreen_enable_release_symbols(toolscreen_path_sanitize_tests)
+
+set(TOOLSCREEN_PATH_SANITIZE_TEST_CASES
+    home_prefix_collapses_to_tilde
+    home_prefix_exact_match_collapses
+    mid_string_users_occurrence_masked
+    case_insensitive_on_drive_and_users
+    non_home_path_untouched
+    empty_string_passthrough
+    home_prefix_does_not_partial_match_segment
+    utf8_overload_uses_resolved_home
+    filename_from_windows_path
+    filename_from_forward_slash_path
+    filename_no_separator_passthrough
+    filename_empty_passthrough
+)
+
+foreach(test_case IN LISTS TOOLSCREEN_PATH_SANITIZE_TEST_CASES)
+    add_test(
+        NAME toolscreen_path_sanitize_${test_case}
+        COMMAND $<TARGET_FILE:toolscreen_path_sanitize_tests> --run ${test_case}
+    )
+endforeach()
+
+add_executable(toolscreen_background_fit_layout_tests
+    tests/background_fit_layout_tests.cpp
+    src/render/background_fit_layout.cpp
+)
+
+target_include_directories(toolscreen_background_fit_layout_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_compile_definitions(toolscreen_background_fit_layout_tests PRIVATE
+    NOMINMAX
+    UNICODE
+    _UNICODE
+)
+
+if(MSVC)
+    target_compile_options(toolscreen_background_fit_layout_tests PRIVATE
+        /W3
+        /MP
+        /EHsc
+    )
+endif()
+
+toolscreen_configure_target_outputs(toolscreen_background_fit_layout_tests)
+toolscreen_enable_release_symbols(toolscreen_background_fit_layout_tests)
+
+set(TOOLSCREEN_BACKGROUND_FIT_TEST_CASES
+    parse_normalizes_case_and_unknown
+    to_string_round_trips
+    backdrop_only_for_visible_modes
+    stretch_fills_whole_area
+    fit_letterboxes_and_centers
+    fill_covers_and_crops
+    center_uses_native_size_by_default
+    center_scale_adjusts_size
+    degenerate_dims_fall_back_to_area
+    tile_grid_covers_area_centered
+    tile_spacing_reduces_count
+    tile_degenerate_and_capped
+)
+
+foreach(test_case IN LISTS TOOLSCREEN_BACKGROUND_FIT_TEST_CASES)
+    add_test(
+        NAME toolscreen_background_fit_${test_case}
+        COMMAND $<TARGET_FILE:toolscreen_background_fit_layout_tests> --run ${test_case}
     )
 endforeach()
 
@@ -1294,12 +1589,155 @@ set(TOOLSCREEN_GAME_STATE_SOURCE_TEST_CASES
     alive_wrong_pid_false
     alive_stale_heartbeat_false
     alive_future_skew_within_threshold_true
+    alive_corrupt_heartbeat_false
+    alive_negative_current_time_false
 )
 
 foreach(test_case IN LISTS TOOLSCREEN_GAME_STATE_SOURCE_TEST_CASES)
     add_test(
         NAME toolscreen_game_state_source_${test_case}
         COMMAND $<TARGET_FILE:toolscreen_game_state_source_tests> --run ${test_case}
+    )
+endforeach()
+
+add_executable(toolscreen_expression_parser_tests
+    tests/expression_parser_tests.cpp
+    src/common/expression_parser.cpp
+)
+
+target_include_directories(toolscreen_expression_parser_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_compile_definitions(toolscreen_expression_parser_tests PRIVATE
+    NOMINMAX
+    UNICODE
+    _UNICODE
+)
+
+if(MSVC)
+    target_compile_options(toolscreen_expression_parser_tests PRIVATE /W3 /MP /EHsc)
+endif()
+
+toolscreen_configure_target_outputs(toolscreen_expression_parser_tests)
+toolscreen_enable_release_symbols(toolscreen_expression_parser_tests)
+
+set(TOOLSCREEN_EXPRESSION_PARSER_TEST_CASES
+    arithmetic_and_variables
+    malformed_numbers_do_not_throw
+    non_finite_and_integer_overflow_use_fallback
+)
+
+foreach(test_case IN LISTS TOOLSCREEN_EXPRESSION_PARSER_TEST_CASES)
+    add_test(
+        NAME toolscreen_expression_parser_${test_case}
+        COMMAND $<TARGET_FILE:toolscreen_expression_parser_tests> --run ${test_case}
+    )
+endforeach()
+
+# Injects DLLs into a running game the same way EasyInjectBundled does; used by scripts/game_tests/run_game_tests.ps1.
+add_executable(toolscreen_game_test_injector tests/game/injector/game_test_injector.cpp)
+target_compile_definitions(toolscreen_game_test_injector PRIVATE UNICODE _UNICODE NOMINMAX)
+toolscreen_configure_target_outputs(toolscreen_game_test_injector)
+
+# Stand-in third-party overlay that detours wglSwapBuffers with its own MinHook, for the hook-chain game test.
+add_library(toolscreen_game_test_overlay SHARED tests/game/overlay/game_test_overlay.cpp)
+target_compile_definitions(toolscreen_game_test_overlay PRIVATE UNICODE _UNICODE NOMINMAX)
+target_link_libraries(toolscreen_game_test_overlay PRIVATE Toolscreen::minhook ntdll)
+set_target_properties(toolscreen_game_test_overlay PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+toolscreen_configure_target_outputs(toolscreen_game_test_overlay)
+
+# In-game tests against real Minecraft dev clients (see tests/game/README.md). They are named
+# toolscreen_integration_* so CI's ctest run skips them; run locally with:
+#   ctest --preset debug -R toolscreen_integration_game --output-on-failure
+find_program(TOOLSCREEN_POWERSHELL_EXECUTABLE NAMES powershell pwsh)
+if(TOOLSCREEN_POWERSHELL_EXECUTABLE)
+    foreach(game_test_spec IN ITEMS "1.16.1:opengl" "26.3:opengl" "26.3:vulkan")
+        string(REPLACE ":" ";" game_test_parts "${game_test_spec}")
+        list(GET game_test_parts 0 game_test_version)
+        list(GET game_test_parts 1 game_test_backend)
+        string(REPLACE "." "_" game_test_version_id "${game_test_version}")
+        add_test(
+            NAME toolscreen_integration_game_${game_test_version_id}_${game_test_backend}
+            COMMAND ${TOOLSCREEN_POWERSHELL_EXECUTABLE} -NoProfile -ExecutionPolicy Bypass
+                -File "${CMAKE_CURRENT_SOURCE_DIR}/scripts/game_tests/run_game_tests.ps1"
+                -MinecraftVersion ${game_test_version} -GraphicsBackend ${game_test_backend} -Configuration $<CONFIG>
+                -BuildDir "${CMAKE_BINARY_DIR}"
+        )
+        set_tests_properties(toolscreen_integration_game_${game_test_version_id}_${game_test_backend} PROPERTIES
+            TIMEOUT 1800
+            RUN_SERIAL TRUE
+        )
+    endforeach()
+    # Close the game normally (so DLL_PROCESS_DETACH runs) and require a clean, prompt exit, including when a
+    # thread that process exit kills was holding the log file lock. Runs on every in-game client.
+    foreach(game_test_spec IN ITEMS "1.16.1:opengl" "26.3:opengl" "26.3:vulkan")
+        string(REPLACE ":" ";" game_test_parts "${game_test_spec}")
+        list(GET game_test_parts 0 game_test_version)
+        list(GET game_test_parts 1 game_test_backend)
+        string(REPLACE "." "_" game_test_version_id "${game_test_version}")
+        foreach(game_test_exit_mode IN ITEMS plain log_lock)
+            set(game_test_name toolscreen_integration_game_${game_test_version_id}_${game_test_backend}_exit_${game_test_exit_mode})
+            add_test(
+                NAME ${game_test_name}
+                COMMAND ${TOOLSCREEN_POWERSHELL_EXECUTABLE} -NoProfile -ExecutionPolicy Bypass
+                    -File "${CMAKE_CURRENT_SOURCE_DIR}/scripts/game_tests/run_game_tests.ps1"
+                    -MinecraftVersion ${game_test_version} -GraphicsBackend ${game_test_backend} -Configuration $<CONFIG>
+                    -BuildDir "${CMAKE_BINARY_DIR}"
+                    -Filter startup.version -ExitMode ${game_test_exit_mode}
+            )
+            set_tests_properties(${game_test_name} PROPERTIES
+                TIMEOUT 1800
+                RUN_SERIAL TRUE
+            )
+        endforeach()
+    endforeach()
+    # Config fixtures, run on every in-game client:
+    #   config_error   - a config.toml that cannot be loaded or restored must show the error screen.
+    #   config_restore - a corrupt config.toml beside a good launch snapshot must be restored silently.
+    foreach(game_test_spec IN ITEMS "1.16.1:opengl" "26.3:opengl" "26.3:vulkan")
+        string(REPLACE ":" ";" game_test_parts "${game_test_spec}")
+        list(GET game_test_parts 0 game_test_version)
+        list(GET game_test_parts 1 game_test_backend)
+        string(REPLACE "." "_" game_test_version_id "${game_test_version}")
+        set(game_test_prefix toolscreen_integration_game_${game_test_version_id}_${game_test_backend})
+        add_test(
+            NAME ${game_test_prefix}_config_error
+            COMMAND ${TOOLSCREEN_POWERSHELL_EXECUTABLE} -NoProfile -ExecutionPolicy Bypass
+                -File "${CMAKE_CURRENT_SOURCE_DIR}/scripts/game_tests/run_game_tests.ps1"
+                -MinecraftVersion ${game_test_version} -GraphicsBackend ${game_test_backend} -Configuration $<CONFIG>
+                -BuildDir "${CMAKE_BINARY_DIR}"
+                -Filter "startup.,config.load_error_screen"
+                -ConfigFixture "${CMAKE_CURRENT_SOURCE_DIR}/tests/game/fixtures/broken_config.toml"
+        )
+        add_test(
+            NAME ${game_test_prefix}_config_restore
+            COMMAND ${TOOLSCREEN_POWERSHELL_EXECUTABLE} -NoProfile -ExecutionPolicy Bypass
+                -File "${CMAKE_CURRENT_SOURCE_DIR}/scripts/game_tests/run_game_tests.ps1"
+                -MinecraftVersion ${game_test_version} -GraphicsBackend ${game_test_backend} -Configuration $<CONFIG>
+                -BuildDir "${CMAKE_BINARY_DIR}"
+                -Filter "startup.,render.frames_hooked,config.recovered_from_backup"
+                -ConfigFixture "${CMAKE_CURRENT_SOURCE_DIR}/tests/game/fixtures/corrupt_config_with_backup"
+        )
+        set_tests_properties(${game_test_prefix}_config_error ${game_test_prefix}_config_restore PROPERTIES
+            TIMEOUT 1800
+            RUN_SERIAL TRUE
+        )
+    endforeach()
+endif()
+
+add_executable(toolscreen_base64_tests tests/base64_tests.cpp)
+target_include_directories(toolscreen_base64_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/liblogger)
+if(MSVC)
+    target_compile_options(toolscreen_base64_tests PRIVATE /W3 /MP /EHsc)
+endif()
+toolscreen_configure_target_outputs(toolscreen_base64_tests)
+toolscreen_enable_release_symbols(toolscreen_base64_tests)
+
+foreach(test_case IN ITEMS round_trips_text_and_binary rejects_invalid_input_safely)
+    add_test(
+        NAME toolscreen_base64_${test_case}
+        COMMAND $<TARGET_FILE:toolscreen_base64_tests> --run ${test_case}
     )
 endforeach()
 

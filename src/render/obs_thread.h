@@ -39,6 +39,12 @@ void CaptureBackbufferForObs(int width, int height);
 // Set the override texture published by the synchronous OBS compose path.
 void SetObsOverrideTexture(GLuint texture, int width, int height);
 
+// The producer and OBS capture may run in different shared OpenGL contexts.
+// Protect each published texture both ways: the consumer waits for the
+// producer's writes, and the producer waits before reusing a texture that OBS
+// has just sampled.
+void WaitForObsOverrideTextureConsumer(GLuint texture);
+
 void ClearObsOverride();
 
 bool ShouldUpdateObsTextureNow();

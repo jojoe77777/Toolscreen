@@ -320,6 +320,9 @@ extern std::atomic<bool> g_allImagesLoaded;
 extern std::mutex g_decodedImagesMutex;
 extern std::vector<DecodedImageData> g_decodedImagesQueue;
 extern std::atomic<HWND> g_minecraftHwnd;
+// Latched once the game window has existed for 2 seconds. Until then
+// only the Vulkan context capture path may run; every other hook stays inert.
+extern std::atomic<bool> g_gameWindowHooksReady;
 extern std::string g_gameStateBuffers[2];
 extern std::atomic<int> g_currentGameStateIndex;
 extern std::mutex g_hotkeyMainKeysMutex;
@@ -345,7 +348,12 @@ void LogCategory(const char* category, const std::string& message);
 
 std::wstring Utf8ToWide(const std::string& utf8_string);
 std::string WideToUtf8(const std::wstring& wstr);
+std::string SanitizePathForDisplay(const std::string& path);
+std::wstring SanitizePathForDisplay(const std::wstring& path);
+std::string FileNameForDisplay(const std::string& path);
 std::wstring GetToolscreenPath();
+// Flushes queued log lines, giving up if the log file lock is not free within lockTimeoutMs.
+void FlushLogsBestEffort(int lockTimeoutMs);
 
 bool CompressFileToGzip(const std::wstring& srcPath, const std::wstring& dstPath);
 
@@ -383,6 +391,9 @@ BOOL ClipCursorDirect(const RECT* lpRect);
 bool ApplyConfineCursorToGameWindow();
 void ApplyDeferredGuiCursorModeAfterClose();
 void FinalizeGuiCursorStateAfterClose();
+void InvokeCapturedGlfwResizeCallbacks(HWND destinationHwnd, int width, int height);
+void ClearCapturedGlfwResizeCallbacks(HWND destroyedHwnd = NULL);
+void ClearCapturedSdlWindow(HWND destroyedHwnd = NULL);
 
 UINT GetToolscreenBorderlessToggleMessageId();
 void RememberRequestedWindowClientResize(int width, int height);
@@ -391,6 +402,9 @@ bool GetRecentRequestedWindowClientResizes(int& outCurrentW, int& outCurrentH, i
 bool CenterWindowedRestoreOnCurrentMonitor(HWND hwnd, const char* source = nullptr);
 void ToggleBorderlessWindowedFullscreen(HWND hwnd);
 bool IsCursorVisible();
+#if defined(TOOLSCREEN_GUI_INTEGRATION_TESTS)
+void SetCursorVisibilityOverrideForTests(bool enabled, bool visible);
+#endif
 void WriteCurrentModeToFile(const std::string& modeId);
 bool SwitchToMode(const std::string& newModeId, const std::string& source = "", bool forceCut = false);
 bool IsHardcodedMode(const std::string& modeId);
@@ -425,6 +439,7 @@ ModeViewportInfo GetCurrentModeViewport_Internal(); // Lock-free implementation 
 bool ResolvePresentedGameViewport(ModeViewportInfo& outViewport);
 bool ResolvePresentedGameBlitRect(int& outDstX0, int& outDstY0, int& outDstX1, int& outDstY1);
 bool GetLatestGameViewportSize(int& outWidth, int& outHeight);
+void PublishLatestGameViewportSize(int width, int height);
 void InvalidateLatestGameViewportSize();
 #ifdef TOOLSCREEN_GUI_INTEGRATION_TESTS
 void SetLatestGameViewportSizeForTests(int width, int height);
@@ -445,7 +460,6 @@ bool CheckHotkeyMatch(const std::vector<DWORD>& keys, WPARAM wParam, const std::
 
 std::string FindHotkeyConflict(const std::vector<DWORD>& newKeys, const std::string& excludeLabel);
 
-void BackupConfigFile();
 
 void GetRelativeCoords(const std::string& type, int relX, int relY, int w, int h, int containerW, int containerH, int& outX, int& outY);
 void GetRelativeCoordsForImage(const std::string& type, int relX, int relY, int w, int h, int containerW, int containerH, int& outX,
@@ -467,6 +481,9 @@ void ScreenDeltaToMirrorConfigDelta(const std::string& relativeTo,
                                     int& outConfigDx, int& outConfigDy);
 
 void ScreenshotToClipboard(int width, int height);
+bool ScreenshotPixelsToClipboard(const unsigned char* pixels, int width, int height,
+                                 size_t rowPitch, bool sourceIsBgra,
+                                 bool sourceIsTopDown);
 
 DWORD WINAPI FileMonitorThread(LPVOID lpParam);
 DWORD WINAPI ImageMonitorThread(LPVOID lpParam);

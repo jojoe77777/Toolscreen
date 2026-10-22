@@ -14,6 +14,9 @@
 #include "common/profiler.h"
 #include "render/obs_thread.h"
 #include "render/render.h"
+#include "render/render_backend.h"
+#include "render/vulkan/vulkan_renderer.h"
+#include "render/background_fit_layout.h"
 #include "platform/resource.h"
 #include <nlohmann/json.hpp>
 #include "common/i18n.h"
@@ -42,6 +45,7 @@
 #include <fstream>
 #include <functional>
 #include <future>
+#include <limits>
 #include <optional>
 #include <set>
 #include <shared_mutex>
@@ -120,6 +124,8 @@ struct FontPickerOption {
 struct FontPickerUiState {
     bool editingCustom = false;
     std::string customPath;
+    std::string customPathDisplay;
+    bool editingCustomPathInput = false;
     std::string searchQuery;
     bool comboOpen = false;
     bool focusSearch = false;
@@ -272,34 +278,15 @@ void SetNextSettingsModalCentered(ImGuiCond condition = ImGuiCond_Always) {
         return value;
     }
 
-    std::vector<std::string_view> TokenizeSearchQuery(std::string_view value) {
-        std::vector<std::string_view> tokens;
-        value = TrimSearchQuery(value);
-        while (!value.empty()) {
+    bool MatchesSearchTerms(std::string_view query, std::initializer_list<std::string_view> searchTerms) {
+        query = TrimSearchQuery(query);
+        while (!query.empty()) {
             size_t separator = 0;
-            while (separator < value.size() && std::isspace(static_cast<unsigned char>(value[separator])) == 0) {
+            while (separator < query.size() && std::isspace(static_cast<unsigned char>(query[separator])) == 0) {
                 ++separator;
             }
 
-            if (separator > 0) {
-                tokens.push_back(value.substr(0, separator));
-            }
-
-            value.remove_prefix((std::min)(separator, value.size()));
-            while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front())) != 0) {
-                value.remove_prefix(1);
-            }
-        }
-        return tokens;
-    }
-
-    bool MatchesSearchTerms(std::string_view query, std::initializer_list<std::string_view> searchTerms) {
-        const std::vector<std::string_view> tokens = TokenizeSearchQuery(query);
-        if (tokens.empty()) {
-            return true;
-        }
-
-        for (const std::string_view token : tokens) {
+            const std::string_view token = query.substr(0, separator);
             bool tokenMatched = false;
             for (const std::string_view searchTerm : searchTerms) {
                 if (searchTerm.empty()) {
@@ -313,6 +300,11 @@ void SetNextSettingsModalCentered(ImGuiCond condition = ImGuiCond_Always) {
 
             if (!tokenMatched) {
                 return false;
+            }
+
+            query.remove_prefix(separator);
+            while (!query.empty() && std::isspace(static_cast<unsigned char>(query.front())) != 0) {
+                query.remove_prefix(1);
             }
         }
 
@@ -1052,6 +1044,45 @@ std::vector<FontPickerOption> BuildFontPickerOptions(std::initializer_list<FontP
     return options;
 }
 
+const std::vector<FontPickerOption>& GetFontPickerOptions() {
+    static const std::vector<FontPickerOption> options = BuildFontPickerOptions();
+    return options;
+}
+
+const std::vector<FontPickerOption>& GetUseMainGuiFontPickerOptions() {
+    static const std::vector<FontPickerOption> options =
+        BuildFontPickerOptions({ { "", "font.preset.use_main_gui" } });
+    return options;
+}
+
+const std::vector<NinjabrainPresetDefinition>& GetSortedEmbeddedNinjabrainPresets() {
+    static const std::vector<NinjabrainPresetDefinition> presets = []() {
+        std::vector<NinjabrainPresetDefinition> sortedPresets = GetEmbeddedNinjabrainPresets();
+        std::stable_sort(sortedPresets.begin(), sortedPresets.end(),
+                         [](const NinjabrainPresetDefinition& left, const NinjabrainPresetDefinition& right) {
+                             auto presetRank = [](const std::string& presetId) {
+                                 if (presetId == "compact") return 0;
+                                 if (presetId == "ninjabrainbot") return 1;
+                                 return 100;
+                             };
+
+                             const int leftRank = presetRank(left.id);
+                             const int rightRank = presetRank(right.id);
+                             if (leftRank != rightRank) {
+                                 return leftRank < rightRank;
+                             }
+
+                             if (left.translationKey != right.translationKey) {
+                                 return left.translationKey < right.translationKey;
+                             }
+
+                             return left.id < right.id;
+                         });
+        return sortedPresets;
+    }();
+    return presets;
+}
+
 std::string GetFontPickerOptionLabel(const FontPickerOption& option) {
     if (option.labelKey != nullptr) {
         return tr(option.labelKey);
@@ -1384,8 +1415,18 @@ void RenderCustomFontPathEditor(const char* inputId, const char* browseButtonSuf
     }
 
     ImGui::SetNextItemWidth(inputWidth);
-    if (ImGui::InputText(inputId, &state.customPath)) {
-        ApplyFontPickerPathValue(state, options, currentPath, state.customPath, onChanged);
+    if (state.editingCustomPathInput) {
+        if (ImGui::InputText(inputId, &state.customPath)) {
+            ApplyFontPickerPathValue(state, options, currentPath, state.customPath, onChanged);
+        }
+        state.editingCustomPathInput = ImGui::IsItemActive();
+    } else {
+        state.customPathDisplay = FileNameForDisplay(state.customPath);
+        ImGui::InputText(inputId, &state.customPathDisplay, ImGuiInputTextFlags_ReadOnly);
+        if (ImGui::IsItemActivated()) {
+            state.editingCustomPathInput = true;
+            ImGui::SetKeyboardFocusHere(-1);
+        }
     }
     ImGui::SameLine();
     if (ImGui::Button((tr("button.browse") + browseButtonSuffix).c_str())) {
@@ -1398,6 +1439,43 @@ void RenderCustomFontPathEditor(const char* inputId, const char* browseButtonSuf
         ImGui::SameLine();
         ImGui::TextDisabled("%s", trc(hintKey));
     }
+}
+
+struct MaskedPathEdit {
+    std::string buffer;
+    bool focusPending = false;
+};
+
+bool RenderMaskedPathInput(const char* label, std::string& path) {
+    static std::unordered_map<ImGuiID, MaskedPathEdit> s_edits;
+    const ImGuiID id = ImGui::GetID(label);
+    const auto it = s_edits.find(id);
+    bool changed = false;
+    if (it != s_edits.end()) {
+        ImGui::PushID("##maskedpathedit");
+        if (it->second.focusPending) {
+            ImGui::SetKeyboardFocusHere();
+            it->second.focusPending = false;
+        }
+        const bool committed = ImGui::InputTextWithHint(label, trc("label.path_hint"), &it->second.buffer,
+                                                        ImGuiInputTextFlags_EnterReturnsTrue);
+        const bool deactivated = ImGui::IsItemDeactivated();
+        ImGui::PopID();
+        if (committed || deactivated) {
+            if (!it->second.buffer.empty()) {
+                path = it->second.buffer;
+                changed = true;
+            }
+            s_edits.erase(id);
+        }
+    } else {
+        std::string fileName = FileNameForDisplay(path);
+        ImGui::InputText(label, &fileName, ImGuiInputTextFlags_ReadOnly);
+        if (ImGui::IsItemActivated()) {
+            s_edits[id] = MaskedPathEdit{ std::string(), true };
+        }
+    }
+    return changed;
 }
 
 enum class UploadStatus {
@@ -1433,6 +1511,7 @@ constexpr MclogsUploadEndpoint kFallbackMclogsUploadEndpoint{ L"https://api.mclo
                                                               "api.mclogs.minestrator.com" };
 constexpr size_t kMclogsMaxContentBytes = 10u * 1024u * 1024u;
 constexpr size_t kMclogsMaxContentLines = 25000u;
+constexpr size_t kMclogsMaxResponseBytes = 1u * 1024u * 1024u;
 
 struct HttpJsonResponse {
     DWORD statusCode = 0;
@@ -1582,6 +1661,11 @@ bool HttpPostToString(const std::wstring& url, const std::wstring& requestHeader
         outError = "WinHttpCrackUrl failed";
         return false;
     }
+    if (!urlComp.lpszHostName || urlComp.dwHostNameLength == 0 ||
+        (urlComp.nScheme != INTERNET_SCHEME_HTTP && urlComp.nScheme != INTERNET_SCHEME_HTTPS)) {
+        outError = "URL must contain an HTTP or HTTPS host";
+        return false;
+    }
 
     const std::wstring host(urlComp.lpszHostName, urlComp.dwHostNameLength);
     std::wstring path(urlComp.lpszUrlPath ? std::wstring(urlComp.lpszUrlPath, urlComp.dwUrlPathLength) : L"/");
@@ -1621,6 +1705,10 @@ bool HttpPostToString(const std::wstring& url, const std::wstring& requestHeader
 
     bool ok = false;
     do {
+        if (requestBody.size() > std::numeric_limits<DWORD>::max()) {
+            outError = "HTTP request body is too large";
+            break;
+        }
         const DWORD requestSize = static_cast<DWORD>(requestBody.size());
         if (!WinHttpSendRequest(hRequest, requestHeaders.c_str(), static_cast<DWORD>(-1L), const_cast<char*>(requestBody.data()), requestSize,
                                 requestSize, 0)) {
@@ -1652,6 +1740,11 @@ bool HttpPostToString(const std::wstring& url, const std::wstring& requestHeader
                 break;
             }
             if (bytesAvailable == 0) {
+                break;
+            }
+            if (outResponse.body.size() > kMclogsMaxResponseBytes ||
+                bytesAvailable > kMclogsMaxResponseBytes - outResponse.body.size()) {
+                outError = "HTTP response exceeded the size limit";
                 break;
             }
 
@@ -1901,7 +1994,7 @@ bool UploadTextToMclogs(const std::string& uploadLabel, const std::string& textC
 
         return false;
     } catch (const std::exception& e) {
-        outError = std::string("Failed to upload text: ") + e.what();
+        outError = std::string("Failed to upload text: ") + SanitizePathForDisplay(std::string(e.what()));
         return false;
     }
 }
@@ -2342,9 +2435,11 @@ void CloseSettingsGuiWindow() {
 
     ApplyDeferredGuiCursorModeAfterClose();
 
+    const bool cursorVisibleAfterClose = g_wasCursorVisible.load(std::memory_order_acquire);
     if (ApplyConfineCursorToGameWindow()) {
-        SetCursor(NULL);
-    } else if (!g_wasCursorVisible.load(std::memory_order_acquire)) {
+        // Confining only restricts movement; a menu cursor must stay visible.
+        if (!cursorVisibleAfterClose) { SetCursor(NULL); }
+    } else if (!cursorVisibleAfterClose) {
         RECT clipRect{};
         if (GetWindowClientRectInScreen(hwnd, clipRect)) {
             ClipCursor(&clipRect);
@@ -2582,6 +2677,11 @@ void RenderInteractiveCreateBanner() {
 }
 
 void RenderSettingsGUI() {
+    // Start network-backed optional UI data only once the DLL is fully loaded
+    // and rendering, never while DllMain holds the Windows loader lock.
+#ifndef TOOLSCREEN_GUI_INTEGRATION_TESTS
+    StartSupportersFetch();
+#endif
     ResetTransientBindingUiState();
 
 #ifdef TOOLSCREEN_GUI_INTEGRATION_TESTS
@@ -2652,7 +2752,6 @@ void RenderSettingsGUI() {
 
         ImGui::Text(trc("hotkeys.bind_hotkey.tooltip.prompt"));
         ImGui::Text(trc("hotkeys.bind_hotkey.tooltip.confirm"));
-        ImGui::Text(trc("hotkeys.bind_hotkey.tooltip.clear"));
         ImGui::Text(trc("hotkeys.bind_hotkey.tooltip.cancel"));
         ImGui::Separator();
 
@@ -2760,14 +2859,6 @@ void RenderSettingsGUI() {
                 ImGui::CloseCurrentPopup();
                 (void)capturedLParam;
                 (void)capturedIsMouse;
-                ImGui::EndPopup();
-                return;
-            }
-
-            const bool canClear = (s_exclusionToBind.hotkey_idx == -1);
-            if (canClear && (capturedVk == VK_BACK || capturedVk == VK_DELETE)) {
-                Log("Binding cleared from Backspace/Delete.");
-                finalize_bind({});
                 ImGui::EndPopup();
                 return;
             }
@@ -3026,69 +3117,93 @@ void RenderSettingsGUI() {
             {
                 static GLuint s_languageTexture = 0;
                 static HGLRC s_languageLastCtx = NULL;
-                HGLRC currentCtx = wglGetCurrentContext();
-                if (currentCtx != s_languageLastCtx) {
-                    s_languageTexture = 0;
-                    s_languageLastCtx = currentCtx;
+                ImTextureID languageTexture = 0;
+                if (GetRenderBackend() == RenderBackend::Vulkan) {
+                    uintptr_t texture = 0;
+                    if (VulkanRenderer::GetBundledGuiTexture(
+                            IDR_LANGUAGE_PNG, texture)) {
+                        languageTexture = static_cast<ImTextureID>(texture);
+                    }
+                } else {
+                    HGLRC currentCtx = wglGetCurrentContext();
+                    if (currentCtx != s_languageLastCtx) {
+                        s_languageTexture = 0;
+                        s_languageLastCtx = currentCtx;
+                    }
+                    LoadEmbeddedResourceTexture(
+                        s_languageTexture, IDR_LANGUAGE_PNG);
+                    languageTexture =
+                        static_cast<ImTextureID>(s_languageTexture);
                 }
 
-                LoadEmbeddedResourceTexture(s_languageTexture, IDR_LANGUAGE_PNG);
-
-                if (s_languageTexture != 0) {
-                    float iconSize = ImGui::GetFrameHeight();
-                    ImGui::SetCursorPos(ImVec2(languageButtonX, topBarY));
+                float iconSize = ImGui::GetFrameHeight();
+                ImGui::SetCursorPos(ImVec2(languageButtonX, topBarY));
+                if (languageTexture != 0) {
                     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
                     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.1f));
                     ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1, 1, 1, 0.2f));
                     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
-                    if (ImGui::ImageButton("##language", (ImTextureID)(intptr_t)s_languageTexture, ImVec2(iconSize, iconSize))) {
+                    if (ImGui::ImageButton("##language", languageTexture, ImVec2(iconSize, iconSize))) {
                         ImGui::OpenPopup("##LanguagePopup");
                     }
                     ImGui::PopStyleVar();
                     ImGui::PopStyleColor(3);
+                } else if (ImGui::Button("L##language", ImVec2(iconSize, iconSize))) {
+                    ImGui::OpenPopup("##LanguagePopup");
+                }
 
-                    if (ImGui::BeginPopup("##LanguagePopup")) {
-                        PROFILE_SCOPE_CAT("Settings Language Popup", "ImGui");
+                if (ImGui::BeginPopup("##LanguagePopup")) {
+                    PROFILE_SCOPE_CAT("Settings Language Popup", "ImGui");
 
-                        const nlohmann::json& langs = GetLangs();
-                        for (const auto& [langCode, langName] : langs.items()) {
-                            bool isSelected = (g_config.lang == langCode);
-                            if (ImGui::Selectable(langName.get<std::string>().c_str(), isSelected)) {
-                                if (g_config.lang != langCode) {
-                                    g_config.lang = langCode;
-                                    LoadTranslation(langCode);
-                                    RequestDynamicGuiFontRefresh(true);
-                                    g_configIsDirty = true;
-                                }
-                            }
-                            if (isSelected) {
-                                ImGui::SetItemDefaultFocus();
+                    const nlohmann::json& langs = GetLangs();
+                    for (const auto& [langCode, langName] : langs.items()) {
+                        bool isSelected = (g_config.lang == langCode);
+                        if (ImGui::Selectable(langName.get<std::string>().c_str(), isSelected)) {
+                            if (g_config.lang != langCode) {
+                                g_config.lang = langCode;
+                                LoadTranslation(langCode);
+                                RequestDynamicGuiFontRefresh(true);
+                                g_configIsDirty = true;
                             }
                         }
-                        ImGui::EndPopup(); 
+                        if (isSelected) {
+                            ImGui::SetItemDefaultFocus();
+                        }
                     }
+                    ImGui::EndPopup();
                 }
             }
 
             {
                 static GLuint s_discordTexture = 0;
                 static HGLRC s_discordLastCtx = NULL;
-                HGLRC currentCtx = wglGetCurrentContext();
-                if (currentCtx != s_discordLastCtx) {
-                    s_discordTexture = 0;
-                    s_discordLastCtx = currentCtx;
+                ImTextureID discordTexture = 0;
+                if (GetRenderBackend() == RenderBackend::Vulkan) {
+                    uintptr_t texture = 0;
+                    if (VulkanRenderer::GetBundledGuiTexture(
+                            IDR_DISCORD_PNG, texture)) {
+                        discordTexture = static_cast<ImTextureID>(texture);
+                    }
+                } else {
+                    HGLRC currentCtx = wglGetCurrentContext();
+                    if (currentCtx != s_discordLastCtx) {
+                        s_discordTexture = 0;
+                        s_discordLastCtx = currentCtx;
+                    }
+                    LoadEmbeddedResourceTexture(
+                        s_discordTexture, IDR_DISCORD_PNG);
+                    discordTexture =
+                        static_cast<ImTextureID>(s_discordTexture);
                 }
 
-                LoadEmbeddedResourceTexture(s_discordTexture, IDR_DISCORD_PNG);
-
-                if (s_discordTexture != 0) {
-                    float iconSize = ImGui::GetFrameHeight();
-                    ImGui::SetCursorPos(ImVec2(discordButtonX, topBarY));
+                float iconSize = ImGui::GetFrameHeight();
+                ImGui::SetCursorPos(ImVec2(discordButtonX, topBarY));
+                if (discordTexture != 0) {
                     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
                     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.1f));
                     ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1, 1, 1, 0.2f));
                     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
-                    if (ImGui::ImageButton("##discord", (ImTextureID)(intptr_t)s_discordTexture, ImVec2(iconSize, iconSize))) {
+                    if (ImGui::ImageButton("##discord", discordTexture, ImVec2(iconSize, iconSize))) {
                         ShellExecuteW(NULL, L"open", DISCORD_URL, NULL, NULL, SW_SHOWNORMAL);
                     }
                     ImGui::PopStyleVar();
@@ -3096,6 +3211,8 @@ void RenderSettingsGUI() {
                     if (ImGui::IsItemHovered()) {
                         ImGui::SetTooltip(trc("tooltip.join_discord"));
                     }
+                } else if (ImGui::Button("D##discord", ImVec2(iconSize, iconSize))) {
+                    ShellExecuteW(NULL, L"open", DISCORD_URL, NULL, NULL, SW_SHOWNORMAL);
                 }
             }
 
@@ -3108,10 +3225,24 @@ void RenderSettingsGUI() {
 
             static GLuint s_editorTexture = 0;
             static HGLRC s_editorLastCtx = NULL;
-            HGLRC editorCtx = wglGetCurrentContext();
-            if (editorCtx != s_editorLastCtx) { s_editorTexture = 0; s_editorLastCtx = editorCtx; }
-            LoadEmbeddedResourceTexture(s_editorTexture, IDR_EDITOR_PNG);
-            if (s_editorTexture != 0) {
+            ImTextureID editorTexture = 0;
+            if (GetRenderBackend() == RenderBackend::Vulkan) {
+                uintptr_t texture = 0;
+                if (VulkanRenderer::GetBundledGuiTexture(
+                        IDR_EDITOR_PNG, texture)) {
+                    editorTexture = static_cast<ImTextureID>(texture);
+                }
+            } else {
+                HGLRC editorCtx = wglGetCurrentContext();
+                if (editorCtx != s_editorLastCtx) {
+                    s_editorTexture = 0;
+                    s_editorLastCtx = editorCtx;
+                }
+                LoadEmbeddedResourceTexture(
+                    s_editorTexture, IDR_EDITOR_PNG);
+                editorTexture = static_cast<ImTextureID>(s_editorTexture);
+            }
+            if (editorTexture != 0) {
                 const bool editorOn = g_overlayEditorMode.load(std::memory_order_relaxed);
                 ImGui::SetCursorPos(ImVec2(editorButtonX, topBarY));
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
@@ -3119,7 +3250,7 @@ void RenderSettingsGUI() {
                 ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1, 1, 1, 0.2f));
                 ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
                 const ImVec4 tint = editorOn ? ImVec4(1.0f, 0.59f, 0.16f, 1.0f) : ImVec4(0.62f, 0.62f, 0.62f, 0.9f);
-                if (ImGui::ImageButton("##EditorToggle", (ImTextureID)(intptr_t)s_editorTexture, ImVec2(iconSize, iconSize),
+                if (ImGui::ImageButton("##EditorToggle", editorTexture, ImVec2(iconSize, iconSize),
                                        ImVec2(0, 0), ImVec2(1, 1), ImVec4(0, 0, 0, 0), tint)) {
                     g_overlayEditorMode.store(!editorOn, std::memory_order_relaxed);
                 }
@@ -3127,6 +3258,12 @@ void RenderSettingsGUI() {
                 ImGui::PopStyleColor(3);
                 if (ImGui::IsItemHovered()) {
                     ImGui::SetTooltip("%s", trc(editorOn ? "editor.tooltip_on" : "editor.tooltip_off"));
+                }
+            } else {
+                const bool editorOn = g_overlayEditorMode.load(std::memory_order_relaxed);
+                ImGui::SetCursorPos(ImVec2(editorButtonX, topBarY));
+                if (ImGui::Button(editorOn ? "E*##EditorToggle" : "E##EditorToggle", ImVec2(iconSize, iconSize))) {
+                    g_overlayEditorMode.store(!editorOn, std::memory_order_relaxed);
                 }
             }
 
@@ -3378,6 +3515,21 @@ void RenderSettingsGUI() {
         }
 
         ImGui::Separator();
+
+        if (const std::vector<ConfigRecoveryNotice> recoveryNotices = GetConfigRecoveryNotices(); !recoveryNotices.empty()) {
+            const ImVec4 warningColor(1.0f, 0.75f, 0.3f, 1.0f);
+            for (const auto& notice : recoveryNotices) {
+                ImGui::PushStyleColor(ImGuiCol_Text, warningColor);
+                if (!notice.restoredFrom.empty()) {
+                    ImGui::TextWrapped("%s", tr("config.recovery_restored", notice.fileName, notice.restoredFrom, notice.movedAsideAs).c_str());
+                } else {
+                    ImGui::TextWrapped("%s", tr("config.recovery_reset", notice.fileName, notice.movedAsideAs).c_str());
+                }
+                ImGui::PopStyleColor();
+            }
+            if (ImGui::SmallButton(trc("config.recovery_dismiss"))) { ClearConfigRecoveryNotices(); }
+            ImGui::Separator();
+        }
 
         bool wantImageDrag = false;
         bool wantWindowOverlayDrag = false;

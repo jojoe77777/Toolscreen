@@ -77,23 +77,19 @@ class ScopedKeyboardStateOverride {
 
 class ScopedCursorVisibilityOverride {
     public:
-        explicit ScopedCursorVisibilityOverride(bool visible) : m_originalVisible(IsCursorVisible()) {
+        explicit ScopedCursorVisibilityOverride(bool visible) {
                 SetVisible(visible);
         }
 
-        ~ScopedCursorVisibilityOverride() { SetVisible(m_originalVisible); }
+        ~ScopedCursorVisibilityOverride() { SetCursorVisibilityOverrideForTests(false, false); }
 
     private:
         static void SetVisible(bool visible) {
-                for (int attempt = 0; attempt < 32 && IsCursorVisible() != visible; ++attempt) {
-                        ShowCursor(visible ? TRUE : FALSE);
-                }
+                SetCursorVisibilityOverrideForTests(true, visible);
 
                 Expect(IsCursorVisible() == visible,
                              std::string("Failed to set cursor visibility to ") + (visible ? "visible" : "hidden") + " for rebind integration test.");
         }
-
-        bool m_originalVisible = false;
 };
 
 class ScopedRebindMessageCapture {
@@ -316,7 +312,38 @@ static void PrepareRebindGuiCase(std::string_view caseName, const std::vector<Ke
     g_config.keyRebinds.rebinds = rebinds;
     g_config.hotkeys.clear();
     g_config.sensitivityHotkeys.clear();
+    RequestGuiTestKeyboardLayoutSetCursorStateView(GuiTestKeyboardLayoutCursorStateView::Any);
     PublishConfigSnapshot();
+}
+
+void RunVulkanGuiHotkeyUsesLowLevelExactModifierStateTest(TestRunMode runMode = TestRunMode::Automated) {
+    (void)runMode;
+    ResetLowLevelExactModifierStateForTest();
+    SetLowLevelExactModifierDownForTest(VK_LCONTROL, true);
+
+    Expect(DoesLowLevelHotkeyChordMatchForTest({ VK_LCONTROL, 'I' }, 'I'),
+        "Expected Vulkan GUI hotkey matching to use the low-level left-Ctrl state.");
+    Expect(!DoesLowLevelHotkeyChordMatchForTest({ VK_RCONTROL, 'I' }, 'I'),
+        "Expected left Ctrl not to satisfy a right-Ctrl Vulkan GUI hotkey.");
+
+    SetLowLevelExactModifierDownForTest(VK_LCONTROL, false);
+    Expect(!DoesLowLevelHotkeyChordMatchForTest({ VK_LCONTROL, 'I' }, 'I'),
+        "Expected the Vulkan GUI hotkey not to match after left Ctrl is released.");
+}
+
+void RunLowLevelKeyboardHookRunsOnDedicatedThreadTest(TestRunMode runMode = TestRunMode::Automated) {
+    (void)runMode;
+    DWORD hookThreadId = 0;
+    bool installed = false;
+    bool removed = false;
+    CycleLowLevelKeyboardHookForTest(hookThreadId, installed, removed);
+    StopLowLevelKeyboardHookThread();
+    StopLowLevelKeyboardHookThread();
+
+    Expect(installed, "Expected the low-level keyboard hook to install through its owning thread.");
+    Expect(hookThreadId != 0 && hookThreadId != GetCurrentThreadId(),
+        "Expected the low-level keyboard hook to be owned by a dedicated thread, not the requesting thread.");
+    Expect(removed, "Expected the low-level keyboard hook to be removed through its owning thread.");
 }
 
 static void RenderKeyboardInputsFrame(DummyWindow& window) {
@@ -646,6 +673,52 @@ void RunHotkeyRuntimeExclusionDetectsLowLevelSuppressedKeyTest(TestRunMode runMo
 
     Expect(CheckHotkeyMatch({ 0x46 }, 0x46, { VK_CAPITAL }, false, 1, 0x46, true, true),
            "Expected hotkey to match when Caps Lock exclusion is listed but key is neither pressed nor suppressed.");
+}
+
+void RunKeyRebindDeepSuppressionEligibilityTest(TestRunMode runMode = TestRunMode::Automated) {
+    (void)runMode;
+
+    Expect(IsDeepSuppressionEligibleSourceVkForTest(VK_CONTROL), "Expected VK_CONTROL to be deep-suppression eligible.");
+    Expect(IsDeepSuppressionEligibleSourceVkForTest(VK_LCONTROL), "Expected VK_LCONTROL to be deep-suppression eligible.");
+    Expect(IsDeepSuppressionEligibleSourceVkForTest(VK_RCONTROL), "Expected VK_RCONTROL to be deep-suppression eligible.");
+    Expect(IsDeepSuppressionEligibleSourceVkForTest(VK_SHIFT), "Expected VK_SHIFT to be deep-suppression eligible.");
+    Expect(IsDeepSuppressionEligibleSourceVkForTest(VK_LSHIFT), "Expected VK_LSHIFT to be deep-suppression eligible.");
+    Expect(IsDeepSuppressionEligibleSourceVkForTest(VK_RSHIFT), "Expected VK_RSHIFT to be deep-suppression eligible.");
+    Expect(IsDeepSuppressionEligibleSourceVkForTest(VK_LMENU), "Expected VK_LMENU to remain deep-suppression eligible.");
+    Expect(IsDeepSuppressionEligibleSourceVkForTest(VK_LWIN), "Expected VK_LWIN to remain deep-suppression eligible.");
+    Expect(!IsDeepSuppressionEligibleSourceVkForTest('A'), "Expected a regular key to NOT be deep-suppression eligible.");
+    Expect(!IsDeepSuppressionEligibleSourceVkForTest(VK_F3), "Expected F3 to NOT be deep-suppression eligible.");
+
+    Expect(ShouldDeepSuppressRebindForTest(VK_CONTROL, VK_F3),
+           "Expected Ctrl->F3 to deep-suppress the physical Ctrl so chord reads (narrator/GUI) do not see it.");
+    Expect(ShouldDeepSuppressRebindForTest(VK_SHIFT, VK_F3),
+           "Expected Shift->F3 to deep-suppress the physical Shift.");
+    Expect(ShouldDeepSuppressRebindForTest(VK_CONTROL, 0),
+           "Expected a consume-only Ctrl rebind to deep-suppress the physical Ctrl.");
+    Expect(!ShouldDeepSuppressRebindForTest(VK_CONTROL, VK_CONTROL),
+           "Expected Ctrl->Ctrl (preserving) to NOT deep-suppress.");
+    Expect(!ShouldDeepSuppressRebindForTest(VK_SHIFT, VK_SHIFT),
+           "Expected Shift->Shift (preserving) to NOT deep-suppress.");
+}
+
+void RunHotkeyRuntimeExclusionDetectsSuppressedCtrlShiftTest(TestRunMode runMode = TestRunMode::Automated) {
+    (void)runMode;
+
+    const std::filesystem::path root = PrepareCaseDirectory("hotkey_runtime_exclusion_detects_suppressed_ctrl_shift");
+    ResetGlobalTestState(root);
+
+    QueueSuppressedLowLevelKeyForTest(VK_LCONTROL, 0x001D, false);
+    Expect(!CheckHotkeyMatch({ 0x46 }, 0x46, { VK_CONTROL }, false, 1, 0x46, true, true),
+           "Expected hotkey to NOT match when low-level-suppressed Ctrl is listed as exclusion.");
+    ClearLowLevelSuppressedKeysForTest();
+
+    QueueSuppressedLowLevelKeyForTest(VK_LSHIFT, 0x002A, false);
+    Expect(!CheckHotkeyMatch({ 0x46 }, 0x46, { VK_SHIFT }, false, 1, 0x46, true, true),
+           "Expected hotkey to NOT match when low-level-suppressed Shift is listed as exclusion.");
+    ClearLowLevelSuppressedKeysForTest();
+
+    Expect(CheckHotkeyMatch({ 0x46 }, 0x46, { VK_CONTROL, VK_SHIFT }, false, 1, 0x46, true, true),
+           "Expected hotkey to match when Ctrl/Shift exclusions are neither pressed nor suppressed.");
 }
 
 void RunKeyRebindRuntimeSplitVkOutputTest(TestRunMode runMode = TestRunMode::Automated) {
@@ -1413,6 +1486,238 @@ void RunKeyRebindRuntimeHeldOutputReleasedOnRebindChangeTest(TestRunMode runMode
     Expect(capture.messages.size() == 1, "Expected exactly one forwarded WM_KEYUP.");
     ExpectCapturedMessage(capture, 0, WM_KEYUP, VK_F3,
         "Release must key-up the output asserted on keydown (F3), not the output the now-active rebind resolves to.");
+}
+
+void RunKeyRebindRuntimeHeldOutputReleasedOnNoMatchUpTest(TestRunMode runMode = TestRunMode::Automated) {
+    DummyWindow window(kWindowWidth, kWindowHeight, runMode == TestRunMode::Visual);
+
+    PrepareRebindRuntimeCase("key_rebind_runtime_held_output_released_on_no_match_up",
+                             { MakeEnabledRebind('A', VK_F3) });
+    ScopedRebindMessageCapture capture(window.hwnd());
+
+    ScopedKeyboardStateOverride keyboardState;
+    keyboardState.SetKeyDown(VK_SHIFT, false);
+    keyboardState.SetToggle(VK_CAPITAL, false);
+    keyboardState.Apply();
+
+    ScopedCursorVisibilityOverride cursorVisible(true);
+
+    const LPARAM downLParam = BuildTestKeyboardMessageLParam('A', true);
+    const LPARAM upLParam = BuildTestKeyboardMessageLParam('A', false);
+
+    HandleKeyRebinding(window.hwnd(), WM_KEYDOWN, 'A', downLParam);
+    ExpectCapturedMessage(capture, 0, WM_KEYDOWN, VK_F3, "Held-output DOWN forwards F3");
+
+    capture.Clear();
+    g_config.keyRebinds.rebinds = {};
+    PublishConfigSnapshot();
+
+    HandleKeyRebinding(window.hwnd(), WM_KEYUP, 'A', upLParam);
+    Expect(capture.messages.size() == 1,
+        "Expected the held F3 to be released even though no rebind matches the keyup.");
+    ExpectCapturedMessage(capture, 0, WM_KEYUP, VK_F3,
+        "Expected exactly the F3 key-up that the keydown asserted.");
+}
+
+void RunKeyRebindRuntimeHeldOutputReleasedOnMouseOutputUpTest(TestRunMode runMode = TestRunMode::Automated) {
+    DummyWindow window(kWindowWidth, kWindowHeight, runMode == TestRunMode::Visual);
+
+    PrepareRebindRuntimeCase("key_rebind_runtime_held_output_released_on_mouse_output_up",
+                             { MakeEnabledRebind('A', VK_F3) });
+    ScopedRebindMessageCapture capture(window.hwnd());
+
+    ScopedKeyboardStateOverride keyboardState;
+    keyboardState.SetKeyDown(VK_SHIFT, false);
+    keyboardState.SetToggle(VK_CAPITAL, false);
+    keyboardState.Apply();
+
+    ScopedCursorVisibilityOverride cursorVisible(true);
+
+    const LPARAM downLParam = BuildTestKeyboardMessageLParam('A', true);
+    const LPARAM upLParam = BuildTestKeyboardMessageLParam('A', false);
+
+    HandleKeyRebinding(window.hwnd(), WM_KEYDOWN, 'A', downLParam);
+    ExpectCapturedMessage(capture, 0, WM_KEYDOWN, VK_F3, "Held-output DOWN forwards F3");
+
+    capture.Clear();
+    g_config.keyRebinds.rebinds = { MakeEnabledRebind('A', VK_RBUTTON) };
+    PublishConfigSnapshot();
+
+    HandleKeyRebinding(window.hwnd(), WM_KEYUP, 'A', upLParam);
+    Expect(capture.messages.size() == 1,
+        "Expected the held F3 to be released even though the keyup now resolves to a mouse-button output.");
+    ExpectCapturedMessage(capture, 0, WM_KEYUP, VK_F3,
+        "Expected the F3 key-up the keydown asserted, not a mouse-button up.");
+}
+
+void RunKeyRebindRuntimeHeldOutputReleasedOnModifierOutputUpTest(TestRunMode runMode = TestRunMode::Automated) {
+    DummyWindow window(kWindowWidth, kWindowHeight, runMode == TestRunMode::Visual);
+
+    PrepareRebindRuntimeCase("key_rebind_runtime_held_output_released_on_modifier_output_up",
+                             { MakeEnabledRebind('A', VK_F3) });
+    ScopedRebindMessageCapture capture(window.hwnd());
+
+    ScopedKeyboardStateOverride keyboardState;
+    keyboardState.SetKeyDown(VK_SHIFT, false);
+    keyboardState.SetToggle(VK_CAPITAL, false);
+    keyboardState.Apply();
+
+    ScopedCursorVisibilityOverride cursorVisible(true);
+
+    const LPARAM downLParam = BuildTestKeyboardMessageLParam('A', true);
+    const LPARAM upLParam = BuildTestKeyboardMessageLParam('A', false);
+
+    HandleKeyRebinding(window.hwnd(), WM_KEYDOWN, 'A', downLParam);
+    ExpectCapturedMessage(capture, 0, WM_KEYDOWN, VK_F3, "Held-output DOWN forwards F3");
+
+    capture.Clear();
+    g_config.keyRebinds.rebinds = { MakeEnabledRebind('A', VK_LSHIFT) };
+    PublishConfigSnapshot();
+
+    HandleKeyRebinding(window.hwnd(), WM_KEYUP, 'A', upLParam);
+    Expect(capture.messages.size() == 1,
+        "Expected the held F3 to be released even though the keyup now resolves to a modifier output.");
+    ExpectCapturedMessage(capture, 0, WM_KEYUP, VK_F3,
+        "Expected the F3 key-up the keydown asserted, not a modifier release.");
+}
+
+void RunKeyRebindRuntimeHeldOutputReleasedOnGuiOpenTest(TestRunMode runMode = TestRunMode::Automated) {
+    DummyWindow window(kWindowWidth, kWindowHeight, runMode == TestRunMode::Visual);
+
+    PrepareRebindRuntimeCase("key_rebind_runtime_held_output_released_on_gui_open",
+                             { MakeEnabledRebind(VK_LBUTTON, VK_F3) });
+    g_config.guiHotkey = { VK_F6 };
+    ScopedRebindMessageCapture capture(window.hwnd());
+
+    ScopedKeyboardStateOverride keyboardState;
+    keyboardState.SetKeyDown(VK_SHIFT, false);
+    keyboardState.SetToggle(VK_CAPITAL, false);
+    keyboardState.Apply();
+
+    ScopedCursorVisibilityOverride cursorVisible(true);
+
+    g_showGui.store(false, std::memory_order_release);
+    const bool previousGlInitialized = g_glInitialized.load(std::memory_order_acquire);
+    g_glInitialized.store(true, std::memory_order_release);
+
+    const InputHandlerResult downResult =
+        HandleKeyRebinding(window.hwnd(), WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(12, 34));
+    Expect(downResult.consumed, "Expected the mouse-source rebind to consume the button down.");
+    ExpectCapturedMessage(capture, 0, WM_KEYDOWN, VK_F3, "Mouse-source DOWN forwards F3");
+
+    capture.Clear();
+
+    const InputHandlerResult toggleResult =
+        HandleGuiToggle(window.hwnd(), WM_KEYDOWN, VK_F6, BuildTestKeyboardMessageLParam(VK_F6, true));
+    const bool guiOpened = g_showGui.load(std::memory_order_acquire);
+
+    g_showGui.store(false, std::memory_order_release);
+    g_glInitialized.store(previousGlInitialized, std::memory_order_release);
+
+    Expect(toggleResult.consumed, "Expected the GUI toggle hotkey to be handled.");
+    Expect(guiOpened, "Expected the GUI to open on the toggle hotkey.");
+    Expect(capture.messages.size() == 1,
+        "Expected opening the GUI while a rebind output is held to release it.");
+    ExpectCapturedMessage(capture, 0, WM_KEYUP, VK_F3,
+        "Expected the held F3 to be released when the Toolscreen GUI opens mid-hold.");
+}
+
+static size_t CountCapturedMessages(const ScopedRebindMessageCapture& capture, UINT message) {
+    size_t count = 0;
+    for (const CapturedWindowMessage& captured : capture.messages) {
+        if (captured.message == message) ++count;
+    }
+    return count;
+}
+
+void RunKeyRebindRuntimeHeldMouseOutputReleasedOnceOnUpTest(TestRunMode runMode = TestRunMode::Automated) {
+    DummyWindow window(kWindowWidth, kWindowHeight, runMode == TestRunMode::Visual);
+
+    PrepareRebindRuntimeCase("key_rebind_runtime_held_mouse_output_released_once_on_up",
+                             { MakeEnabledRebind('A', VK_RBUTTON) });
+    ScopedRebindMessageCapture capture(window.hwnd());
+
+    ScopedKeyboardStateOverride keyboardState;
+    keyboardState.SetKeyDown(VK_SHIFT, false);
+    keyboardState.SetToggle(VK_CAPITAL, false);
+    keyboardState.Apply();
+
+    ScopedCursorVisibilityOverride cursorVisible(true);
+
+    HandleKeyRebinding(window.hwnd(), WM_KEYDOWN, 'A', BuildTestKeyboardMessageLParam('A', true));
+    Expect(CountCapturedMessages(capture, WM_RBUTTONDOWN) == 1, "Expected the keydown to press the rebound right button.");
+
+    capture.Clear();
+    HandleKeyRebinding(window.hwnd(), WM_KEYUP, 'A', BuildTestKeyboardMessageLParam('A', false));
+    Expect(capture.messages.size() == 1 && CountCapturedMessages(capture, WM_RBUTTONUP) == 1,
+           "Expected exactly one right-button release for the keyup.");
+}
+
+void RunKeyRebindRuntimeHeldMouseOutputReleasedOnNoMatchUpTest(TestRunMode runMode = TestRunMode::Automated) {
+    DummyWindow window(kWindowWidth, kWindowHeight, runMode == TestRunMode::Visual);
+
+    PrepareRebindRuntimeCase("key_rebind_runtime_held_mouse_output_released_on_no_match_up",
+                             { MakeEnabledRebind('A', VK_RBUTTON) });
+    ScopedRebindMessageCapture capture(window.hwnd());
+
+    ScopedKeyboardStateOverride keyboardState;
+    keyboardState.SetKeyDown(VK_SHIFT, false);
+    keyboardState.SetToggle(VK_CAPITAL, false);
+    keyboardState.Apply();
+
+    ScopedCursorVisibilityOverride cursorVisible(true);
+
+    HandleKeyRebinding(window.hwnd(), WM_KEYDOWN, 'A', BuildTestKeyboardMessageLParam('A', true));
+    Expect(CountCapturedMessages(capture, WM_RBUTTONDOWN) == 1, "Expected the keydown to press the rebound right button.");
+
+    // The rebind stops matching mid-hold (rebinds toggled off, edited, or a cursor-state rebind no longer applies).
+    capture.Clear();
+    g_config.keyRebinds.rebinds = {};
+    PublishConfigSnapshot();
+
+    const InputHandlerResult upResult =
+        HandleKeyRebinding(window.hwnd(), WM_KEYUP, 'A', BuildTestKeyboardMessageLParam('A', false));
+    Expect(upResult.consumed, "Expected the keyup to be consumed while a rebound mouse button is held.");
+    Expect(capture.messages.size() == 1 && CountCapturedMessages(capture, WM_RBUTTONUP) == 1,
+           "Expected the held right button to be released even though no rebind matches the keyup.");
+}
+
+void RunKeyRebindRuntimeHeldMouseOutputReleasedOnGuiOpenTest(TestRunMode runMode = TestRunMode::Automated) {
+    DummyWindow window(kWindowWidth, kWindowHeight, runMode == TestRunMode::Visual);
+
+    PrepareRebindRuntimeCase("key_rebind_runtime_held_mouse_output_released_on_gui_open",
+                             { MakeEnabledRebind('A', VK_RBUTTON) });
+    g_config.guiHotkey = { VK_F6 };
+    ScopedRebindMessageCapture capture(window.hwnd());
+
+    ScopedKeyboardStateOverride keyboardState;
+    keyboardState.SetKeyDown(VK_SHIFT, false);
+    keyboardState.SetToggle(VK_CAPITAL, false);
+    keyboardState.Apply();
+
+    ScopedCursorVisibilityOverride cursorVisible(true);
+
+    g_showGui.store(false, std::memory_order_release);
+    const bool previousGlInitialized = g_glInitialized.load(std::memory_order_acquire);
+    g_glInitialized.store(true, std::memory_order_release);
+
+    HandleKeyRebinding(window.hwnd(), WM_KEYDOWN, 'A', BuildTestKeyboardMessageLParam('A', true));
+    const bool pressed = CountCapturedMessages(capture, WM_RBUTTONDOWN) == 1;
+
+    capture.Clear();
+    // GUI toggles are debounced globally; an earlier test may have toggled it moments ago.
+    g_lastGuiToggleTimeMs.store(0, std::memory_order_relaxed);
+    const InputHandlerResult toggleResult =
+        HandleGuiToggle(window.hwnd(), WM_KEYDOWN, VK_F6, BuildTestKeyboardMessageLParam(VK_F6, true));
+    const bool guiOpened = g_showGui.load(std::memory_order_acquire);
+    const size_t releases = CountCapturedMessages(capture, WM_RBUTTONUP);
+
+    g_showGui.store(false, std::memory_order_release);
+    g_glInitialized.store(previousGlInitialized, std::memory_order_release);
+
+    Expect(pressed, "Expected the keydown to press the rebound right button.");
+    Expect(toggleResult.consumed && guiOpened, "Expected the GUI to open on the toggle hotkey.");
+    Expect(releases == 1, "Expected opening the GUI while a rebound mouse button is held to release it.");
 }
 
 void RunKeyRebindRuntimeCursorStatePriorityAndFallbackTest(TestRunMode runMode = TestRunMode::Automated) {

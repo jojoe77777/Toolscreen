@@ -12,27 +12,7 @@ if (BeginSelectableSettingsNestedTabItem(trc("ninjabrain.title"))) {
             changed = true;
         }
 
-        std::vector<NinjabrainPresetDefinition> ninjabrainPresets = GetEmbeddedNinjabrainPresets();
-        std::stable_sort(ninjabrainPresets.begin(), ninjabrainPresets.end(),
-                         [](const NinjabrainPresetDefinition& left, const NinjabrainPresetDefinition& right) {
-                             auto presetRank = [](const std::string& presetId) {
-                                 if (presetId == "compact") return 0;
-                                 if (presetId == "ninjabrainbot") return 1;
-                                 return 100;
-                             };
-
-                             const int leftRank = presetRank(left.id);
-                             const int rightRank = presetRank(right.id);
-                             if (leftRank != rightRank) {
-                                 return leftRank < rightRank;
-                             }
-
-                             if (left.translationKey != right.translationKey) {
-                                 return left.translationKey < right.translationKey;
-                             }
-
-                             return left.id < right.id;
-                         });
+        const std::vector<NinjabrainPresetDefinition>& ninjabrainPresets = GetSortedEmbeddedNinjabrainPresets();
         static std::string s_pendingNinjabrainPresetId;
         bool openPresetConfirm = false;
 
@@ -70,7 +50,7 @@ if (BeginSelectableSettingsNestedTabItem(trc("ninjabrain.title"))) {
             return (presetIt != ninjabrainPresets.end()) ? &(*presetIt) : nullptr;
         };
 
-        const std::vector<FontPickerOption> ninjabrainFontOptions = BuildFontPickerOptions();
+        const std::vector<FontPickerOption>& ninjabrainFontOptions = GetFontPickerOptions();
         auto applyNinjabrainFontChange = [&]() {
             changed = true;
             g_eyeZoomFontNeedsReload.store(true);

@@ -1,0 +1,3 @@
+# Last good launch snapshot. config.recovered_from_backup checks for fpsLimit = 77.
+configVersion = 6
+fpsLimit = 77

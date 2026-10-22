@@ -3,15 +3,18 @@ param(
     [string]$DestinationDirectory = (Join-Path (Join-Path $PSScriptRoot '..') 'out\prebuilt-liblogger'),
     [string]$Owner = 'jojoe77777',
     [string]$Repository = 'Toolscreen',
-    [string]$ReleaseTag = 'liblogger-signed-latest'
+    [string]$ReleaseTag = 'liblogger-signed-latest',
+    [ValidateSet('x64', 'arm64', 'all')]
+    [string]$Architecture = $(if ($env:TOOLSCREEN_LIBLOGGER_ARCH) { $env:TOOLSCREEN_LIBLOGGER_ARCH } else { 'x64' })
 )
 
 $ErrorActionPreference = 'Stop'
 
-$assetNames = @(
-    'liblogger_x64.dll',
-    'liblogger_x64.pdb'
-)
+$architectures = if ($Architecture -eq 'all') { @('x64', 'arm64') } else { @($Architecture) }
+$assetNames = foreach ($arch in $architectures) {
+    "liblogger_$arch.dll"
+    "liblogger_$arch.pdb"
+}
 
 $headers = @{
     'User-Agent' = 'Toolscreen-build'

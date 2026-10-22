@@ -29,6 +29,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <array>
 #include <string>
@@ -485,6 +486,12 @@ void ResetGlobalTestState(const std::filesystem::path& root) {
     g_modeFilePath = (root / "mode.txt").wstring();
     g_stateFilePath = (root / "state.txt").wstring();
 
+    // DllMain initializes this from Minecraft's command line in production.
+    // The standalone GUI test executable has no DLL attach path, but several
+    // mode and resize tests exercise the same guarded production APIs.
+    g_gameVersion = GameVersion(1, 21, 0);
+    SetCursorVisibilityOverrideForTests(false, false);
+
     ExtractBundledFontAssets(root, &ResetGlobalTestState);
 
     g_config = Config();
@@ -516,7 +523,20 @@ void ResetGlobalTestState(const std::filesystem::path& root) {
     LoadLangs();
     Expect(!GetLangs().empty(), "Expected embedded language metadata to load.");
     Expect(LoadTranslation("en"), "Expected embedded English translations to load.");
-    UpdateCachedWindowMetricsFromSize(kWindowWidth, kWindowHeight);
+
+    // Seed the cache with the game window's client size, which is what GetCachedWindowWidth re-measures every
+    // 250 ms. Seeding the outer window size let a test read one width before LoadConfig and the loader resolve
+    // against another whenever that refresh landed in between.
+    int cachedWidth = kWindowWidth;
+    int cachedHeight = kWindowHeight;
+    RECT clientRect{};
+    const HWND gameHwnd = g_minecraftHwnd.load(std::memory_order_acquire);
+    if (gameHwnd != nullptr && GetClientRect(gameHwnd, &clientRect) && clientRect.right > clientRect.left &&
+        clientRect.bottom > clientRect.top) {
+        cachedWidth = clientRect.right - clientRect.left;
+        cachedHeight = clientRect.bottom - clientRect.top;
+    }
+    UpdateCachedWindowMetricsFromSize(cachedWidth, cachedHeight);
 }
 
 const ModeConfig* ResolveVisualNinjabrainPreviewMode() {
@@ -1616,7 +1636,8 @@ void PopulateRichConfigFixture() {
     g_config.basicModeEnabled = false;
     g_config.restoreWindowedModeOnFullscreenExit = false;
     g_config.disableFullscreenPrompt = true;
-    g_config.disableConfigurePrompt = true;
+    g_config.startupIndicatorMode = 2;
+    g_config.startupIndicatorImagePath = "C:\\images\\startup.gif";
     g_config.guiHotkey = { VK_CONTROL, VK_SHIFT, 'G' };
     g_config.borderlessHotkey = { VK_MENU, VK_RETURN };
     g_config.autoBorderless = true;
@@ -1687,7 +1708,7 @@ void PopulateRichConfigFixture() {
     g_config.eyezoom.activeOverlayIndex = 1;
 
     g_config.keyRebinds.enabled = true;
-    g_config.keyRebinds.resolveRebindTargetsForHotkeys = false;
+    g_config.keyRebinds.resolveRebindTargetsForHotkeys = true;
     g_config.keyRebinds.toggleHotkey = { VK_F4 };
     KeyRebind rebind;
     rebind.fromKey = 'J';
@@ -1944,6 +1965,7 @@ void PopulateRichConfigFixture() {
     primaryMode.manualWidth = 1280;
     primaryMode.manualHeight = 720;
     primaryMode.background.selectedMode = "gradient";
+    primaryMode.background.imageFit = "fit";
     primaryMode.background.gradientStops = {
         { { 0.15f, 0.2f, 0.35f, 1.0f }, 0.0f },
         { { 0.7f, 0.4f, 0.2f, 1.0f }, 1.0f },
@@ -2057,7 +2079,8 @@ void VerifyRichGlobalSettings() {
     Expect(!g_config.basicModeEnabled, "Expected basicModeEnabled to roundtrip.");
     Expect(!g_config.restoreWindowedModeOnFullscreenExit, "Expected restoreWindowedModeOnFullscreenExit to roundtrip.");
     Expect(g_config.disableFullscreenPrompt, "Expected disableFullscreenPrompt to roundtrip.");
-    Expect(g_config.disableConfigurePrompt, "Expected disableConfigurePrompt to roundtrip.");
+    Expect(g_config.startupIndicatorMode == 2, "Expected startupIndicatorMode to roundtrip.");
+    Expect(g_config.startupIndicatorImagePath == "C:\\images\\startup.gif", "Expected startupIndicatorImagePath to roundtrip.");
     ExpectVectorEquals(g_config.guiHotkey, std::vector<DWORD>{ VK_CONTROL, VK_SHIFT, 'G' }, "Expected GUI hotkey to roundtrip.");
     ExpectVectorEquals(g_config.borderlessHotkey, std::vector<DWORD>{ VK_MENU, VK_RETURN }, "Expected borderless hotkey to roundtrip.");
     Expect(g_config.autoBorderless, "Expected autoBorderless to roundtrip.");
@@ -2104,6 +2127,7 @@ void VerifyRichModes() {
         Expect(primaryMode.manualWidth == 1280, "Expected primary mode manualWidth to roundtrip.");
         Expect(primaryMode.manualHeight == 720, "Expected primary mode manualHeight to roundtrip.");
         Expect(primaryMode.background.selectedMode == "gradient", "Expected primary mode background mode to roundtrip.");
+        Expect(primaryMode.background.imageFit == "fit", "Expected primary mode background image fit to roundtrip.");
         Expect(primaryMode.background.gradientStops.size() == 2, "Expected primary mode gradient stops to roundtrip.");
         ExpectColorNear(primaryMode.background.gradientStops[0].color, { 0.15f, 0.2f, 0.35f, 1.0f },
                   "Expected primary mode first gradient color to roundtrip.");
@@ -2411,7 +2435,7 @@ void VerifyRichCursorsAndEyeZoom() {
 
 void VerifyRichKeyRebindsAndAppearance() {
     Expect(g_config.keyRebinds.enabled, "Expected keyRebinds.enabled to roundtrip.");
-    Expect(!g_config.keyRebinds.resolveRebindTargetsForHotkeys,
+    Expect(g_config.keyRebinds.resolveRebindTargetsForHotkeys,
            "Expected keyRebinds.resolveRebindTargetsForHotkeys to roundtrip.");
     ExpectVectorEquals(g_config.keyRebinds.toggleHotkey, std::vector<DWORD>{ VK_F4 },
                        "Expected keyRebinds.toggleHotkey to roundtrip.");

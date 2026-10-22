@@ -5,7 +5,9 @@
 #endif
 #include <GL/glew.h>
 #include <atomic>
+#include <array>
 #include <chrono>
+#include <cstdint>
 #include <map>
 #include <mutex>
 #include <shared_mutex>
@@ -279,6 +281,11 @@ const char* GetNinjabrainOverlayRenderEligibilityFailureForIntegrationTest(const
 #endif
 void RenderMode(const ModeConfig* modeToRender, const GLState& s, int current_gameW, int current_gameH, bool skipAnimation = false,
                 bool excludeOnlyOnMyScreen = false);
+void PublishNativeFrameGeometry(
+    int gameWidth, int gameHeight, int finalX, int finalY,
+    int finalWidth, int finalHeight);
+void ProcessNativeEditorInteractions(
+    const ModeConfig* mode, int gameWidth, int gameHeight);
 bool RenderSameThreadObsFrame(const ModeConfig* modeToRender, const GLState& s, int current_gameW, int current_gameH,
                               bool skipAnimation = false);
 void CaptureSameThreadVirtualCameraFrame();
@@ -286,6 +293,10 @@ void ResetSameThreadVirtualCameraCaptureState();
 void RenderModeWithOpacity(const ModeConfig* modeToRender, const GLState& s, int current_gameW, int current_gameH, float opacity,
                            bool skipBackgroundClear = false);
 void RenderDebugBordersForMirror(const MirrorConfig* conf, Color captureColor, Color outputColor, GLint originalVAO);
+// Records editor-only outlines and handles into the current ImGui draw list.  This
+// deliberately has no OpenGL dependency so native backends can display the same
+// manipulation feedback without creating a GL object.
+void RenderNativeEditorOverlays();
 void RenderMirrorSelectionInfoPanel();
 void RenderMirrorGroupSelectionInfoPanel();
 void RenderWindowOverlaySelectionInfoPanel();
@@ -297,6 +308,12 @@ void InitializeOverlayTextFont(const std::string& fontPath, float baseFontSize, 
 void SetOverlayTextFontSize(int sizePixels);
 
 bool GetImageSourceDimensions(const std::string& name, int& outW, int& outH);
+void PublishNativeImageSourceDimensions(
+    const std::string& name, int width, int height);
+void PublishNativeMirrorGeometry(
+    const std::string& name, int sourceWidth, int sourceHeight,
+    int screenX, int screenY, int screenWidth, int screenHeight,
+    bool hasFrameContent);
 bool GetCroppedImageDimensions(const ImageConfig& img, int& outCroppedW, int& outCroppedH);
 void CalculateImageDimensions(const ImageConfig& img, int& outW, int& outH);
 
@@ -319,28 +336,28 @@ std::string GetModeTransitionFromModeId();
 
 // Struct to hold all transition state atomically
 struct ModeTransitionState {
-    bool active;
-    int width;
-    int height;
-    int x;
-    int y;
-    GameTransitionType gameTransition;
-    OverlayTransitionType overlayTransition;
-    BackgroundTransitionType backgroundTransition;
-    float progress;
-    float moveProgress;
-    int targetWidth;
-    int targetHeight;
-    int targetX;
-    int targetY;
-    int fromWidth;
-    int fromHeight;
-    int fromX;
-    int fromY;
-    int fromNativeWidth;
-    int fromNativeHeight;
-    int toNativeWidth;
-    int toNativeHeight;
+    bool active = false;
+    int width = 0;
+    int height = 0;
+    int x = 0;
+    int y = 0;
+    GameTransitionType gameTransition = GameTransitionType::Cut;
+    OverlayTransitionType overlayTransition = OverlayTransitionType::Cut;
+    BackgroundTransitionType backgroundTransition = BackgroundTransitionType::Cut;
+    float progress = 1.0f;
+    float moveProgress = 1.0f;
+    int targetWidth = 0;
+    int targetHeight = 0;
+    int targetX = 0;
+    int targetY = 0;
+    int fromWidth = 0;
+    int fromHeight = 0;
+    int fromX = 0;
+    int fromY = 0;
+    int fromNativeWidth = 0;
+    int fromNativeHeight = 0;
+    int toNativeWidth = 0;
+    int toNativeHeight = 0;
     std::string fromModeId;
 };
 
@@ -356,12 +373,23 @@ void GetAnimatedModePosition(int& outX, int& outY);
 
 
 struct NinjabrainOverlayConfig;
+struct NinjabrainData;
 struct ImFont;
 struct ImFontAtlas;
+struct NinjabrainOverlayTextures {
+    std::array<uintptr_t, 4> boatIcons{};
+    std::array<uintptr_t, 3> messageIcons{};
+};
 void RenderNinjabrainOverlay(const NinjabrainOverlayConfig& nb, ImFont* font, const std::string& modeId,
-                             bool renderBehindImGuiWindows = false);
+                             bool renderBehindImGuiWindows = false,
+                             const NinjabrainOverlayTextures* nativeTextures = nullptr,
+                             bool publishEditorGeometry = true,
+                             std::shared_ptr<const NinjabrainData>
+                                 dataSnapshotOverride = {});
 ImFont* GetNinjabrainFont();
 float   GetNinjabrainFontSize();
+ImFont* GetOverlayTextFont();
+float   GetOverlayTextFontSize();
 // Call this from RebuildImGuiFontAtlas (before io.Fonts->Build()) to add the NB font to the atlas.
 void    LoadNinjabrainFont(ImFontAtlas* atlas, const NinjabrainOverlayConfig& overlay, float scaleFactor);
 

@@ -4,15 +4,34 @@
 #include "utils.h"
 
 #include <atomic>
+#include <functional>
 #include <stdexcept>
+#include <string_view>
 #include <unordered_map>
 
 inline nlohmann::json                               g_langsJson;
 inline nlohmann::json                               g_translationJson;
-inline std::unordered_map<std::string, std::string> g_translationCache;
 inline std::atomic<uint64_t>                        g_translationGeneration{ 0 };
 
 namespace {
+
+struct TransparentStringHash {
+    using is_transparent = void;
+
+    std::size_t operator()(std::string_view value) const noexcept {
+        return std::hash<std::string_view>{}(value);
+    }
+};
+
+struct TransparentStringEqual {
+    using is_transparent = void;
+
+    bool operator()(std::string_view left, std::string_view right) const noexcept {
+        return left == right;
+    }
+};
+
+inline std::unordered_map<std::string, std::string, TransparentStringHash, TransparentStringEqual> g_translationCache;
 
 constexpr const char* kPrimaryLocale = "en";
 

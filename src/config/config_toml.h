@@ -2,6 +2,9 @@
 
 
 #include "third_party/toml.hpp"
+#include "config_file_safety.h"
+#include <functional>
+#include <ostream>
 #include <string>
 #include <vector>
 
@@ -109,7 +112,15 @@ void ConfigFromToml(const toml::table& tbl, Config& config);
 
 bool SaveConfigToTomlFile(const Config& config, const std::wstring& path);
 
+// Theme colour edits defer the theme.toml write until the edit finishes (defined in gui_appearance.cpp).
+void RequestDeferredThemeSave();
+void FlushDeferredThemeSave();
+
 bool LoadConfigFromTomlFile(const std::wstring& path, Config& config);
+
+// Loads `path`, restoring it from <path>.bak or `extraBackups` when it is damaged (see LoadTomlFileWithRecovery).
+TomlFileLoadStatus LoadConfigFromTomlFileWithRecovery(const std::wstring& path, Config& config,
+                                                      const std::vector<std::wstring>& extraBackups, std::string* outError);
 
 
 std::string GetEmbeddedDefaultConfigString();

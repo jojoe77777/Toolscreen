@@ -1,0 +1,11 @@
+{
+  "file_format_version": "1.2.0",
+  "layer": {
+    "name": "VK_LAYER_TOOLSCREEN_obs_redirect",
+    "type": "GLOBAL",
+    "library_path": ".\\Toolscreen.dll",
+    "api_version": "1.3.0",
+    "implementation_version": "1",
+    "description": "Toolscreen process-local OBS Vulkan capture redirect"
+  }
+}

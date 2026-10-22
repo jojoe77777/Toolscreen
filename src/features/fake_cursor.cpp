@@ -2,7 +2,11 @@
 #include "gui/gui.h"
 #include "common/utils.h"
 #include "common/gl_overlay.h"
+#include "render/render_backend.h"
+#include <deque>
 #include <filesystem>
+#include <optional>
+#include <set>
 #include <shared_mutex>
 #include <string>
 #include <vector>
@@ -26,6 +30,36 @@ static void DestroyCursorOrIcon(HCURSOR handle, UINT loadType) {
         DestroyCursor(handle);
     }
 }
+
+namespace {
+// Saves and restores the pixel-store state we override on the game's GL context.
+struct CursorPixelStoreStateGuard {
+    GLint unpackAlignment = 4;
+    GLint unpackRowLength = 0;
+    GLint unpackSkipRows = 0;
+    GLint unpackSkipPixels = 0;
+    GLint packAlignment = 4;
+
+    CursorPixelStoreStateGuard() {
+        glGetIntegerv(GL_UNPACK_ALIGNMENT, &unpackAlignment);
+        glGetIntegerv(GL_UNPACK_ROW_LENGTH, &unpackRowLength);
+        glGetIntegerv(GL_UNPACK_SKIP_ROWS, &unpackSkipRows);
+        glGetIntegerv(GL_UNPACK_SKIP_PIXELS, &unpackSkipPixels);
+        glGetIntegerv(GL_PACK_ALIGNMENT, &packAlignment);
+    }
+
+    ~CursorPixelStoreStateGuard() {
+        glPixelStorei(GL_UNPACK_ALIGNMENT, unpackAlignment);
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, unpackRowLength);
+        glPixelStorei(GL_UNPACK_SKIP_ROWS, unpackSkipRows);
+        glPixelStorei(GL_UNPACK_SKIP_PIXELS, unpackSkipPixels);
+        glPixelStorei(GL_PACK_ALIGNMENT, packAlignment);
+    }
+
+    CursorPixelStoreStateGuard(const CursorPixelStoreStateGuard&) = delete;
+    CursorPixelStoreStateGuard& operator=(const CursorPixelStoreStateGuard&) = delete;
+};
+} // namespace
 
 struct CursorDef {
     std::string name;
@@ -123,16 +157,40 @@ void InitializeCursorDefinitions() {
     g_cursorDefsInitialized = true;
 }
 
+static void ClearFailedCursorLoads();
+
 void RefreshCursorDefinitions() {
-    std::lock_guard<std::mutex> lock(g_cursorDefsMutex);
-    LogCategory("cursor_textures", "[CursorTextures] RefreshCursorDefinitions starting...");
-    ScanCursorDefinitionsLocked();
-    g_cursorDefsInitialized = true;
+    {
+        std::lock_guard<std::mutex> lock(g_cursorDefsMutex);
+        LogCategory("cursor_textures", "[CursorTextures] RefreshCursorDefinitions starting...");
+        ScanCursorDefinitionsLocked();
+        g_cursorDefsInitialized = true;
+    }
+    // Let files the user replaced or fixed get another load attempt.
+    ClearFailedCursorLoads();
 }
 
 // Global cursor list and mutex
-std::vector<CursorData> g_cursorList;
+std::deque<CursorData> g_cursorList;
 std::mutex g_cursorListMutex;
+
+// (path, size) pairs whose load failed. GetSelectedCursor runs on every WM_SETCURSOR,
+// so without this a broken cursor file is re-read from disk on every mouse move.
+// Guarded by g_cursorListMutex and cleared by RefreshCursorDefinitions.
+static std::set<std::pair<std::wstring, int>> s_failedCursorLoads;
+static std::string s_lastFallbackLogKey;
+
+static void ClearFailedCursorLoads() {
+    std::lock_guard<std::mutex> lock(g_cursorListMutex);
+    s_failedCursorLoads.clear();
+    s_lastFallbackLogKey.clear();
+}
+
+// A load attempted before the OpenGL context is current fails only because glGenTextures
+// returns 0; remembering that failure would disable the cursor for the whole session.
+static bool CanCacheCursorLoadFailure() {
+    return GetRenderBackend() == RenderBackend::Vulkan || wglGetCurrentContext() != nullptr;
+}
 
 static void ComputeCursorContentBounds(CursorData& outData, const std::vector<unsigned char>& pixels,
                                        const std::vector<unsigned char>* invertPixels, int width, int height) {
@@ -169,6 +227,15 @@ static void ComputeCursorContentBounds(CursorData& outData, const std::vector<un
     outData.contentTop = minY;
     outData.contentRight = maxX + 1;
     outData.contentBottom = maxY + 1;
+}
+
+static std::vector<unsigned char> ConvertBgraToRgba(
+    const std::vector<unsigned char>& bgra) {
+    std::vector<unsigned char> rgba = bgra;
+    for (size_t i = 0; i + 3 < rgba.size(); i += 4) {
+        std::swap(rgba[i], rgba[i + 2]);
+    }
+    return rgba;
 }
 
 static std::wstring BuildSystemCursorCacheKey(LPCWSTR systemCursorId) {
@@ -363,6 +430,7 @@ static bool LoadSingleCursor(const std::wstring& path, UINT loadType, int size, 
     }
 
     std::vector<unsigned char> pixels(width * height * 4);
+    std::vector<unsigned char> invertPixels;
 
     BITMAPINFO bmi = { 0 };
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -372,11 +440,17 @@ static bool LoadSingleCursor(const std::wstring& path, UINT loadType, int size, 
     bmi.bmiHeader.biBitCount = 32;
     bmi.bmiHeader.biCompression = BI_RGB;
 
-    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-    glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
-    glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    const bool createOpenGLTexture =
+        GetRenderBackend() != RenderBackend::Vulkan;
+    std::optional<CursorPixelStoreStateGuard> pixelStoreGuard;
+    if (createOpenGLTexture) {
+        pixelStoreGuard.emplace();
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+        glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    }
 
     if (isMonochrome) {
         HBITMAP hbmOld = (HBITMAP)SelectObject(hdcMem, iconInfoEx.hbmMask);
@@ -386,7 +460,7 @@ static bool LoadSingleCursor(const std::wstring& path, UINT loadType, int size, 
         maskBmi.bmiHeader.biHeight = -bmp.bmHeight;
         GetDIBits(hdcMem, iconInfoEx.hbmMask, 0, bmp.bmHeight, maskData.data(), &maskBmi, DIB_RGB_COLORS);
 
-        std::vector<unsigned char> invertPixels(width * height * 4, 0);
+        invertPixels.assign(width * height * 4, 0);
         bool hasInverted = false;
 
         // Windows cursor mask logic:
@@ -436,7 +510,7 @@ static bool LoadSingleCursor(const std::wstring& path, UINT loadType, int size, 
 
         outData.hasInvertedPixels = hasInverted;
 
-        if (hasInverted) {
+        if (hasInverted && createOpenGLTexture) {
             while (glGetError() != GL_NO_ERROR) {}
 
             glGenTextures(1, &outData.invertMaskTexture);
@@ -510,11 +584,29 @@ static bool LoadSingleCursor(const std::wstring& path, UINT loadType, int size, 
     if (iconInfoEx.hbmColor) DeleteObject(iconInfoEx.hbmColor);
     if (iconInfoEx.hbmMask) DeleteObject(iconInfoEx.hbmMask);
 
+    ComputeCursorContentBounds(
+        outData, pixels,
+        outData.hasInvertedPixels ? &invertPixels : nullptr, width, height);
+    outData.rgbaPixels = ConvertBgraToRgba(pixels);
+    if (outData.hasInvertedPixels) {
+        outData.invertRgbaPixels = ConvertBgraToRgba(invertPixels);
+    }
+    if (!createOpenGLTexture) {
+        LogCategory(
+            "cursor_textures",
+            "[CursorTextures] Decoded backend-neutral cursor pixels without OpenGL for Vulkan.");
+        return true;
+    }
+
     while (glGetError() != GL_NO_ERROR) {}
 
     glGenTextures(1, &outData.texture);
     if (outData.texture == 0) {
         LogCategory("cursor_textures", "[CursorTextures] ERROR: glGenTextures returned 0 - OpenGL context may not be valid");
+        if (outData.invertMaskTexture) {
+            glDeleteTextures(1, &outData.invertMaskTexture);
+            outData.invertMaskTexture = 0;
+        }
         DestroyCursorOrIcon(outData.hCursor, outData.loadType);
         outData.hCursor = nullptr;
         return false;
@@ -614,6 +706,7 @@ const CursorData* LoadOrFindCursor(const std::wstring& path, UINT loadType, int 
                 return &cursor;
             }
         }
+        if (s_failedCursorLoads.count({ path, size }) != 0) { return nullptr; }
     }
 
     LogCategory("cursor_textures", "[CursorTextures] Loading cursor on-demand: " + pathStr + " at size " + std::to_string(size));
@@ -626,6 +719,10 @@ const CursorData* LoadOrFindCursor(const std::wstring& path, UINT loadType, int 
         return &g_cursorList.back();
     } else {
         LogCategory("cursor_textures", "[CursorTextures] ERROR: Failed to load cursor on-demand: " + pathStr);
+        if (CanCacheCursorLoadFailure()) {
+            std::lock_guard<std::mutex> lock(g_cursorListMutex);
+            s_failedCursorLoads.insert({ path, size });
+        }
         return nullptr;
     }
 }
@@ -739,11 +836,17 @@ static bool CreateTextureFromHandle(HCURSOR hCursor, CursorData& outData) {
     bmi.bmiHeader.biBitCount = 32;
     bmi.bmiHeader.biCompression = BI_RGB;
 
-    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-    glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
-    glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    const bool createOpenGLTexture =
+        GetRenderBackend() != RenderBackend::Vulkan;
+    std::optional<CursorPixelStoreStateGuard> pixelStoreGuard;
+    if (createOpenGLTexture) {
+        pixelStoreGuard.emplace();
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+        glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    }
 
     if (isMonochrome) {
         HBITMAP hbmOld = (HBITMAP)SelectObject(hdcMem, iconInfoEx.hbmMask);
@@ -781,7 +884,7 @@ static bool CreateTextureFromHandle(HCURSOR hCursor, CursorData& outData) {
         }
 
         outData.hasInvertedPixels = hasInverted;
-        if (hasInverted) {
+        if (hasInverted && createOpenGLTexture) {
             while (glGetError() != GL_NO_ERROR) {}
             glGenTextures(1, &outData.invertMaskTexture);
             if (outData.invertMaskTexture != 0) {
@@ -833,10 +936,23 @@ static bool CreateTextureFromHandle(HCURSOR hCursor, CursorData& outData) {
     if (iconInfoEx.hbmMask) DeleteObject(iconInfoEx.hbmMask);
 
     ComputeCursorContentBounds(outData, pixels, outData.hasInvertedPixels ? &invertPixels : nullptr, width, height);
+    outData.rgbaPixels = ConvertBgraToRgba(pixels);
+    if (outData.hasInvertedPixels) {
+        outData.invertRgbaPixels = ConvertBgraToRgba(invertPixels);
+    }
+    if (!createOpenGLTexture) {
+        return true;
+    }
 
     while (glGetError() != GL_NO_ERROR) {}
     glGenTextures(1, &outData.texture);
-    if (outData.texture == 0) { return false; }
+    if (outData.texture == 0) {
+        if (outData.invertMaskTexture) {
+            glDeleteTextures(1, &outData.invertMaskTexture);
+            outData.invertMaskTexture = 0;
+        }
+        return false;
+    }
 
     BindTextureDirect(GL_TEXTURE_2D, outData.texture);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
@@ -877,8 +993,24 @@ const CursorData* LoadOrFindCursorFromHandle(HCURSOR hCursor) {
     return &g_cursorList.back();
 }
 
+bool CopyCursorDataFromHandle(HCURSOR hCursor, CursorData& outData) {
+    if (!LoadOrFindCursorFromHandle(hCursor)) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(g_cursorListMutex);
+    for (const auto& cursor : g_cursorList) {
+        if (cursor.hCursor == hCursor) {
+            outData = cursor;
+            return true;
+        }
+    }
+    return false;
+}
+
 const CursorData* LoadOrFindSystemCursor(LPCWSTR systemCursorId) {
-    if (!systemCursorId || wglGetCurrentContext() == nullptr) {
+    if (!systemCursorId ||
+        (GetRenderBackend() != RenderBackend::Vulkan &&
+         wglGetCurrentContext() == nullptr)) {
         return nullptr;
     }
 
@@ -946,29 +1078,41 @@ const CursorData* GetSelectedCursor(const std::string& gameState, int size) {
     UINT loadType = IMAGE_CURSOR;
     GetCursorPathByName(selectedCursorName, cursorPath, loadType);
 
-    const CursorData* cursorData = FindCursor(cursorPath, selectedSize);
+    // LoadOrFindCursor checks the cache first and loads with the definition's own
+    // load type, so a separate FindCursor pass would only repeat a failed load.
+    const CursorData* cursorData = cursorPath.empty() ? nullptr : LoadOrFindCursor(cursorPath, loadType, selectedSize);
     if (cursorData) { return cursorData; }
-
-    Log("[GetSelectedCursor] Cursor '" + selectedCursorName + "' not found at size " + std::to_string(selectedSize) + ", trying fallback");
 
     {
         std::lock_guard<std::mutex> lock(g_cursorListMutex);
-        for (const auto& cursor : g_cursorList) {
-            if (cursor.size == selectedSize && cursor.texture != 0) {
-                Log("[GetSelectedCursor] Fallback: using cursor from " + WideToUtf8(cursor.filePath));
-                return &cursor;
-            }
+        // This runs on every WM_SETCURSOR, so log the fallback once per missing cursor.
+        const std::string fallbackLogKey = selectedCursorName + "@" + std::to_string(selectedSize);
+        const bool shouldLog = fallbackLogKey != s_lastFallbackLogKey;
+        s_lastFallbackLogKey = fallbackLogKey;
+        if (shouldLog) {
+            Log("[GetSelectedCursor] Cursor '" + selectedCursorName + "' not found at size " + std::to_string(selectedSize) +
+                ", trying fallback");
         }
-        for (const auto& cursor : g_cursorList) {
-            if (cursor.texture != 0) {
-                Log("[GetSelectedCursor] Fallback: using cursor from " + WideToUtf8(cursor.filePath) + " at size " +
-                    std::to_string(cursor.size));
-                return &cursor;
-            }
-        }
-    }
 
-    Log("[GetSelectedCursor] No fallback cursor available, rendering nothing");
+        for (const auto& cursor : g_cursorList) {
+            if (cursor.size == selectedSize &&
+                (cursor.texture != 0 || !cursor.rgbaPixels.empty())) {
+                if (shouldLog) { Log("[GetSelectedCursor] Fallback: using cursor from " + WideToUtf8(cursor.filePath)); }
+                return &cursor;
+            }
+        }
+        for (const auto& cursor : g_cursorList) {
+            if (cursor.texture != 0 || !cursor.rgbaPixels.empty()) {
+                if (shouldLog) {
+                    Log("[GetSelectedCursor] Fallback: using cursor from " + WideToUtf8(cursor.filePath) + " at size " +
+                        std::to_string(cursor.size));
+                }
+                return &cursor;
+            }
+        }
+
+        if (shouldLog) { Log("[GetSelectedCursor] No fallback cursor available, rendering nothing"); }
+    }
     return nullptr;
 }
 
@@ -1087,6 +1231,7 @@ std::vector<std::string> GetAvailableCursorNames() {
 
     std::lock_guard<std::mutex> lock(g_cursorDefsMutex);
     std::vector<std::string> names;
+    names.reserve(AVAILABLE_CURSORS.size());
     for (const auto& cursor : AVAILABLE_CURSORS) { names.push_back(cursor.name); }
     return names;
 }

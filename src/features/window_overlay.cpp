@@ -21,7 +21,7 @@
 #endif
 
 // Global variables for window overlay cache and thread management
-std::map<std::string, std::unique_ptr<WindowOverlayCacheEntry>> g_windowOverlayCache;
+std::map<std::string, std::shared_ptr<WindowOverlayCacheEntry>> g_windowOverlayCache;
 std::mutex g_windowOverlayCacheMutex;
 
 std::atomic<bool> g_stopWindowCaptureThread{ false };
@@ -65,19 +65,12 @@ HWND FindWindowByTitleAndClass(const std::string& title, const std::string& clas
         std::string targetClass;
         std::string targetExecutable;
         std::string matchPriority;
-        HWND exactMatch;
-        HWND classMatch;
-        HWND executableMatch;
+        HWND exactMatch = nullptr;
+        HWND classMatch = nullptr;
+        HWND executableMatch = nullptr;
     };
 
-    EnumData data;
-    data.targetTitle = title;
-    data.targetClass = className;
-    data.targetExecutable = executableName;
-    data.matchPriority = matchPriority;
-    data.exactMatch = NULL;
-    data.classMatch = NULL;
-    data.executableMatch = NULL;
+    EnumData data{ title, className, executableName, matchPriority };
 
     EnumWindows(
         [](HWND hwnd, LPARAM lParam) -> BOOL {
@@ -203,7 +196,7 @@ static void LoadWindowOverlay_Internal(const std::string& overlayId, const Windo
         return;
     }
 
-    auto entry = std::make_unique<WindowOverlayCacheEntry>();
+    auto entry = std::make_shared<WindowOverlayCacheEntry>();
     entry->windowTitle = config.windowTitle;
     entry->windowClass = config.windowClass;
     entry->executableName = config.executableName;
@@ -302,11 +295,11 @@ void UpdateAllWindowOverlays() {
 void UpdateWindowOverlayFPS(const std::string& overlayId, int newFPS) {
     // LOCK-FREE: fps is atomic, so we just need to get the entry pointer safely
     // We use a very brief lock just to get the pointer, then release immediately
-    WindowOverlayCacheEntry* entry = nullptr;
+    std::shared_ptr<WindowOverlayCacheEntry> entry;
     {
         std::lock_guard<std::mutex> lock(g_windowOverlayCacheMutex);
         auto it = g_windowOverlayCache.find(overlayId);
-        if (it != g_windowOverlayCache.end()) { entry = it->second.get(); }
+        if (it != g_windowOverlayCache.end()) { entry = it->second; }
     }
     // Lock released - now we can safely access atomic members
 
@@ -323,11 +316,11 @@ void UpdateWindowOverlayFPS(const std::string& overlayId, int newFPS) {
 void UpdateWindowOverlaySearchInterval(const std::string& overlayId, int newSearchInterval) {
     // LOCK-FREE: searchInterval is atomic, so we just need to get the entry pointer safely
     // We use a very brief lock just to get the pointer, then release immediately
-    WindowOverlayCacheEntry* entry = nullptr;
+    std::shared_ptr<WindowOverlayCacheEntry> entry;
     {
         std::lock_guard<std::mutex> lock(g_windowOverlayCacheMutex);
         auto it = g_windowOverlayCache.find(overlayId);
-        if (it != g_windowOverlayCache.end()) { entry = it->second.get(); }
+        if (it != g_windowOverlayCache.end()) { entry = it->second; }
     }
     // Lock released - now we can safely access atomic members
 
@@ -563,10 +556,9 @@ bool CaptureWindowContent(WindowOverlayCacheEntry& entry, const WindowOverlayCon
             {
                 std::lock_guard<std::mutex> lock(entry.swapMutex);
                 entry.writeBuffer.swap(entry.readyBuffer);
+                // Signal that a new frame is available for the render thread
+                entry.hasNewFrame.store(true, std::memory_order_release);
             }
-
-            // Signal that a new frame is available for the render thread
-            entry.hasNewFrame.store(true, std::memory_order_release);
         }
     }
 
@@ -621,10 +613,9 @@ bool CaptureWindowContent(WindowOverlayCacheEntry& entry, const WindowOverlayCon
             {
                 std::lock_guard<std::mutex> lock(entry.swapMutex);
                 entry.writeBuffer.swap(entry.readyBuffer);
+                // Signal that a new frame is available for the render thread
+                entry.hasNewFrame.store(true, std::memory_order_release);
             }
-
-            // Signal that a new frame is available for the render thread
-            entry.hasNewFrame.store(true, std::memory_order_release);
         }
     }
 
@@ -675,7 +666,7 @@ bool StageWindowOverlayTestFrame(const WindowOverlayConfig& config, const std::v
     std::lock_guard<std::mutex> cacheLock(g_windowOverlayCacheMutex);
     auto& entrySlot = g_windowOverlayCache[config.name];
     if (!entrySlot) {
-        entrySlot = std::make_unique<WindowOverlayCacheEntry>();
+        entrySlot = std::make_shared<WindowOverlayCacheEntry>();
     }
 
     WindowOverlayCacheEntry& entry = *entrySlot;
@@ -693,6 +684,44 @@ bool StageWindowOverlayTestFrame(const WindowOverlayConfig& config, const std::v
     entry.lastUploadedRenderData = nullptr;
     entry.hasNewFrame.store(true, std::memory_order_release);
     return true;
+}
+
+bool AcquireWindowOverlayPixelFrame(
+    const WindowOverlayConfig& config, WindowOverlayPixelFrame& outFrame) {
+    outFrame = {};
+    std::lock_guard<std::mutex> cacheLock(g_windowOverlayCacheMutex);
+    auto it = g_windowOverlayCache.find(config.name);
+    if (it == g_windowOverlayCache.end() || !it->second) return false;
+    WindowOverlayCacheEntry& entry = *it->second;
+    if (entry.hasNewFrame.load(std::memory_order_acquire)) {
+        std::lock_guard<std::mutex> swapLock(entry.swapMutex);
+        if (entry.hasNewFrame.load(std::memory_order_relaxed)) {
+            entry.readyBuffer.swap(entry.backBuffer);
+            entry.hasNewFrame.store(false, std::memory_order_release);
+        }
+    }
+    WindowOverlayRenderData* renderData = entry.backBuffer.get();
+    if (!renderData || !renderData->pixelData || renderData->width <= 0 ||
+        renderData->height <= 0) {
+        return false;
+    }
+    if (renderData != entry.lastPublishedRenderData || !entry.publishedPixels) {
+        const size_t byteCount =
+            static_cast<size_t>(renderData->width) *
+            static_cast<size_t>(renderData->height) * 4;
+        auto pixels = std::make_shared<std::vector<unsigned char>>(
+            renderData->pixelData, renderData->pixelData + byteCount);
+        entry.publishedPixels = std::move(pixels);
+        entry.lastPublishedRenderData = renderData;
+        ++entry.publishedGeneration;
+    }
+    outFrame.pixels = entry.publishedPixels;
+    outFrame.width = renderData->width;
+    outFrame.height = renderData->height;
+    entry.glTextureWidth = renderData->width;
+    entry.glTextureHeight = renderData->height;
+    outFrame.generation = entry.publishedGeneration;
+    return static_cast<bool>(outFrame.pixels);
 }
 
 void CleanupWindowOverlayCacheEntry(const std::string& overlayId) {
@@ -1141,7 +1170,9 @@ void WindowCaptureThreadFunc() {
         const auto windowListUpdateIntervalGuiOpen = std::chrono::milliseconds(500);
         const auto windowListUpdateIntervalGuiClosed = std::chrono::seconds(5);
 
+        std::vector<std::pair<std::string, WindowOverlayConfig>> overlaysToCapture;
         while (!g_stopWindowCaptureThread) {
+            overlaysToCapture.clear();
             try {
                 auto now = std::chrono::steady_clock::now();
 
@@ -1195,7 +1226,6 @@ void WindowCaptureThreadFunc() {
                     }
                 }
 
-                std::vector<std::pair<std::string, WindowOverlayConfig>> overlaysToCapture;
                 {
                     // Use snapshot for thread-safe config access + cache lock for cache access
                     auto captureSnap = GetConfigSnapshot();
@@ -1221,19 +1251,18 @@ void WindowCaptureThreadFunc() {
 
                     try {
                         // Get entry pointer with minimal lock duration
-                        WindowOverlayCacheEntry* entry = nullptr;
+                        std::shared_ptr<WindowOverlayCacheEntry> entry;
                         {
                             std::lock_guard<std::mutex> cacheLock(g_windowOverlayCacheMutex);
                             auto it = g_windowOverlayCache.find(overlayId);
-                            if (it != g_windowOverlayCache.end()) { entry = it->second.get(); }
+                            if (it != g_windowOverlayCache.end()) { entry = it->second; }
                         }
                         // Lock released - now we can capture without blocking GUI thread
 
                         if (entry) {
                             // Capture without holding the cache mutex
                             // The entry's own captureMutex protects against concurrent modifications
-                            // Note: Entry deletion is only done from GUI thread via RemoveWindowOverlayFromCache,
-                            // and the capture thread checks for null before each capture
+                            // The shared_ptr copy keeps the entry alive even if it is erased from the cache meanwhile
                             CaptureWindowContent(*entry, config);
                         }
                     } catch (const std::exception& e) {

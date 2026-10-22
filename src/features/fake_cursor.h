@@ -4,6 +4,7 @@
 #define GLEW_STATIC
 #endif
 #include <GL/glew.h>
+#include <deque>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -27,9 +28,15 @@ struct CursorData {
     bool hasInvertedPixels = false;
     bool ownsHandle = true;
     UINT loadType = IMAGE_CURSOR;
+    // Backend-neutral decoded pixels. OpenGL keeps using texture/invertMaskTexture;
+    // Vulkan uploads these snapshots through its existing per-frame texture ring.
+    std::vector<unsigned char> rgbaPixels;
+    std::vector<unsigned char> invertRgbaPixels;
 };
 
-extern std::vector<CursorData> g_cursorList;
+// std::deque keeps element addresses stable across push_back, so the
+// CursorData pointers handed out below stay valid while other threads load more.
+extern std::deque<CursorData> g_cursorList;
 extern std::mutex g_cursorListMutex;
 
 void LoadCursorTextures();
@@ -41,6 +48,7 @@ const CursorData* FindCursor(const std::wstring& path, int size);
 const CursorData* FindCursorByHandle(HCURSOR hCursor);
 
 const CursorData* LoadOrFindCursorFromHandle(HCURSOR hCursor);
+bool CopyCursorDataFromHandle(HCURSOR hCursor, CursorData& outData);
 
 const CursorData* LoadOrFindSystemCursor(LPCWSTR systemCursorId);
 

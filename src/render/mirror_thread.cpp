@@ -1131,7 +1131,6 @@ void SubmitFrameCapture(GLuint gameTexture, int width, int height) {
     glDisable(GL_DITHER);
     if (hasFramebufferSRGB) { glDisable(GL_FRAMEBUFFER_SRGB); }
 
-    // Only resize the WRITE texture, not the read texture that other threads may be using
     int writeIndex = g_copyTextureWriteIndex.load(std::memory_order_acquire);
     bool dimensionsChanged = (width != g_copyTextureW || height != g_copyTextureH);
 
@@ -1154,15 +1153,9 @@ void SubmitFrameCapture(GLuint gameTexture, int width, int height) {
         }
         BindTextureDirect(GL_TEXTURE_2D, 0);
 
-        // Use fence + flush instead of glFinish() to avoid blocking the game thread.
-        // cause visible hitches on some GPU/driver combinations (especially iGPUs).
-        // A fence only waits for the texture reallocation commands specifically.
-        GLsync resizeFence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
-        glFlush(); // Ensure fence and resize commands are submitted to GPU
-        if (resizeFence) {
-            glClientWaitSync(resizeFence, GL_SYNC_FLUSH_COMMANDS_BIT, 500000000ULL);
-            if (glIsSync(resizeFence)) { glDeleteSync(resizeFence); }
-        }
+        // No CPU wait here: every reader of these textures uses the game's own context, which orders the
+        // reallocation before the blit below. A fence would wait for the whole frame queued before it, the first one
+        // at the new size, and stall the game on every resize, such as an EyeZoom toggle while OBS captures it.
 
         g_copyTextureW = width;
         g_copyTextureH = height;
@@ -2331,7 +2324,35 @@ static std::unordered_map<std::string, MT_SourceRectGpuCacheEntry> g_sameThreadS
 static GLuint g_sameThreadCaptureVAO = 0;
 static GLuint g_sameThreadCaptureVBO = 0;
 
+// GL objects released by InvalidateMirrorTextureCaches on a thread without a current GL context (the logic thread).
+// They hold the specific GL ids (not mirror names) and are deleted on the next GL-thread call. Guarded by g_mirrorInstancesMutex.
+static std::vector<MT_MirrorFbos> g_pendingDeleteMirrorFbos;
+static std::vector<MT_SourceRectGpuCacheEntry> g_pendingDeleteSourceRectGpuCaches;
+static std::vector<GLuint> g_pendingDeleteTextures;
+static std::atomic<bool> g_hasPendingSameThreadGlDeletes{ false };
+
+static void MT_DrainPendingSameThreadGlDeletes() {
+    if (!g_hasPendingSameThreadGlDeletes.load(std::memory_order_acquire)) { return; }
+
+    std::vector<MT_MirrorFbos> fbos;
+    std::vector<MT_SourceRectGpuCacheEntry> caches;
+    std::vector<GLuint> textures;
+    {
+        std::unique_lock<std::shared_mutex> lock(g_mirrorInstancesMutex);
+        fbos.swap(g_pendingDeleteMirrorFbos);
+        caches.swap(g_pendingDeleteSourceRectGpuCaches);
+        textures.swap(g_pendingDeleteTextures);
+        g_hasPendingSameThreadGlDeletes.store(false, std::memory_order_release);
+    }
+
+    for (auto& fb : fbos) { MT_DeleteMirrorFbos(fb); }
+    for (auto& cacheEntry : caches) { MT_DeleteSourceRectGpuCacheEntry(cacheEntry); }
+    if (!textures.empty()) { glDeleteTextures(static_cast<GLsizei>(textures.size()), textures.data()); }
+}
+
 void CleanupMirrorCaptureGpuResources() {
+    MT_DrainPendingSameThreadGlDeletes();
+
     for (auto& [name, fb] : g_sameThreadMirrorFbos) {
         (void)name;
         MT_DeleteMirrorFbos(fb);
@@ -2500,6 +2521,8 @@ void SwapMirrorBuffers() {
 
 bool RenderMirrorCapturesOnCurrentThread(const std::vector<ThreadedMirrorConfig>& activeMirrorConfigs, GLuint sourceTexture, int gameW,
                                          int gameH, int screenW, int screenH, int finalX, int finalY, int finalW, int finalH) {
+    MT_DrainPendingSameThreadGlDeletes();
+
     if (activeMirrorConfigs.empty() || sourceTexture == 0 || gameW <= 0 || gameH <= 0) { return false; }
 
     if (mt_filterProgram == 0 || mt_renderProgram == 0 || mt_backgroundProgram == 0) {
@@ -2812,10 +2835,15 @@ void UpdateMirrorCaptureSettings(const std::string& mirrorName, int captureWidth
 void InvalidateMirrorTextureCaches(const std::vector<std::string>& mirrorNames) {
     if (mirrorNames.empty()) return;
 
+    // Called from the logic thread (SwitchToMode), which has no GL context: defer GL deletes to the GL thread.
+    const bool hasGlContext = wglGetCurrentContext() != nullptr;
+    bool anyInstanceFound = false;
+
     std::unique_lock<std::shared_mutex> lock(g_mirrorInstancesMutex);
     for (const auto& mirrorName : mirrorNames) {
         auto it = g_mirrorInstances.find(mirrorName);
         if (it == g_mirrorInstances.end()) continue;
+        anyInstanceFound = true;
 
         MirrorInstance& inst = it->second;
         inst.captureReady.store(false, std::memory_order_release);
@@ -2836,28 +2864,50 @@ void InvalidateMirrorTextureCaches(const std::vector<std::string>& mirrorNames) 
         inst.final_h_back = 0;
 
         inst.forceUpdateFrames = 3;
-        for (const auto& mirrorName : mirrorNames) {
-            auto sameThreadFboIt = g_sameThreadMirrorFbos.find(mirrorName);
-            if (sameThreadFboIt != g_sameThreadMirrorFbos.end()) {
+    }
+
+    // GPU cleanup for every requested name runs once, and only if at least one instance was found (as before).
+    if (!anyInstanceFound) return;
+
+    bool deferredAny = false;
+    for (const auto& mirrorName : mirrorNames) {
+        auto sameThreadFboIt = g_sameThreadMirrorFbos.find(mirrorName);
+        if (sameThreadFboIt != g_sameThreadMirrorFbos.end()) {
+            if (hasGlContext) {
                 MT_DeleteMirrorFbos(sameThreadFboIt->second);
-                g_sameThreadMirrorFbos.erase(sameThreadFboIt);
+            } else {
+                g_pendingDeleteMirrorFbos.push_back(sameThreadFboIt->second);
+                deferredAny = true;
             }
+            g_sameThreadMirrorFbos.erase(sameThreadFboIt);
+        }
 
-            auto sameThreadCacheIt = g_sameThreadSourceRectGpuCaches.find(mirrorName);
-            if (sameThreadCacheIt != g_sameThreadSourceRectGpuCaches.end()) {
+        auto sameThreadCacheIt = g_sameThreadSourceRectGpuCaches.find(mirrorName);
+        if (sameThreadCacheIt != g_sameThreadSourceRectGpuCaches.end()) {
+            if (hasGlContext) {
                 MT_DeleteSourceRectGpuCacheEntry(sameThreadCacheIt->second);
-                g_sameThreadSourceRectGpuCaches.erase(sameThreadCacheIt);
+            } else {
+                g_pendingDeleteSourceRectGpuCaches.push_back(sameThreadCacheIt->second);
+                deferredAny = true;
             }
+            g_sameThreadSourceRectGpuCaches.erase(sameThreadCacheIt);
+        }
 
-            auto instIt = g_mirrorInstances.find(mirrorName);
-            if (instIt != g_mirrorInstances.end() && instIt->second.tempCaptureTexture != 0) {
+        auto instIt = g_mirrorInstances.find(mirrorName);
+        if (instIt != g_mirrorInstances.end() && instIt->second.tempCaptureTexture != 0) {
+            if (hasGlContext) {
                 glDeleteTextures(1, &instIt->second.tempCaptureTexture);
-                instIt->second.tempCaptureTexture = 0;
-                instIt->second.tempCaptureTextureW = 0;
-                instIt->second.tempCaptureTextureH = 0;
+            } else {
+                g_pendingDeleteTextures.push_back(instIt->second.tempCaptureTexture);
+                deferredAny = true;
             }
+            instIt->second.tempCaptureTexture = 0;
+            instIt->second.tempCaptureTextureW = 0;
+            instIt->second.tempCaptureTextureH = 0;
         }
     }
+
+    if (deferredAny) { g_hasPendingSameThreadGlDeletes.store(true, std::memory_order_release); }
 }
 
 

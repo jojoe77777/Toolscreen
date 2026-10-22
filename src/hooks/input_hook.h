@@ -3,8 +3,20 @@
 #include <atomic>
 #include <Windows.h>
 #include <string>
+#include <vector>
 
-extern WNDPROC g_originalWndProc;
+// The render thread can replace the subclass while the window thread forwards
+// a message.  A raw function pointer here is a C++ data race.
+struct AtomicWndProc {
+    std::atomic<WNDPROC> value{ nullptr };
+    AtomicWndProc& operator=(WNDPROC proc) {
+        value.store(proc, std::memory_order_release);
+        return *this;
+    }
+    operator WNDPROC() const { return value.load(std::memory_order_acquire); }
+};
+
+extern AtomicWndProc g_originalWndProc;
 extern std::atomic<HWND> g_subclassedHwnd;
 
 struct InputHandlerResult {
@@ -19,6 +31,9 @@ inline constexpr UINT WM_TOOLSCREEN_KEYDOWN_NO_REBIND = WM_APP + 0x2A2;
 inline constexpr UINT WM_TOOLSCREEN_KEYUP_NO_REBIND = WM_APP + 0x2A3;
 inline constexpr UINT WM_TOOLSCREEN_APPLY_FOCUS_REGAIN_SIZE = WM_APP + 0x2A4;
 inline constexpr UINT WM_TOOLSCREEN_LOCAL_KEY_REPEAT = WM_APP + 0x2A5;
+inline constexpr UINT WM_TOOLSCREEN_INVOKE_GLFW_RESIZE_CALLBACKS = WM_APP + 0x2A6;
+// Posted by the low-level keyboard hook on Vulkan: process the queued early copies of key events.
+inline constexpr UINT WM_TOOLSCREEN_VULKAN_FAST_PATH_KEY = WM_APP + 0x2A7;
 
 InputHandlerResult HandleMouseMoveViewportOffset(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM& lParam);
 
@@ -43,6 +58,8 @@ InputHandlerResult HandleDestroy(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
 InputHandlerResult HandleImGuiInput(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
 InputHandlerResult HandleGuiToggle(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+void ToggleSettingsGuiFromRenderer(HWND hWnd);
+bool ConsumeVulkanGuiHotkeyPress();
 
 InputHandlerResult HandleBorderlessToggle(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
@@ -55,8 +72,8 @@ InputHandlerResult HandleWindowOverlayKeyboard(HWND hWnd, UINT uMsg, WPARAM wPar
 
 InputHandlerResult HandleWindowOverlayMouse(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
-// Block all input when GUI is open
-InputHandlerResult HandleGuiInputBlocking(UINT uMsg);
+// Block input when GUI is open (mouse button releases are forwarded to the game)
+InputHandlerResult HandleGuiInputBlocking(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
 InputHandlerResult HandleActivate(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
@@ -64,6 +81,10 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
                                  const std::string& gameState);
 
 InputHandlerResult HandleMouseCoordinateTranslationPhase(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM& lParam);
+
+// Inverse of HandleMouseCoordinateTranslationPhase: maps a point in the game's client space (the mode size the
+// game believes its window is) to where it is presented in the real window's client area.
+bool MapGameClientPointToWindowClient(HWND hWnd, int& x, int& y);
 
 InputHandlerResult HandleKeyRebinding(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
@@ -76,6 +97,10 @@ InputHandlerResult HandleCharRebinding(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
 void ResetLocalKeyRepeatState(HWND hWnd);
 
 void ReleaseActiveLowLevelRebindKeys(HWND hWnd);
+// Stops the thread that owns the low-level keyboard hook (removing the hook). Called on DLL detach.
+void StopLowLevelKeyboardHookThread();
+// Reports whether the low-level keyboard hook is installed and which thread owns it.
+bool GetLowLevelKeyboardHookState(DWORD& outHookThreadId);
 
 void ReleaseHeldPassthroughRebindSources(HWND hWnd);
 
@@ -90,14 +115,19 @@ size_t GetActiveSyntheticRebindOutputCountForTest();
 void ResetExactKeyboardMessageStateForTest();
 size_t GetUnreboundKeyDownCountForTest();
 void ResetHotkeyRuntimeStateForTest();
+// Installs then removes the low-level keyboard hook through its owning thread.
+bool CycleLowLevelKeyboardHookForTest(DWORD& outHookThreadId, bool& outInstalled, bool& outRemoved);
 void ResetLowLevelExactModifierStateForTest();
 void SetLowLevelExactModifierDownForTest(DWORD vk, bool isDown);
+bool DoesLowLevelHotkeyChordMatchForTest(const std::vector<DWORD>& keys, DWORD incomingVk);
 void SetPhysicalModifierDownForTest(DWORD vk, bool isDown);
 void ResetPhysicalModifierStateForTest();
 void QueueSuppressedLowLevelKeyForTest(DWORD vk, UINT scanCodeWithFlags, bool isSystemKey);
 void QueueLowLevelExactModifierKeydownForTest(DWORD vk);
 void QueueLowLevelExactModifierKeyupForTest(DWORD vk);
 DWORD ResolveTrackedKeyboardVkFromMessageForTest(UINT uMsg, WPARAM wParam, LPARAM lParam);
+bool IsDeepSuppressionEligibleSourceVkForTest(DWORD vk);
+bool ShouldDeepSuppressRebindForTest(DWORD fromKey, DWORD toKey);
 #endif
 
 LRESULT CALLBACK SubclassedWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);

@@ -25,6 +25,7 @@ struct GameVersion {
     int major = 0;
     int minor = 0;
     int patch = 0;
+    bool prerelease = false;
     bool valid = false;
 
     GameVersion() = default;
@@ -53,3 +54,4 @@ GameVersion GetGameVersionFromCommandLine();
 GameVersion ParseMinecraftVersionFromMMCPack(const std::wstring& mmcPackPath);
 bool IsVersionInRange(const GameVersion& version, const GameVersion& minVer, const GameVersion& maxVer);
 bool IsResolutionChangeSupported(const GameVersion& version);
+bool IsMinecraft26_2FinalOrNewer(const GameVersion& version);

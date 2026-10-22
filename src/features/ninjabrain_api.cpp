@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <utility>
 
 namespace {
@@ -33,9 +34,18 @@ std::string TrimString(std::string value) {
 }
 
 double NormalizeAngleDegrees(double angle) {
-    while (angle > 180.0) { angle -= 360.0; }
-    while (angle < -180.0) { angle += 360.0; }
+    if (!std::isfinite(angle)) { return 0.0; }
+    angle = std::fmod(angle, 360.0);
+    if (angle > 180.0) { angle -= 360.0; }
+    if (angle < -180.0) { angle += 360.0; }
     return angle;
+}
+
+int ChunkCoordinateToBlock(int chunkCoordinate) {
+    const long long blockCoordinate = static_cast<long long>(chunkCoordinate) * 16ll + 4ll;
+    return static_cast<int>((std::clamp)(blockCoordinate,
+                                         static_cast<long long>((std::numeric_limits<int>::min)()),
+                                         static_cast<long long>((std::numeric_limits<int>::max)())));
 }
 
 void LogIfPresent(const NinjabrainLogCallback& callback, const std::string& message) {
@@ -220,7 +230,6 @@ void ApplyNinjabrainStrongholdEvent(
     try {
         const json parsedJson = json::parse(payload);
 
-        const NinjabrainData previous = data;
         const std::string resultType = parsedJson.value("resultType", "NONE");
         if (resultType == "NONE") {
             ClearNinjabrainStrongholdData(data);
@@ -263,12 +272,12 @@ void ApplyNinjabrainStrongholdEvent(
         }
 
         if (next.eyeCount > 0 && !next.throws[next.eyeCount - 1].hasCorrectionIncrements) {
-            next.correctionIncrements151 = previous.correctionIncrements151;
+            next.correctionIncrements151 = data.correctionIncrements151;
 
-            if (next.eyeCount != previous.eyeCount) {
+            if (next.eyeCount != data.eyeCount) {
                 next.correctionIncrements151 = 0;
             } else {
-                const double previousCorrection = previous.throws[previous.eyeCount - 1].correction;
+                const double previousCorrection = data.throws[data.eyeCount - 1].correction;
                 const double delta = next.throws[next.eyeCount - 1].correction - previousCorrection;
                 if (delta > 1e-9) {
                     ++next.correctionIncrements151;
@@ -324,8 +333,8 @@ void ApplyNinjabrainStrongholdEvent(
         }
 
         if (next.predictionCount > 0) {
-            next.strongholdX = next.predictions[0].chunkX * 16 + 4;
-            next.strongholdZ = next.predictions[0].chunkZ * 16 + 4;
+            next.strongholdX = ChunkCoordinateToBlock(next.predictions[0].chunkX);
+            next.strongholdZ = ChunkCoordinateToBlock(next.predictions[0].chunkZ);
             next.distance = next.predictions[0].overworldDistance;
             next.certainty = next.predictions[0].certainty;
             next.validPrediction = true;

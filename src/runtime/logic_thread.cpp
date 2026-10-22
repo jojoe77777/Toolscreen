@@ -1,4 +1,5 @@
 #include "logic_thread.h"
+#include "hooks/input_hook.h"
 #include "common/mode_dimensions.h"
 #include "gui/gui.h"
 #include "render/mirror_thread.h"
@@ -32,7 +33,6 @@ extern std::atomic<bool> g_windowsMouseSpeedApplied;
 extern int g_originalWindowsMouseSpeed;
 
 extern std::atomic<bool> g_isShuttingDown;
-extern WNDPROC g_originalWndProc;
 extern std::atomic<bool> g_gameWindowActive;
 
 extern PendingModeSwitch g_pendingModeSwitch;
@@ -156,7 +156,6 @@ void RequestScreenMetricsRecalculation() {
     s_screenMetricsRecalcRequested.store(true, std::memory_order_relaxed);
 }
 
-static std::vector<std::string> s_lastActiveMirrorIds;
 static std::string s_lastMirrorConfigModeId;
 static uint64_t s_lastMirrorConfigSnapshotVersion = 0;
 static int s_lastViewportScreenW = 0;
@@ -170,18 +169,24 @@ void UpdateActiveMirrorConfigs() {
         const MirrorGroupItem* item = nullptr;
     };
 
+    // Read the version before the snapshot. PublishConfigSnapshot stores the snapshot first and bumps the
+    // version second, so this order can only pair a newer snapshot with an older version (forcing a rebuild
+    // next call), never an older snapshot with a newer version.
+    const uint64_t snapVer = g_configSnapshotVersion.load(std::memory_order_acquire);
+
     // Use config snapshot for thread-safe access to modes/mirrors/mirrorGroups
     auto cfgSnap = GetConfigSnapshot();
     if (!cfgSnap) return;
     const Config& cfg = *cfgSnap;
 
-    const uint64_t snapVer = g_configSnapshotVersion.load(std::memory_order_acquire);
-    static uint64_t s_lookupSnapshotVersion = 0;
+    // The lookup maps hold raw pointers into the snapshot, so keep that snapshot alive and rebuild whenever
+    // the published snapshot object changes.
+    static std::shared_ptr<const Config> s_lookupSnapshot;
     static std::unordered_map<std::string, const MirrorGroupConfig*> s_groupByName;
     static std::unordered_map<std::string, const MirrorConfig*> s_mirrorByName;
 
-    if (s_lookupSnapshotVersion != snapVer) {
-        s_lookupSnapshotVersion = snapVer;
+    if (s_lookupSnapshot != cfgSnap) {
+        s_lookupSnapshot = cfgSnap;
         s_groupByName.clear();
         s_mirrorByName.clear();
         s_groupByName.reserve(cfg.mirrorGroups.size());
@@ -191,7 +196,7 @@ void UpdateActiveMirrorConfigs() {
     }
 
     // Get current mode ID from double-buffer (lock-free)
-    std::string currentModeId = g_modeIdBuffers[g_currentModeIdIndex.load(std::memory_order_acquire)];
+    std::string currentModeId = GetPublishedCurrentModeId();
 
     if (currentModeId == s_lastMirrorConfigModeId && snapVer == s_lastMirrorConfigSnapshotVersion) {
         return;
@@ -261,7 +266,6 @@ void UpdateActiveMirrorConfigs() {
         activeMirrorsForCapture.push_back(activeMirror);
     }
     UpdateMirrorCaptureConfigs(activeMirrorsForCapture);
-    s_lastActiveMirrorIds = currentMirrorIds;
 
     s_lastMirrorConfigModeId = currentModeId;
     s_lastMirrorConfigSnapshotVersion = snapVer;
@@ -438,7 +442,7 @@ void UpdateCachedViewportMode() {
     PROFILE_SCOPE_CAT("LT Viewport Cache", "Logic Thread");
 
     // Read current mode ID from double-buffer (lock-free)
-    std::string currentModeId = g_modeIdBuffers[g_currentModeIdIndex.load(std::memory_order_acquire)];
+    std::string currentModeId = GetPublishedCurrentModeId();
     const uint64_t snapVer = g_configSnapshotVersion.load(std::memory_order_acquire);
 
     // Also force periodic refresh every 60 ticks (~1 second) as a safety net
@@ -507,9 +511,11 @@ void PollObsGraphicsHook() {
             g_graphicsHookDetected.store(nowDetected);
             g_graphicsHookModule.store(hookModule);
             if (nowDetected) {
-                Log("[OBS] graphics-hook64.dll DETECTED - OBS overlay active");
+                Log("[OBS] graphics-hook64.dll DETECTED - OpenGL keeps the legacy redirect; Vulkan keeps OBS's "
+                    "native present hook and redirects only its validated export copy through the lower "
+                    "Toolscreen layer.");
             } else {
-                Log("[OBS] graphics-hook64.dll UNLOADED - OBS overlay inactive");
+                Log("[OBS] graphics-hook64.dll UNLOADED - OBS capture integration inactive.");
             }
         }
     }
@@ -519,7 +525,7 @@ void CheckWorldExitReset() {
     PROFILE_SCOPE_CAT("LT World Exit Check", "Logic Thread");
 
     // Get current game state from lock-free buffer
-    std::string currentGameState = g_gameStateBuffers[g_currentGameStateIndex.load(std::memory_order_acquire)];
+    std::string currentGameState = GetPublishedGameState();
     bool isInWorld = (currentGameState.find("inworld") != std::string::npos);
 
     if (s_wasInWorld && !isInWorld) {
@@ -585,7 +591,7 @@ void CheckGameStateReset() {
     if (!IsResolutionChangeSupported(g_gameVersion)) { return; }
 
     // Get current game state from lock-free buffer
-    std::string localGameState = g_gameStateBuffers[g_currentGameStateIndex.load(std::memory_order_acquire)];
+    std::string localGameState = GetPublishedGameState();
 
     if (isWallTitleOrWaiting(localGameState) && !isWallTitleOrWaiting(s_previousGameStateForReset)) {
         auto cfgSnap = GetConfigSnapshot();

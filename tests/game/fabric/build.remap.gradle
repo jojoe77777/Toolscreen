@@ -1,0 +1,25 @@
+// Dev-client build for obfuscated Minecraft versions (e.g. 1.16.1), used by the in-game Toolscreen tests.
+// The run script copies this over fabric-example-mod's build.gradle; the project has no mod sources.
+plugins {
+	id 'net.fabricmc.fabric-loom-remap' version "${loom_version}"
+}
+
+loom {
+	runs {
+		client {
+			// Toolscreen reads the game version from this property when no launcher metadata is available.
+			vmArg "-Dtoolscreen.minecraftVersion=${project.minecraft_version}"
+		}
+	}
+}
+
+dependencies {
+	minecraft "com.mojang:minecraft:${project.minecraft_version}"
+	mappings loom.officialMojangMappings()
+	modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+}
+
+java {
+	sourceCompatibility = JavaVersion.VERSION_1_8
+	targetCompatibility = JavaVersion.VERSION_1_8
+}

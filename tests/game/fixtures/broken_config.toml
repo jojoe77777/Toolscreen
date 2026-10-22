@@ -1,0 +1,5 @@
+# Deliberately invalid TOML (the last line has no value) for the config error screen in-game test.
+configVersion = 6
+[[modes]]
+id = "Fullscreen"
+width =

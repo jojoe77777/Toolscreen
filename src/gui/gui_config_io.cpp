@@ -5,6 +5,7 @@
 #include "common/profiler.h"
 #include "common/utils.h"
 #include "config/config_migration.h"
+#include "config/config_file_safety.h"
 #include "config/config_toml.h"
 #include "render/render.h"
 #include "render/mirror_thread.h"
@@ -315,37 +316,58 @@ void SaveConfig() {
         std::thread([configPath, sharedSnapshot = std::move(sharedSnapshot), activeProfileName, activeProfileTracked,
                      profileSnapshot = std::move(profileSnapshot)]() {
             _set_se_translator(SEHTranslator);
+            bool saveSucceeded = true;
             try {
                 try {
                     if (!SaveConfigToTomlFile(sharedSnapshot, configPath)) {
                         Log("ERROR: Failed to write config file.");
+                        saveSucceeded = false;
                     }
                 } catch (const std::exception& e) {
                     Log("ERROR: Failed to write config file: " + std::string(e.what()));
+                    saveSucceeded = false;
                 }
                 if (activeProfileTracked && !SaveProfileSnapshotIfTracked(activeProfileName, profileSnapshot)) {
                     Log("INFO: Skipped async profile save for removed or renamed profile '" + activeProfileName + "'.");
+                    saveSucceeded = false;
                 }
             } catch (const SE_Exception& e) {
                 LogException("ConfigSaveThread (SEH)", e.getCode(), e.getInfo());
+                saveSucceeded = false;
             } catch (const std::exception& e) {
                 LogException("ConfigSaveThread", e);
+                saveSucceeded = false;
             } catch (...) {
                 Log("EXCEPTION in ConfigSaveThread: Unknown exception");
+                saveSucceeded = false;
             }
-            s_isConfigSaving = false;
+            if (!saveSucceeded) { g_configIsDirty.store(true, std::memory_order_release); }
+            s_isConfigSaving.store(false, std::memory_order_release);
         }).detach();
     } catch (const std::exception& e) {
+        // Thread construction can fail after the dirty flag and saving latch
+        // have been updated. Restore both so a later frame can retry.
+        g_configIsDirty.store(true, std::memory_order_release);
+        s_isConfigSaving.store(false, std::memory_order_release);
         Log("ERROR: Failed to prepare config for save: " + std::string(e.what()));
     } catch (...) {
+        g_configIsDirty.store(true, std::memory_order_release);
+        s_isConfigSaving.store(false, std::memory_order_release);
         Log("ERROR: Unknown exception in SaveConfig");
     }
 }
 
-void SaveConfigImmediate() {
+void SaveConfigImmediate() { SaveConfigImmediate(false); }
+
+void SaveConfigImmediate(bool processExiting) {
     PROFILE_SCOPE_CAT("Config Save (Immediate)", "IO Operations");
 
-    if (s_isConfigSaving.load()) {
+    // Persist a theme colour edit that never saw its end-of-interaction flush (e.g. GUI closed mid-drag).
+    FlushDeferredThemeSave();
+
+    // At process exit any background save thread has already been terminated, so there is nothing to wait for
+    // (saves write a temp file and rename it, so an interrupted save cannot corrupt config.toml).
+    if (s_isConfigSaving.load() && !processExiting) {
         Log("SaveConfigImmediate: Waiting for background save to complete...");
         if (!WaitForConfigSaveIdle(3000)) {
             Log("SaveConfigImmediate: Timed out waiting for background save. Proceeding anyway.");
@@ -520,7 +542,8 @@ void LoadConfig() {
         }
     }
 
-    BackupConfigFile();
+    RemoveStaleConfigTempFiles(g_toolscreenPath);
+    RemoveStaleConfigTempFiles(g_toolscreenPath + L"\\profiles");
     ExtractBundledFontAssets(std::filesystem::path(g_toolscreenPath), &LoadConfig);
     LoadSystemFontAssets();
 
@@ -532,23 +555,24 @@ void LoadConfig() {
             g_hotkeyTimestamps.clear();
         }
 
-        std::ifstream in(std::filesystem::path(configPath), std::ios::binary);
-        if (!in.is_open()) {
-            throw std::runtime_error("Failed to open config.toml for reading.");
+        // A damaged config.toml is restored from config.toml.bak, then from the newest intact launch snapshot.
+        std::string loadError;
+        TomlFileLoadStatus loadStatus =
+            LoadConfigFromTomlFileWithRecovery(configPath, g_config, ListConfigBackupsNewestFirst(), &loadError);
+        if (loadStatus == TomlFileLoadStatus::Missing) {
+            // The file was empty or binary with no usable backup, and has been moved aside.
+            Log("config.toml was damaged beyond recovery. Writing a default config file.");
+            g_config = Config();
+            WriteDefaultConfig(configPath);
+            loadStatus = LoadConfigFromTomlFileWithRecovery(configPath, g_config, {}, &loadError);
+            if (loadStatus == TomlFileLoadStatus::Missing) {
+                throw std::runtime_error("Could not create a default config.toml.");
+            }
         }
-
-        toml::table tbl;
-#if TOML_EXCEPTIONS
-        tbl = toml::parse(in, configPath);
-#else
-        toml::parse_result result = toml::parse(in, configPath);
-        if (!result) {
-            const auto& err = result.error();
-            throw std::runtime_error(std::string(err.description()));
+        if (loadStatus == TomlFileLoadStatus::Unrecoverable) {
+            throw std::runtime_error(loadError);
         }
-        tbl = std::move(result).table();
-#endif
-        ConfigFromToml(tbl, g_config);
+        BackupConfigFile();
         g_sharedConfig = g_config;
 
         MigrateToProfiles();
@@ -576,6 +600,9 @@ void LoadConfig() {
         normalizeConfigFontPaths(g_sharedConfig, g_toolscreenPath);
         normalizeConfigFontPaths(g_config, g_toolscreenPath);
         Log("Loaded config from TOML file.");
+
+        // Freshly loaded config is clean; the repair/migration steps below re-mark it dirty so their fixes get saved.
+        g_configIsDirty = false;
 
         int screenWidth = GetCachedWindowWidth();
         int screenHeight = GetCachedWindowHeight();
@@ -779,9 +806,7 @@ void LoadConfig() {
             std::lock_guard<std::mutex> lock(g_modeIdMutex);
             if (g_currentModeId.empty()) {
                 g_currentModeId = g_config.defaultMode;
-                int nextIndex = 1 - g_currentModeIdIndex.load(std::memory_order_relaxed);
-                g_modeIdBuffers[nextIndex] = g_config.defaultMode;
-                g_currentModeIdIndex.store(nextIndex, std::memory_order_release);
+                PublishCurrentModeIdBuffer(g_config.defaultMode);
             }
         }
 
@@ -808,7 +833,6 @@ void LoadConfig() {
             initialMode = g_currentModeId;
         }
         WriteCurrentModeToFile(initialMode);
-        g_configIsDirty = false;
         g_configLoadFailed = false;
         {
             std::lock_guard<std::mutex> lock(g_configErrorMutex);
@@ -844,7 +868,7 @@ void LoadConfig() {
         g_configLoaded = true;
         Log("Config loaded successfully and marked as ready.");
     } catch (const std::exception& e) {
-        std::string errorMessage = "Error parsing config.toml: " + std::string(e.what()) +
+        std::string errorMessage = "Error parsing config.toml: " + SanitizePathForDisplay(std::string(e.what())) +
                                    "\n\nPlease fix the error in the config file or delete it to generate a new one.";
         Log(errorMessage);
         g_configLoadFailed = true;

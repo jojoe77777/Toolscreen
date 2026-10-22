@@ -102,6 +102,9 @@ struct BrowserOverlayCacheEntry {
     std::array<GLuint, kBrowserOverlayUploadPboCount> uploadPbos{};
     size_t nextUploadPboIndex = 0;
     BrowserOverlayRenderData* lastUploadedRenderData = nullptr;
+    BrowserOverlayRenderData* lastPublishedRenderData = nullptr;
+    std::shared_ptr<const std::vector<unsigned char>> publishedPixels;
+    uint64_t publishedGeneration = 0;
     bool filterInitialized = false;
     bool lastPixelatedScaling = false;
 };
@@ -495,9 +498,8 @@ void UpdateBrowserOverlayBuffer(BrowserOverlayCacheEntry& entry, const unsigned 
     {
         std::lock_guard<std::mutex> lock(entry.swapMutex);
         entry.writeBuffer.swap(entry.readyBuffer);
+        entry.hasNewFrame.store(true, std::memory_order_release);
     }
-
-    entry.hasNewFrame.store(true, std::memory_order_release);
 }
 
 void EnqueueBrowserOverlayDecode(BrowserOverlayEncodedFrame&& frame) {
@@ -600,9 +602,8 @@ bool CaptureBrowserOverlayHostWindow(BrowserOverlayCacheEntry& entry) {
             {
                 std::lock_guard<std::mutex> lock(entry.swapMutex);
                 entry.writeBuffer.swap(entry.readyBuffer);
+                entry.hasNewFrame.store(true, std::memory_order_release);
             }
-
-            entry.hasNewFrame.store(true, std::memory_order_release);
             success = true;
         }
     }
@@ -1410,7 +1411,9 @@ void BrowserOverlayThreadFunc() {
     LogBrowserOverlayMessage("[BrowserOverlay] Thread started");
 
     uint64_t lastConfigVersion = UINT64_MAX;
+    std::vector<std::string> overlayIds;
     while (!g_stopBrowserOverlayThread.load(std::memory_order_acquire)) {
+        overlayIds.clear();
         PumpBrowserOverlayMessages();
 
         const uint64_t currentVersion = g_configSnapshotVersion.load(std::memory_order_acquire);
@@ -1420,7 +1423,6 @@ void BrowserOverlayThreadFunc() {
         }
 
         if (g_browserOverlaysVisible.load(std::memory_order_acquire)) {
-            std::vector<std::string> overlayIds;
             {
                 std::lock_guard<std::mutex> lock(g_browserOverlayCacheMutex);
                 overlayIds.reserve(g_browserOverlayCache.size());
@@ -1584,8 +1586,10 @@ bool PrepareBrowserOverlayTexture(const BrowserOverlayConfig& config, BrowserOve
 
     if (entry->hasNewFrame.load(std::memory_order_acquire)) {
         std::lock_guard<std::mutex> swapLock(entry->swapMutex);
-        entry->readyBuffer.swap(entry->backBuffer);
-        entry->hasNewFrame.store(false, std::memory_order_release);
+        if (entry->hasNewFrame.load(std::memory_order_relaxed)) {
+            entry->readyBuffer.swap(entry->backBuffer);
+            entry->hasNewFrame.store(false, std::memory_order_release);
+        }
     }
 
     BrowserOverlayRenderData* renderData = entry->backBuffer.get();
@@ -1612,4 +1616,48 @@ bool PrepareBrowserOverlayTexture(const BrowserOverlayConfig& config, BrowserOve
     outFrame.textureWidth = entry->glTextureWidth;
     outFrame.textureHeight = entry->glTextureHeight;
     return outFrame.textureId != 0 && outFrame.textureWidth > 0 && outFrame.textureHeight > 0;
+}
+
+bool AcquireBrowserOverlayPixelFrame(
+    const BrowserOverlayConfig& config, BrowserOverlayPixelFrame& outFrame) {
+    outFrame = {};
+    std::shared_ptr<BrowserOverlayCacheEntry> entry;
+    {
+        std::lock_guard<std::mutex> cacheLock(g_browserOverlayCacheMutex);
+        auto it = g_browserOverlayCache.find(config.name);
+        if (it == g_browserOverlayCache.end() || !it->second) return false;
+        entry = it->second;
+    }
+
+    if (entry->hasNewFrame.load(std::memory_order_acquire)) {
+        std::lock_guard<std::mutex> swapLock(entry->swapMutex);
+        if (entry->hasNewFrame.load(std::memory_order_relaxed)) {
+            entry->readyBuffer.swap(entry->backBuffer);
+            entry->hasNewFrame.store(false, std::memory_order_release);
+        }
+    }
+
+    std::lock_guard<std::mutex> renderLock(entry->renderStateMutex);
+    BrowserOverlayRenderData* renderData = entry->backBuffer.get();
+    if (!renderData || !renderData->pixelData || renderData->width <= 0 ||
+        renderData->height <= 0) {
+        return false;
+    }
+    if (renderData != entry->lastPublishedRenderData || !entry->publishedPixels) {
+        const size_t byteCount =
+            static_cast<size_t>(renderData->width) *
+            static_cast<size_t>(renderData->height) * 4;
+        auto pixels = std::make_shared<std::vector<unsigned char>>(
+            renderData->pixelData, renderData->pixelData + byteCount);
+        entry->publishedPixels = std::move(pixels);
+        entry->lastPublishedRenderData = renderData;
+        ++entry->publishedGeneration;
+    }
+    outFrame.pixels = entry->publishedPixels;
+    outFrame.width = renderData->width;
+    outFrame.height = renderData->height;
+    entry->glTextureWidth = renderData->width;
+    entry->glTextureHeight = renderData->height;
+    outFrame.generation = entry->publishedGeneration;
+    return static_cast<bool>(outFrame.pixels);
 }

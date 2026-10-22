@@ -23,6 +23,7 @@ extern std::atomic<GLuint> g_cachedGameTextureId;
 #include <csignal>
 #include <cstdint>
 #include <cstdlib>
+#include <cwctype>
 #include <eh.h>
 #include <filesystem>
 #include <fstream>
@@ -137,13 +138,13 @@ std::string FormatStackTraceWithSymbols(void** stack, USHORT frames, int skipFra
 void SignalHandler(int sig) {
     if (sig == SIGABRT) {
         Log("!!! SIGABRT SIGNAL RECEIVED - ABNORMAL TERMINATION !!!");
-        FlushLogs();
+        FlushLogsBestEffort(500);
 
         // Capture stack trace
         void* stack[64];
         USHORT frames = CaptureStackBackTrace(1, 64, stack, NULL);
         Log(FormatStackTraceWithSymbols(stack, frames));
-        FlushLogs(); // Force flush after stack trace
+        FlushLogsBestEffort(500); // Force flush after stack trace
     }
 
     signal(sig, SIG_DFL);
@@ -191,13 +192,13 @@ extern "C" void abort() {
     }
 
     Log(contextSs.str());
-    FlushLogs();
+    FlushLogsBestEffort(500);
 
     // Capture stack trace at abort point
     void* stack[64];
     USHORT frames = CaptureStackBackTrace(1, 64, stack, NULL);
     Log(FormatStackTraceWithSymbols(stack, frames));
-    FlushLogs(); // Force flush after stack trace
+    FlushLogsBestEffort(500); // Force flush after stack trace
 
     signal(SIGABRT, SIG_DFL);
     raise(SIGABRT);
@@ -302,6 +303,7 @@ struct BitWriter {
     int bitCount = 0;
 
     void WriteBits(uint32_t value, int count) {
+        if (count <= 0 || count > 16) return;
         bitBuffer |= ((value & ((1u << count) - 1u)) << bitCount);
         bitCount += count;
         while (bitCount >= 8) {
@@ -337,7 +339,7 @@ static void BuildCanonicalCodes(const uint8_t* lengths, size_t count, std::vecto
 
     for (size_t symbol = 0; symbol < count; symbol++) {
         uint8_t len = lengths[symbol];
-        if (len == 0) continue;
+        if (len == 0 || len > 15) continue;
         uint16_t c = static_cast<uint16_t>(nextCode[len]++);
         out[symbol].bits = len;
         out[symbol].code = ReverseBits(c, len);
@@ -1071,7 +1073,7 @@ static std::thread g_logThread;
 static std::atomic<bool> g_logThreadRunning{ false };
 
 static void LogThreadMain();
-static void WriteLogsToFile();
+static void WriteLogsToFile(int lockTimeoutMs = -1);
 
 static void ProcessPendingLogArchives() {
     std::vector<std::wstring> pendingArchives;
@@ -1124,15 +1126,25 @@ static void LogThreadMain() {
     ProcessPendingLogArchives();
 }
 
-// Internal: Write all pending log entries to file (called by background thread or FlushLogs)
-static void WriteLogsToFile() {
+// Internal: Write all pending log entries to file (called by background thread or FlushLogs).
+// With a lock timeout, gives up (leaving entries queued) instead of waiting longer for the file lock.
+static void WriteLogsToFile(int lockTimeoutMs) {
     size_t readPos = g_logReadIndex.load(std::memory_order_relaxed);
     size_t claimPos = g_logClaimIndex.load(std::memory_order_acquire);
 
     if (readPos == claimPos) return;
 
     // Lock only during actual file I/O (not during Log() calls)
-    std::lock_guard<std::mutex> lock(g_logFileMutex);
+    std::unique_lock<std::mutex> lock(g_logFileMutex, std::defer_lock);
+    if (lockTimeoutMs < 0) {
+        lock.lock();
+    } else {
+        const ULONGLONG deadline = GetTickCount64() + static_cast<ULONGLONG>(lockTimeoutMs);
+        while (!lock.try_lock()) {
+            if (GetTickCount64() >= deadline) return;
+            Sleep(5);
+        }
+    }
     if (!logFile.is_open()) return;
 
     while (readPos != claimPos) {
@@ -1155,6 +1167,10 @@ static void WriteLogsToFile() {
 }
 
 void FlushLogs() { WriteLogsToFile(); }
+
+// For crash handlers and process exit, where the thread holding the log file lock may have been terminated:
+// an SRW-lock-backed std::mutex owned by a dead thread is never released, so never wait on it indefinitely.
+void FlushLogsBestEffort(int lockTimeoutMs) { WriteLogsToFile(lockTimeoutMs); }
 
 void LogCategory(const char* category, const std::string& message) {
     bool enabled = false;
@@ -1236,6 +1252,8 @@ std::string WideToUtf8(const std::wstring& wstr) {
     return strTo;
 }
 
+#include "common/path_sanitize.inl"
+
 void LogException(const std::string& context, const std::exception& e) {
     std::stringstream ss;
     ss << "EXCEPTION in " << context << ": " << e.what();
@@ -1298,12 +1316,12 @@ void LogException(const std::string& context, DWORD exceptionCode, EXCEPTION_POI
     const uint64_t lastFlush = s_lastFlushMs.load(std::memory_order_relaxed);
     if (lastFlush == 0 || (nowMs - lastFlush) >= kFlushMinIntervalMs) {
         s_lastFlushMs.store(nowMs, std::memory_order_relaxed);
-        FlushLogs();
+        FlushLogsBestEffort(500);
     }
 }
 
 LONG WINAPI CustomUnhandledExceptionFilter(EXCEPTION_POINTERS* exceptionInfo) {
-    FlushLogs();
+    FlushLogsBestEffort(500);
 
     std::cerr << "[Toolscreen] EXCEPTION FILTER TRIGGERED" << std::endl;
     std::cerr.flush();
@@ -1384,7 +1402,7 @@ LONG WINAPI CustomUnhandledExceptionFilter(EXCEPTION_POINTERS* exceptionInfo) {
 
     Log("=== END EXCEPTION DETAILS ===");
 
-    FlushLogs();
+    FlushLogsBestEffort(500);
 
     std::cerr << "[Toolscreen] EXCEPTION LOGGED - Check log file" << std::endl;
     std::cerr.flush();
@@ -1498,8 +1516,8 @@ void WriteCurrentModeToFile(const std::string& modeId) {
     std::wstring filePathCopy = g_modeFilePath;
 
     // Fire-and-forget async write - never blocks the calling thread
-    // NOTE: Do NOT use PROFILE_SCOPE inside short-lived detached threads!
-    // The thread-local profiler buffer gets destroyed when the thread exits,
+    // NOTE: Do NOT use PROFILE_SCOPE inside short-lived detached threads; the
+    // extra per-thread profiling buffer is unnecessary for this tiny write.
     std::thread([modeIdCopy, filePathCopy]() {
         // Open via std::filesystem::path so wide Win32 APIs are used.
         std::ofstream modeFile(std::filesystem::path(filePathCopy), std::ios_base::out | std::ios_base::trunc);
@@ -1572,12 +1590,12 @@ bool SwitchToMode(const std::string& newModeId, const std::string& source, bool 
             fromY = g_modeTransition.currentY;
             useAnimatedPosition = true;
 
-            int origDeltaW = std::abs(g_modeTransition.toWidth - g_modeTransition.fromWidth);
-            int origDeltaH = std::abs(g_modeTransition.toHeight - g_modeTransition.fromHeight);
-            int origDeltaX = std::abs(g_modeTransition.toX - g_modeTransition.fromX);
-            int origDeltaY = std::abs(g_modeTransition.toY - g_modeTransition.fromY);
-            float origDistance =
-                std::sqrt((float)(origDeltaW * origDeltaW + origDeltaH * origDeltaH + origDeltaX * origDeltaX + origDeltaY * origDeltaY));
+            const double origDeltaW = std::abs(static_cast<double>(g_modeTransition.toWidth) - g_modeTransition.fromWidth);
+            const double origDeltaH = std::abs(static_cast<double>(g_modeTransition.toHeight) - g_modeTransition.fromHeight);
+            const double origDeltaX = std::abs(static_cast<double>(g_modeTransition.toX) - g_modeTransition.fromX);
+            const double origDeltaY = std::abs(static_cast<double>(g_modeTransition.toY) - g_modeTransition.fromY);
+            const double origDistance = std::sqrt(origDeltaW * origDeltaW + origDeltaH * origDeltaH +
+                                                  origDeltaX * origDeltaX + origDeltaY * origDeltaY);
 
             if (origDistance > 0) {
             }
@@ -1682,12 +1700,12 @@ bool SwitchToMode(const std::string& newModeId, const std::string& source, bool 
     }
 
     if (useAnimatedPosition && toModeCopy.gameTransition == GameTransitionType::Bounce) {
-        int newDeltaW = std::abs(toWidth - fromWidth);
-        int newDeltaH = std::abs(toHeight - fromHeight);
-        int newDeltaX = std::abs(toX - fromX);
-        int newDeltaY = std::abs(toY - fromY);
-        float newDistance =
-            std::sqrt((float)(newDeltaW * newDeltaW + newDeltaH * newDeltaH + newDeltaX * newDeltaX + newDeltaY * newDeltaY));
+        const double newDeltaW = std::abs(static_cast<double>(toWidth) - fromWidth);
+        const double newDeltaH = std::abs(static_cast<double>(toHeight) - fromHeight);
+        const double newDeltaX = std::abs(static_cast<double>(toX) - fromX);
+        const double newDeltaY = std::abs(static_cast<double>(toY) - fromY);
+        const double newDistance = std::sqrt(newDeltaW * newDeltaW + newDeltaH * newDeltaH +
+                                             newDeltaX * newDeltaX + newDeltaY * newDeltaY);
 
         // Use snapshot for thread-safe lookup (reuse modeSnap if still valid, else re-acquire)
         auto distSnap = GetConfigSnapshot();
@@ -1696,15 +1714,15 @@ bool SwitchToMode(const std::string& newModeId, const std::string& source, bool 
             int refFromW = fullW, refFromH = fullH, refFromX = 0, refFromY = 0;
             int refToW = toWidth, refToH = toHeight, refToX = toX, refToY = toY;
 
-            int fullDeltaW = std::abs(refToW - refFromW);
-            int fullDeltaH = std::abs(refToH - refFromH);
-            int fullDeltaX = std::abs(refToX - refFromX);
-            int fullDeltaY = std::abs(refToY - refFromY);
-            float fullDistance =
-                std::sqrt((float)(fullDeltaW * fullDeltaW + fullDeltaH * fullDeltaH + fullDeltaX * fullDeltaX + fullDeltaY * fullDeltaY));
+            const double fullDeltaW = std::abs(static_cast<double>(refToW) - refFromW);
+            const double fullDeltaH = std::abs(static_cast<double>(refToH) - refFromH);
+            const double fullDeltaX = std::abs(static_cast<double>(refToX) - refFromX);
+            const double fullDeltaY = std::abs(static_cast<double>(refToY) - refFromY);
+            const double fullDistance = std::sqrt(fullDeltaW * fullDeltaW + fullDeltaH * fullDeltaH +
+                                                  fullDeltaX * fullDeltaX + fullDeltaY * fullDeltaY);
 
             if (fullDistance > 0) {
-                distanceRatio = newDistance / fullDistance;
+                distanceRatio = static_cast<float>(newDistance / fullDistance);
                 distanceRatio = (std::max)(0.1f, (std::min)(1.0f, distanceRatio));
 
                 int originalDuration = toModeCopy.transitionDurationMs;
@@ -1734,9 +1752,7 @@ bool SwitchToMode(const std::string& newModeId, const std::string& source, bool 
     LogCategory("mode_switch", "[MODE_SWITCH] StartModeTransition completed");
 
     g_currentModeId = newModeId;
-    int nextIndex = 1 - g_currentModeIdIndex.load(std::memory_order_relaxed);
-    g_modeIdBuffers[nextIndex] = newModeId;
-    g_currentModeIdIndex.store(nextIndex, std::memory_order_release);
+    PublishCurrentModeIdBuffer(newModeId);
     LogCategory("mode_switch", "[MODE_SWITCH] Published new active mode after transition setup: " + newModeId);
 
     modeLock.unlock();
@@ -1794,7 +1810,23 @@ bool GetWindowClientRectInScreen(HWND hwnd, RECT& outRect) {
     return (outRect.right > outRect.left) && (outRect.bottom > outRect.top);
 }
 
+#if defined(TOOLSCREEN_GUI_INTEGRATION_TESTS)
+namespace {
+std::atomic<int> s_testCursorVisibilityOverride{ -1 };
+}
+
+void SetCursorVisibilityOverrideForTests(bool enabled, bool visible) {
+    s_testCursorVisibilityOverride.store(enabled ? (visible ? 1 : 0) : -1,
+                                         std::memory_order_release);
+}
+#endif
+
 bool IsCursorVisible() {
+#if defined(TOOLSCREEN_GUI_INTEGRATION_TESTS)
+    const int testOverride =
+        s_testCursorVisibilityOverride.load(std::memory_order_acquire);
+    if (testOverride >= 0) { return testOverride != 0; }
+#endif
     if (g_gameVersion >= GameVersion(1, 13, 0)) {
         CURSORINFO ci = { sizeof(CURSORINFO) };
         if (!GetCursorInfo(&ci)) {
@@ -1818,7 +1850,9 @@ bool IsHardcodedMode(const std::string& id) {
 bool EqualsIgnoreCase(const std::string& a, const std::string& b) {
     if (a.size() != b.size()) { return false; }
 
-    return std::equal(a.begin(), a.end(), b.begin(), [](char a, char b) { return std::tolower(a) == std::tolower(b); });
+    return std::equal(a.begin(), a.end(), b.begin(), [](unsigned char a, unsigned char b) {
+        return std::tolower(a) == std::tolower(b);
+    });
 }
 
 std::string ModeSourceTypeToString(ModeSourceType type) {
@@ -2045,7 +2079,7 @@ bool isWallTitleOrWaiting(const std::string& state) {
 ModeViewportInfo GetCurrentModeViewport_Internal() {
     ModeViewportInfo info;
     // Lock-free read of current mode ID from double-buffer
-    std::string modeId = g_modeIdBuffers[g_currentModeIdIndex.load(std::memory_order_acquire)];
+    std::string modeId = GetPublishedCurrentModeId();
 
     // Use snapshot for thread-safe mode config lookup (called from multiple threads)
     auto vpSnap = GetConfigSnapshot();
@@ -2204,9 +2238,22 @@ void LoadImageAsync(DecodedImageData::Type type, std::string id, std::string pat
                     }
                 }
 
+                // stb's own fopen uses the ANSI code page; open via the wide path so non-ASCII paths work.
+                bool stillImageOpenFailed = false;
+                auto loadStillImage = [&]() -> unsigned char* {
+                    FILE* imageFile = nullptr;
+                    if (_wfopen_s(&imageFile, final_path.c_str(), L"rb") != 0 || !imageFile) {
+                        stillImageOpenFailed = true;
+                        return nullptr;
+                    }
+                    unsigned char* result = stbi_load_from_file(imageFile, &w, &h, &c, 4);
+                    fclose(imageFile);
+                    return result;
+                };
+
                 if (!isVideo && isGif) {
                     FILE* f = nullptr;
-                    errno_t err = fopen_s(&f, path_utf8.c_str(), "rb");
+                    errno_t err = _wfopen_s(&f, final_path.c_str(), L"rb");
                     if (err == 0 && f) {
                         fseek(f, 0, SEEK_END);
                         long fileSize = ftell(f);
@@ -2250,10 +2297,10 @@ void LoadImageAsync(DecodedImageData::Type type, std::string id, std::string pat
 
                     if (!data) {
                         frameCount = 0;
-                        data = stbi_load(path_utf8.c_str(), &w, &h, &c, 4);
+                        data = loadStillImage();
                     }
                 } else if (!isVideo) {
-                    data = stbi_load(path_utf8.c_str(), &w, &h, &c, 4);
+                    data = loadStillImage();
                 }
 
                 if (g_isShuttingDown.load()) {
@@ -2347,6 +2394,8 @@ void LoadImageAsync(DecodedImageData::Type type, std::string id, std::string pat
                     std::string reason = "unknown error";
                     if (isVideo) {
                         reason = "MPEG-1 video could not be decoded into the configured cache budget";
+                    } else if (stillImageOpenFailed) {
+                        reason = "can't fopen";
                     } else if (stbi_failure_reason()) {
                         reason = stbi_failure_reason();
                     }
@@ -2515,12 +2564,7 @@ DWORD WINAPI FileMonitorThread(LPVOID lpParam) {
             lastWriteTime = curWriteTime;
             haveLastWriteTime = true;
 
-            int currentIdx = g_currentGameStateIndex.load(std::memory_order_acquire);
-            if (g_gameStateBuffers[currentIdx] != *state) {
-                int nextIdx = 1 - currentIdx;
-                g_gameStateBuffers[nextIdx] = *state;
-                g_currentGameStateIndex.store(nextIdx, std::memory_order_release);
-            }
+            PublishGameStateBufferIfChanged(*state);
         }
 
         closeActiveFile();
@@ -2745,17 +2789,17 @@ bool CheckHotkeyMatch(const std::vector<DWORD>& keys, WPARAM wParam, const std::
         for (DWORD excluded_key : exclusionKeys) {
             bool excludedPressed = false;
             if (excluded_key == VK_CONTROL) {
-                excludedPressed = ctrl_down_now;
+                excludedPressed = ctrl_down_now || IsKeyCurrentlyLowLevelSuppressed(VK_LCONTROL) || IsKeyCurrentlyLowLevelSuppressed(VK_RCONTROL);
             } else if (excluded_key == VK_LCONTROL) {
-                excludedPressed = lctrl_down;
+                excludedPressed = lctrl_down || IsKeyCurrentlyLowLevelSuppressed(VK_LCONTROL);
             } else if (excluded_key == VK_RCONTROL) {
-                excludedPressed = rctrl_down;
+                excludedPressed = rctrl_down || IsKeyCurrentlyLowLevelSuppressed(VK_RCONTROL);
             } else if (excluded_key == VK_SHIFT) {
-                excludedPressed = shift_down_now;
+                excludedPressed = shift_down_now || IsKeyCurrentlyLowLevelSuppressed(VK_LSHIFT) || IsKeyCurrentlyLowLevelSuppressed(VK_RSHIFT);
             } else if (excluded_key == VK_LSHIFT) {
-                excludedPressed = lshift_down;
+                excludedPressed = lshift_down || IsKeyCurrentlyLowLevelSuppressed(VK_LSHIFT);
             } else if (excluded_key == VK_RSHIFT) {
-                excludedPressed = rshift_down;
+                excludedPressed = rshift_down || IsKeyCurrentlyLowLevelSuppressed(VK_RSHIFT);
             } else if (excluded_key == VK_MENU) {
                 excludedPressed = alt_down_now || IsKeyCurrentlyLowLevelSuppressed(VK_LMENU) || IsKeyCurrentlyLowLevelSuppressed(VK_RMENU);
             } else if (excluded_key == VK_LMENU) {
@@ -3171,61 +3215,66 @@ void ScreenDeltaToMirrorConfigDelta(const std::string& relativeTo,
     if (anchor == "bottomLeftViewport" || anchor == "bottomRightViewport") { outConfigDy = -gameDy; }
 }
 
-void ScreenshotToClipboard(int width, int height) {
-    PROFILE_SCOPE_CAT("Screenshot to Clipboard", "System");
-    if (width <= 0 || height <= 0) {
+bool ScreenshotPixelsToClipboard(const unsigned char* sourcePixels, int width,
+                                 int height, size_t rowPitch,
+                                 bool sourceIsBgra, bool sourceIsTopDown) {
+    if (!sourcePixels || width <= 0 || height <= 0) {
         Log("ERROR: Screenshot request rejected due to invalid dimensions " + std::to_string(width) + "x" + std::to_string(height) + ".");
-        return;
+        return false;
     }
 
     size_t bufferSize = 0;
     if (!TryComputeImageByteCount(width, height, 4, bufferSize)) {
         Log("ERROR: Screenshot request rejected because byte-count overflowed for dimensions " + std::to_string(width) + "x" +
             std::to_string(height) + ".");
-        return;
+        return false;
     }
     if (bufferSize > kMaxScreenshotBytes) {
         Log("ERROR: Screenshot request rejected because buffer size " + FormatByteCount(bufferSize) + " exceeds guard limit of " +
             FormatByteCount(kMaxScreenshotBytes) + " for dimensions " + std::to_string(width) + "x" + std::to_string(height) + ".");
-        return;
+        return false;
+    }
+    const size_t tightPitch = static_cast<size_t>(width) * 4u;
+    if (rowPitch < tightPitch) {
+        Log("ERROR: Screenshot request rejected because source row pitch is smaller than the image width.");
+        return false;
     }
 
     Log("Taking screenshot at " + std::to_string(width) + "x" + std::to_string(height) + " (" + FormatByteCount(bufferSize) + ").");
     std::vector<BYTE> pixels(bufferSize);
-
-    GLint previousPackRowLength = 0;
-    glGetIntegerv(GL_PACK_ROW_LENGTH, &previousPackRowLength);
-    glReadBuffer(GL_BACK);
-    glPixelStorei(GL_PACK_ROW_LENGTH, 0);
-    glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
-    glPixelStorei(GL_PACK_ROW_LENGTH, previousPackRowLength);
-
-    for (size_t i = 0; i < bufferSize; i += 4) {
-        std::swap(pixels[i + 0], pixels[i + 2]);
+    for (int y = 0; y < height; ++y) {
+        const unsigned char* sourceRow =
+            sourcePixels + static_cast<size_t>(y) * rowPitch;
+        BYTE* destinationRow = pixels.data() + static_cast<size_t>(y) * tightPitch;
+        memcpy(destinationRow, sourceRow, tightPitch);
+        if (!sourceIsBgra) {
+            for (size_t x = 0; x < tightPitch; x += 4)
+                std::swap(destinationRow[x], destinationRow[x + 2]);
+        }
     }
 
     if (!OpenClipboard(g_minecraftHwnd.load())) {
         Log("ERROR: Could not open clipboard.");
-        return;
+        return false;
     }
     if (!EmptyClipboard()) {
         Log("ERROR: Could not empty clipboard.");
         CloseClipboard();
-        return;
+        return false;
     }
 
     if (pixels.size() > (std::numeric_limits<SIZE_T>::max)() - sizeof(BITMAPINFOHEADER)) {
         Log("ERROR: Screenshot clipboard payload size overflowed for dimensions " + std::to_string(width) + "x" +
             std::to_string(height) + ".");
         CloseClipboard();
-        return;
+        return false;
     }
 
     HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, sizeof(BITMAPINFOHEADER) + pixels.size());
     if (!hMem) {
         Log("ERROR: GlobalAlloc failed.");
         CloseClipboard();
-        return;
+        return false;
     }
 
     LPVOID pMem = GlobalLock(hMem);
@@ -3233,13 +3282,15 @@ void ScreenshotToClipboard(int width, int height) {
         Log("ERROR: GlobalLock failed.");
         GlobalFree(hMem);
         CloseClipboard();
-        return;
+        return false;
     }
 
     BITMAPINFOHEADER bih = { 0 };
     bih.biSize = sizeof(BITMAPINFOHEADER);
     bih.biWidth = width;
-    bih.biHeight = height;
+    // Positive DIB height is bottom-up (the OpenGL source); negative height is
+    // top-down (the Vulkan framebuffer source).
+    bih.biHeight = sourceIsTopDown ? -height : height;
     bih.biPlanes = 1;
     bih.biBitCount = 32;
     bih.biCompression = BI_RGB;
@@ -3251,75 +3302,38 @@ void ScreenshotToClipboard(int width, int height) {
     if (!SetClipboardData(CF_DIB, hMem)) {
         Log("ERROR: SetClipboardData failed with error code: " + std::to_string(GetLastError()));
         GlobalFree(hMem);
+        CloseClipboard();
+        return false;
     } else {
         Log("Screenshot copied to clipboard.");
     }
     CloseClipboard();
+    return true;
 }
 
-void BackupConfigFile() {
-    PROFILE_SCOPE_CAT("Config Backup", "IO Operations");
-
-    if (g_toolscreenPath.empty()) {
-        Log("Cannot backup config, toolscreen path is not available.");
+void ScreenshotToClipboard(int width, int height) {
+    PROFILE_SCOPE_CAT("Screenshot to Clipboard", "System");
+    if (width <= 0 || height <= 0) {
+        Log("ERROR: Screenshot request rejected due to invalid dimensions " +
+            std::to_string(width) + "x" + std::to_string(height) + ".");
         return;
     }
-
-    std::wstring configPath = g_toolscreenPath + L"\\config.toml";
-    std::wstring backupDir = g_toolscreenPath + L"\\backups";
-
-    if (GetFileAttributesW(configPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        Log("Config file does not exist, skipping backup.");
+    size_t bufferSize = 0;
+    if (!TryComputeImageByteCount(width, height, 4, bufferSize) ||
+        bufferSize > kMaxScreenshotBytes) {
+        Log("ERROR: Screenshot request rejected because its pixel buffer is invalid or too large.");
         return;
     }
-
-    CreateDirectoryW(backupDir.c_str(), NULL);
-
-    auto now = std::chrono::system_clock::now();
-    auto timestamp = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
-
-    std::wstring backupFileName = backupDir + L"\\config_" + std::to_wstring(timestamp) + L".toml";
-
-    if (CopyFileW(configPath.c_str(), backupFileName.c_str(), FALSE)) {
-        Log("Config backed up to: " + WideToUtf8(backupFileName));
-
-        WIN32_FIND_DATAW findData;
-        std::vector<std::pair<FILETIME, std::wstring>> backupFiles;
-
-        std::wstring searchPattern = backupDir + L"\\config_*.toml";
-        HANDLE hFind = FindFirstFileW(searchPattern.c_str(), &findData);
-
-        if (hFind != INVALID_HANDLE_VALUE) {
-            do {
-                if (!(findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-                    std::wstring fileName = findData.cFileName;
-                    if (fileName.find(L"config_") == 0 && fileName.find(L".toml") != std::wstring::npos) {
-                        std::wstring fullPath = backupDir + L"\\" + fileName;
-                        backupFiles.push_back(std::make_pair(findData.ftLastWriteTime, fullPath));
-                    }
-                }
-            } while (FindNextFileW(hFind, &findData));
-            FindClose(hFind);
-        }
-
-        std::sort(backupFiles.begin(), backupFiles.end(),
-                  [](const std::pair<FILETIME, std::wstring>& a, const std::pair<FILETIME, std::wstring>& b) {
-                      return CompareFileTime(&a.first, &b.first) > 0;
-                  });
-
-        if (backupFiles.size() > 50) {
-            for (size_t i = 50; i < backupFiles.size(); i++) {
-                if (DeleteFileW(backupFiles[i].second.c_str())) {
-                    Log("Deleted old backup: " + WideToUtf8(backupFiles[i].second));
-                } else {
-                    Log("Failed to delete old backup: " + WideToUtf8(backupFiles[i].second));
-                }
-            }
-        }
-    } else {
-        DWORD error = GetLastError();
-        Log("Failed to backup config file. Error code: " + std::to_string(error));
-    }
+    std::vector<BYTE> pixels(bufferSize);
+    GLint previousPackRowLength = 0;
+    glGetIntegerv(GL_PACK_ROW_LENGTH, &previousPackRowLength);
+    glReadBuffer(GL_BACK);
+    glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+    glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE,
+                 pixels.data());
+    glPixelStorei(GL_PACK_ROW_LENGTH, previousPackRowLength);
+    ScreenshotPixelsToClipboard(pixels.data(), width, height,
+                                static_cast<size_t>(width) * 4u, false, false);
 }
 
 UINT GetToolscreenBorderlessToggleMessageId() {
@@ -3413,6 +3427,7 @@ bool CenterWindowedRestoreOnCurrentMonitor(HWND hwnd, const char* source) {
 
 bool RequestWindowClientResize(HWND hwnd, int width, int height, const char* source) {
     if (!hwnd || !IsWindow(hwnd) || width <= 0 || height <= 0) { return false; }
+    if (!IsResolutionChangeSupported(g_gameVersion)) { return false; }
 
     static std::mutex s_resizeRequestMutex;
     static HWND s_lastHwnd = nullptr;
@@ -3436,6 +3451,18 @@ bool RequestWindowClientResize(HWND hwnd, int width, int height, const char* sou
         return false;
     }
 
+    // The window procedure validates the GLFW generation and owner thread
+    // before replaying.  Post unconditionally so native Vulkan works when a
+    // launcher does not expose a version flag; ordinary WGL windows simply
+    // reject the message without invoking GLFW.
+    if (!PostMessage(hwnd, WM_TOOLSCREEN_INVOKE_GLFW_RESIZE_CALLBACKS, static_cast<WPARAM>(width), static_cast<LPARAM>(height))) {
+        DWORD err = GetLastError();
+        std::string src = source ? source : "unknown";
+        Log("[WINDOW] Failed to post GLFW resize callback request (" + src + "): " + std::to_string(width) + "x" +
+            std::to_string(height) + ", error=" + std::to_string(err));
+        return false;
+    }
+
     s_lastHwnd = hwnd;
     s_lastWidth = width;
     s_lastHeight = height;
@@ -3451,7 +3478,7 @@ static void RequestCurrentModeClientResizeSync(HWND hwnd, const char* source) {
     auto cfgSnap = GetConfigSnapshot();
     if (!cfgSnap) { return; }
 
-    const std::string currentModeId = g_modeIdBuffers[g_currentModeIdIndex.load(std::memory_order_acquire)];
+    const std::string currentModeId = GetPublishedCurrentModeId();
     const ModeConfig* mode = GetModeFromSnapshotOrFallback(*cfgSnap, currentModeId);
     if (!mode || mode->width <= 0 || mode->height <= 0) { return; }
 

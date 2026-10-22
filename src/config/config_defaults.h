@@ -16,6 +16,10 @@ constexpr float COLOR_WHITE_G = 1.0f;
 constexpr float COLOR_WHITE_B = 1.0f;
 
 inline const std::string BACKGROUND_SELECTED_MODE = "color";
+inline const std::string BACKGROUND_IMAGE_FIT = "stretch";
+constexpr float BACKGROUND_IMAGE_CENTER_SCALE = 1.0f;
+constexpr float BACKGROUND_IMAGE_TILE_SCALE = 1.0f;
+constexpr int BACKGROUND_IMAGE_TILE_SPACING = 0;
 
 constexpr int MIRROR_CAPTURE_X = 0;
 constexpr int MIRROR_CAPTURE_Y = 0;
@@ -213,7 +217,7 @@ constexpr DWORD KEY_REBIND_SHIFT_LAYER_OUTPUT_UNICODE = 0;
 constexpr bool KEY_REBIND_SHIFT_LAYER_OUTPUT_SHIFTED = false;
 
 constexpr bool KEY_REBINDS_ENABLED = false;
-constexpr bool KEY_REBINDS_RESOLVE_REBIND_TARGETS_FOR_HOTKEYS = true;
+constexpr bool KEY_REBINDS_RESOLVE_REBIND_TARGETS_FOR_HOTKEYS = false;
 constexpr bool KEY_REBINDS_ALLOW_SYSTEM_ALT_TAB = false;
 constexpr int KEY_REBINDS_INDICATOR_MODE = 0;
 constexpr int KEY_REBINDS_INDICATOR_POSITION = 1;
@@ -249,6 +253,8 @@ constexpr bool CONFIG_BASIC_MODE_ENABLED = false;
 constexpr bool CONFIG_RESTORE_WINDOWED_MODE_ON_FULLSCREEN_EXIT = true;
 constexpr bool CONFIG_DISABLE_FULLSCREEN_PROMPT = false;
 constexpr bool CONFIG_DISABLE_CONFIGURE_PROMPT = false;
+constexpr int STARTUP_INDICATOR_MODE = 1;
+inline const std::string STARTUP_INDICATOR_IMAGE_PATH = "";
 inline const std::string CONFIG_MIRROR_MATCH_COLORSPACE = "Auto";
 inline const std::string CONFIG_NINJABRAIN_API_BASE_URL = "http://127.0.0.1:52533";
 
