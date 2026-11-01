@@ -654,8 +654,15 @@ bool ShouldCaptureVirtualCameraFrame() {
 
     LONGLONG observed = g_vcLastCaptureTick.load(std::memory_order_relaxed);
     while (true) {
-        if (observed != 0 && (now.QuadPart - observed) < minTicks) { return false; }
-        if (g_vcLastCaptureTick.compare_exchange_weak(observed, now.QuadPart, std::memory_order_acq_rel, std::memory_order_relaxed)) {
+        LONGLONG desired = now.QuadPart;
+        if (observed != 0) {
+            const LONGLONG elapsed = now.QuadPart - observed;
+            if (elapsed < minTicks) { return false; }
+            // Advance the schedule by one interval rather than to now, so a frame that lands late does not
+            // push every later capture back. Resync after a stall longer than one interval.
+            if (elapsed < minTicks * 2) { desired = observed + minTicks; }
+        }
+        if (g_vcLastCaptureTick.compare_exchange_weak(observed, desired, std::memory_order_acq_rel, std::memory_order_relaxed)) {
             return true;
         }
     }
