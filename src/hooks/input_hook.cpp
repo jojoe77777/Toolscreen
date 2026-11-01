@@ -2230,6 +2230,10 @@ InputHandlerResult HandleActivate(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lP
     PROFILE_SCOPE("HandleActivate");
     (void)lParam;
 
+    // Focus tracking is live from here on; a deferred initial apply would only fight this message.
+    extern std::atomic<bool> g_pendingInitialInputStateApply;
+    g_pendingInitialInputStateApply.store(false, std::memory_order_release);
+
     const bool ownsForeground = becameActive && IsWindowInForegroundTree(hWnd);
 
     if (becameInactive) {

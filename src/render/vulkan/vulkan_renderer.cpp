@@ -40,6 +40,7 @@
 #include <vector>
 
 extern bool SubclassGameWindow(HWND hwnd);
+extern void ApplyPendingInitialInputState(HWND hwnd);
 extern std::atomic<bool> g_configLoaded;
 
 namespace {
@@ -7125,6 +7126,7 @@ bool RecordAfterFinalBlit(const FinalBlitContext& context, PFN_vkCmdBlitImage or
         SubclassGameWindow(g_state.hwnd);
         g_state.lastSubclassCheck = subclassCheckNow;
     }
+    ApplyPendingInitialInputState(g_state.hwnd);
 
     const Config* cfg = nullptr;
     auto cfgSnapshot = GetConfigSnapshot();

@@ -310,6 +310,9 @@ std::atomic<int> g_currentGameStateIndex{ 0 };
 const ModeConfig* g_currentMode = nullptr;
 
 std::atomic<bool> g_gameWindowActive{ false };
+// Set when the window was subclassed while in the background, cleared by the first focus message the
+// subclassed procedure sees or by ApplyPendingInitialInputState.
+std::atomic<bool> g_pendingInitialInputStateApply{ false };
 
 std::thread g_monitorThread;
 std::thread g_imageMonitorThread;
@@ -446,10 +449,14 @@ bool SubclassGameWindow(HWND hwnd) {
         g_originalWndProc = oldProc;
         g_subclassedHwnd.store(hwnd);
         if (IsWindowInForegroundTree(hwnd)) {
+            g_pendingInitialInputStateApply.store(false, std::memory_order_release);
             g_gameWindowActive.store(true, std::memory_order_release);
             ApplyWindowsMouseSpeed();
             ApplyKeyRepeatSettings();
             ApplyConfineCursorToGameWindow();
+        } else {
+            // The activation message may already have gone to the previous window procedure.
+            g_pendingInitialInputStateApply.store(true, std::memory_order_release);
         }
         Log("Successfully subclassed window: " + std::to_string(reinterpret_cast<uintptr_t>(hwnd)));
         return true;
@@ -457,6 +464,22 @@ bool SubclassGameWindow(HWND hwnd) {
         Log("ERROR: Failed to subclass window: " + std::to_string(reinterpret_cast<uintptr_t>(hwnd)));
         return false;
     }
+}
+
+// Called once per presented frame by the active renderer. Applies the global input state that
+// SubclassGameWindow deferred, once the window reaches the foreground without a focus message.
+void ApplyPendingInitialInputState(HWND hwnd) {
+    if (!g_pendingInitialInputStateApply.load(std::memory_order_acquire)) return;
+    if (hwnd == NULL || hwnd != g_subclassedHwnd.load(std::memory_order_acquire) || !IsWindowInForegroundTree(hwnd)) return;
+    if (!g_pendingInitialInputStateApply.exchange(false, std::memory_order_acq_rel)) return;
+
+    extern std::atomic<bool> g_isGameFocused;
+    g_isGameFocused.store(true, std::memory_order_release);
+    g_gameWindowActive.store(true, std::memory_order_release);
+    ApplyWindowsMouseSpeed();
+    ApplyKeyRepeatSettings();
+    ApplyConfineCursorToGameWindow();
+    Log("Applied deferred input state: the game window reached the foreground without a focus message.");
 }
 
 template <typename T> bool CreateHookOrDie(LPVOID pTarget, LPVOID pDetour, T** ppOriginal, const char* hookName) {
@@ -3985,6 +4008,7 @@ static BOOL SwapBuffersHook_Impl(WGLSWAPBUFFERS next, HDC hDc) {
             PROFILE_SCOPE_CAT("Window Subclassing", "SwapBuffers");
             SubclassGameWindow(hwnd);
         }
+        ApplyPendingInitialInputState(hwnd);
 
         {
             bool showTextureGrid = frameCfg.debug.showTextureGrid;
