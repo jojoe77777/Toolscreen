@@ -3003,6 +3003,8 @@ struct SdlMouseMotionEventCompat {
 };
 static_assert(offsetof(SdlMouseMotionEventCompat, xrel) == 36 && offsetof(SdlMouseMotionEventCompat, yrel) == 40,
               "SDL_MouseMotionEvent layout");
+static_assert(offsetof(SdlMouseMotionEventCompat, x) == 28 && offsetof(SdlMouseMotionEventCompat, y) == 32,
+              "SDL_MouseMotionEvent layout");
 
 // GLFW's disabled cursor reads WM_INPUT through GetRawInputData, which hkGetRawInputData scales. SDL3's relative
 // mode reads raw input on its own thread through GetRawInputBuffer, so scale the deltas it queues instead.
@@ -3018,11 +3020,26 @@ static void ApplySensitivityToSdlMotion(void* event) {
     motion->yrel *= sensitivityY;
 }
 
+// SDL_MouseMotionEvent and SDL_MouseButtonEvent both keep the cursor position at offsets 28 and 32.
+static void ApplyTranslatedSdlMousePoint(void* event) {
+    float x = 0.0f;
+    float y = 0.0f;
+    if (!TryGetSdlTranslatedMousePoint(x, y)) return;
+    auto* bytes = static_cast<char*>(event);
+    std::memcpy(bytes + offsetof(SdlMouseMotionEventCompat, x), &x, sizeof(x));
+    std::memcpy(bytes + offsetof(SdlMouseMotionEventCompat, y), &y, sizeof(y));
+}
+
 // Runs on whichever thread queues the event, including SDL's raw input thread.
 static bool ToolscreenSdlEventFilter(void* userdata, void* event) {
     if (event && g_showGui.load(std::memory_order_acquire) &&
         ShouldBlockSdlEventWhileGuiOpen(*static_cast<const uint32_t*>(event))) {
         return false;
+    }
+    if (event) {
+        const uint32_t type = *static_cast<const uint32_t*>(event);
+        // SDL_EVENT_MOUSE_MOTION, SDL_EVENT_MOUSE_BUTTON_DOWN, SDL_EVENT_MOUSE_BUTTON_UP
+        if (type == 0x400 || type == 0x401 || type == 0x402) ApplyTranslatedSdlMousePoint(event);
     }
     if (event && *static_cast<const uint32_t*>(event) == 0x400) { // SDL_EVENT_MOUSE_MOTION
         ApplySensitivityToSdlMotion(event);
@@ -3182,6 +3199,23 @@ union SdlWindowEventCompat {
 };
 
 // Must run on the SDL window's thread (the subclassed window procedure).
+// SDL logical units per client pixel of the tracked SDL3 window, or false when hwnd is not that window. Mode sizes
+// reach Minecraft scaled by the same ratio (see PushSdlGameWindowResize).
+bool GetSdlWindowUnitsPerClientPixel(HWND hwnd, int clientWidth, int clientHeight, float& outX, float& outY) {
+    if (!sdlGetWindowSizeProc || clientWidth <= 0 || clientHeight <= 0) return false;
+    void* window = nullptr;
+    HWND trackedHwnd = NULL;
+    uint64_t generation = 0;
+    bool noApi = false;
+    if (!GetTrackedSdlWindow(window, trackedHwnd, generation, noApi) || trackedHwnd != hwnd) return false;
+    int windowWidth = 0;
+    int windowHeight = 0;
+    if (!sdlGetWindowSizeProc(window, &windowWidth, &windowHeight) || windowWidth <= 0 || windowHeight <= 0) return false;
+    outX = static_cast<float>(windowWidth) / static_cast<float>(clientWidth);
+    outY = static_cast<float>(windowHeight) / static_cast<float>(clientHeight);
+    return true;
+}
+
 bool PushSdlGameWindowResize(HWND hwnd, int width, int height, int clientWidth, int clientHeight) {
     if (!sdlPushEventProc || !sdlGetWindowIdProc || width <= 0 || height <= 0) return false;
 

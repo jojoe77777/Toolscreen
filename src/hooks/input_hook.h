@@ -81,6 +81,9 @@ InputHandlerResult HandleHotkeys(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
                                  const std::string& gameState);
 
 InputHandlerResult HandleMouseCoordinateTranslationPhase(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM& lParam);
+// While SDL3's window procedure handles a mouse message Toolscreen translated, the point the game should get, in
+// the logical units of the mode-sized window Minecraft believes it has. False on other threads and messages.
+bool TryGetSdlTranslatedMousePoint(float& x, float& y);
 
 // Inverse of HandleMouseCoordinateTranslationPhase: maps a point in the game's client space (the mode size the
 // game believes its window is) to where it is presented in the real window's client area.

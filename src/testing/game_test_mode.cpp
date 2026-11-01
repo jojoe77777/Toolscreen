@@ -1692,6 +1692,165 @@ void TestSdlWarpLandsInPresentedGame() {
                 " (client " + std::to_string(result.client.right) + "x" + std::to_string(result.client.bottom) + ").");
 }
 
+// In EyeZoom the game is far taller than the real window. With the cursor visible, Toolscreen maps mouse messages into
+// the game's coordinates. SDL3 clamps its cursor to the real window, so the game must still get the full EyeZoom
+// point, and the click must keep a window (Minecraft's MouseHandler ignores events with windowID 0).
+void TestEyeZoomClickReachesGamePoint() {
+    HMODULE sdl = GetModuleHandleW(L"SDL3.dll");
+    if (!sdl) Skip("The game does not use SDL3.");
+    if (!IsResolutionChangeSupported(g_gameVersion)) Skip("Resolution changes are not supported on this game version.");
+    using SdlEventFilter = bool (*)(void* userdata, void* event);
+    const auto addEventWatch = reinterpret_cast<bool (*)(SdlEventFilter, void*)>(GetProcAddress(sdl, "SDL_AddEventWatch"));
+    const auto removeEventWatch = reinterpret_cast<void (*)(SdlEventFilter, void*)>(GetProcAddress(sdl, "SDL_RemoveEventWatch"));
+    const auto setRelativeMouseMode =
+        reinterpret_cast<bool (*)(void*, bool)>(GetProcAddress(sdl, "SDL_SetWindowRelativeMouseMode"));
+    const auto getRelativeMouseMode = reinterpret_cast<bool (*)(void*)>(GetProcAddress(sdl, "SDL_GetWindowRelativeMouseMode"));
+    const auto getWindowSize = reinterpret_cast<bool (*)(void*, int*, int*)>(GetProcAddress(sdl, "SDL_GetWindowSize"));
+    Require(addEventWatch && removeEventWatch && setRelativeMouseMode && getRelativeMouseMode && getWindowSize,
+            "SDL3 is missing the event-watch, relative-mouse or window-size API.");
+    Require(WaitUntil([] { return g_lastSdlCursorWindow.load(std::memory_order_acquire) != nullptr; }, std::chrono::seconds(20)),
+            "Toolscreen never tracked the SDL window.");
+    void* window = g_lastSdlCursorWindow.load(std::memory_order_acquire);
+    Require(WaitUntil([] { return g_subclassedHwnd.load(std::memory_order_acquire) != NULL; }, std::chrono::seconds(20)),
+            "Toolscreen never subclassed the game window.");
+    const HWND hwnd = g_subclassedHwnd.load(std::memory_order_acquire);
+    if (s_gameWindow) SetForegroundWindow(s_gameWindow);
+    if (!WaitUntil([&] { return IsWindowInForegroundTree(hwnd); }, std::chrono::seconds(2))) {
+        Skip("The game window is not in the foreground, so the cursor is not translated.");
+    }
+
+    struct MouseEvents {
+        std::atomic<int> motions{ 0 };
+        std::atomic<int> focusedMotions{ 0 };
+        std::atomic<int> presses{ 0 };
+        std::atomic<uint32_t> pressWindowId{ 0 };
+        std::atomic<float> motionX{ 0.0f };
+        std::atomic<float> motionY{ 0.0f };
+        std::atomic<float> pressX{ 0.0f };
+        std::atomic<float> pressY{ 0.0f };
+    };
+    static MouseEvents s_events;
+    const SdlEventFilter watch = [](void*, void* event) -> bool {
+        const auto* bytes = static_cast<const char*>(event);
+        uint32_t type = 0;
+        uint32_t windowId = 0;
+        std::memcpy(&type, bytes, sizeof(type));
+        std::memcpy(&windowId, bytes + 16, sizeof(windowId));
+        if (type == 0x400) { // SDL_EVENT_MOUSE_MOTION
+            float x = 0.0f;
+            float y = 0.0f;
+            std::memcpy(&x, bytes + 28, sizeof(x));
+            std::memcpy(&y, bytes + 32, sizeof(y));
+            s_events.motions.fetch_add(1);
+            if (windowId != 0) s_events.focusedMotions.fetch_add(1);
+            s_events.motionX.store(x);
+            s_events.motionY.store(y);
+        } else if (type == 0x401 && static_cast<uint8_t>(bytes[24]) == 3) { // SDL_EVENT_MOUSE_BUTTON_DOWN, SDL_BUTTON_RIGHT
+            float x = 0.0f;
+            float y = 0.0f;
+            std::memcpy(&x, bytes + 28, sizeof(x));
+            std::memcpy(&y, bytes + 32, sizeof(y));
+            s_events.pressX.store(x);
+            s_events.pressY.store(y);
+            s_events.pressWindowId.store(windowId);
+            s_events.presses.fetch_add(1);
+        }
+        return true;
+    };
+
+    const bool wasRelative = RunOnRenderThread([&] { return getRelativeMouseMode(window); });
+    const std::string defaultMode = DefaultModeId();
+    struct Sizes {
+        RECT client{};
+        int windowW = 0;
+        int windowH = 0;
+    };
+    Sizes sizes;
+    ModeViewportInfo geo;
+    bool watching = false;
+    const auto restore = [&] {
+        if (watching) removeEventWatch(watch, nullptr);
+        watching = false;
+        RunOnRenderThread([&] { return setRelativeMouseMode(window, wasRelative); });
+        SwitchModeOnRenderThread(defaultMode);
+    };
+    try {
+        Require(RunOnRenderThread([&] { return setRelativeMouseMode(window, false); }), "SDL_SetWindowRelativeMouseMode(false) failed.");
+        Require(SwitchModeOnRenderThread("EyeZoom"), "SwitchToMode refused EyeZoom.");
+        Require(WaitForPublishedMode("EyeZoom", std::chrono::seconds(5)), "EyeZoom was not published as current.");
+        Require(WaitForFrames(10, std::chrono::seconds(5)), "Frames stopped after entering EyeZoom.");
+        if (!WaitUntil([] { return IsCursorVisible(); }, std::chrono::seconds(2))) Skip("The cursor is hidden, so mouse messages are not translated.");
+        // The client size and SDL's window size are read on the game's thread so they share its DPI awareness.
+        sizes = RunOnRenderThread([&] {
+            Sizes result;
+            GetClientRect(hwnd, &result.client);
+            getWindowSize(window, &result.windowW, &result.windowH);
+            return result;
+        });
+        Require(sizes.client.right > 0 && sizes.client.bottom > 0 && sizes.windowW > 0 && sizes.windowH > 0,
+                "Could not read the client or SDL window size.");
+        geo = GetCurrentModeViewport();
+        Require(geo.valid && geo.stretchWidth > 0 && geo.stretchHeight > 0, "EyeZoom has no valid viewport.");
+        if (geo.height <= sizes.client.bottom) Skip("EyeZoom is not taller than the window here.");
+
+        s_events.motions.store(0);
+        s_events.focusedMotions.store(0);
+        s_events.presses.store(0);
+        s_events.pressWindowId.store(0);
+        Require(addEventWatch(watch, nullptr), "SDL_AddEventWatch failed.");
+        watching = true;
+
+        // A right click, so the title screen's buttons ignore it. The point is in client pixels as the game's
+        // thread sees them; Toolscreen's window procedure maps it into the EyeZoom game before SDL reads it.
+        const int clientX = sizes.client.right / 2;
+        const int clientY = sizes.client.bottom / 2;
+        const LPARAM point = MAKELPARAM(clientX, clientY);
+        for (int i = 0; i < 3; ++i) {
+            PostMessageW(hwnd, WM_MOUSEMOVE, 0, MAKELPARAM(clientX + i, clientY));
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        }
+        PostMessageW(hwnd, WM_MOUSEMOVE, 0, point);
+        PostMessageW(hwnd, WM_RBUTTONDOWN, MK_RBUTTON, point);
+        PostMessageW(hwnd, WM_RBUTTONUP, 0, point);
+        Require(WaitUntil([] { return s_events.presses.load() > 0; }, std::chrono::seconds(3)),
+                "SDL queued no right-button press for the posted click.");
+    } catch (...) {
+        restore();
+        throw;
+    }
+    restore();
+
+    // The point the window procedure should hand the game: the client point mapped into EyeZoom's pixels, in the
+    // logical units of the mode-sized window Toolscreen reports to Minecraft.
+    const int clientX = sizes.client.right / 2;
+    const int clientY = sizes.client.bottom / 2;
+    const auto gameAxis = [](int client, int stretchStart, int stretchSize, int gameSize) {
+        const int visibleStart = (std::max)(0, stretchStart);
+        const float scale = static_cast<float>(gameSize) / static_cast<float>(stretchSize);
+        return static_cast<int>(static_cast<float>(visibleStart - stretchStart) * scale +
+                                static_cast<float>(client - visibleStart) * scale);
+    };
+    const float expectedX = gameAxis(clientX, geo.stretchX, geo.stretchWidth, geo.width) *
+                            static_cast<float>(sizes.windowW) / static_cast<float>(sizes.client.right);
+    const float expectedY = gameAxis(clientY, geo.stretchY, geo.stretchHeight, geo.height) *
+                            static_cast<float>(sizes.windowH) / static_cast<float>(sizes.client.bottom);
+    const std::string detail = " (client " + std::to_string(sizes.client.right) + "x" + std::to_string(sizes.client.bottom) +
+                               ", SDL window " + std::to_string(sizes.windowW) + "x" + std::to_string(sizes.windowH) +
+                               ", motions " + std::to_string(s_events.motions.load()) + ", focused motions " +
+                               std::to_string(s_events.focusedMotions.load()) + ", last motion " +
+                               std::to_string(s_events.motionX.load()) + "," + std::to_string(s_events.motionY.load()) +
+                               ", press " + std::to_string(s_events.pressX.load()) + "," + std::to_string(s_events.pressY.load()) +
+                               ", expected " + std::to_string(expectedX) + "," + std::to_string(expectedY) + ")";
+    Log("[GAME TEST] EyeZoom click" + detail + ", press windowID " + std::to_string(s_events.pressWindowId.load()) + ".");
+    Require(s_events.pressWindowId.load() != 0,
+            "SDL sent the EyeZoom click with windowID 0, so Minecraft ignores it; SDL dropped mouse focus" + detail + ".");
+    Require(s_events.focusedMotions.load() > 0, "SDL sent no mouse motion with a window in EyeZoom" + detail + ".");
+    Require(std::abs(s_events.motionX.load() - expectedX) <= 2.0f && std::abs(s_events.motionY.load() - expectedY) <= 2.0f,
+            "The game got the EyeZoom cursor at the wrong point" + detail + ".");
+    Require(std::abs(s_events.pressX.load() - expectedX) <= 2.0f && std::abs(s_events.pressY.load() - expectedY) <= 2.0f,
+            "The game got the EyeZoom click at the wrong point" + detail + ".");
+}
+
 // Watches for a freeze from another thread while a test runs: the longest gap between hooked frames, and the longest
 // time the game window took to answer a message (its thread pumps SDL/GLFW events, so this is input latency).
 class FreezeWatchdog {
@@ -2182,6 +2341,7 @@ const TestCase kTests[] = {
     { "input.real_key_passes_through_once", &TestRealKeyPassesThroughOnce },
     { "input.sensitivity_override_scales_sdl_motion", &TestSensitivityOverrideScalesSdlMotion },
     { "input.sdl_warp_lands_in_presented_game", &TestSdlWarpLandsInPresentedGame },
+    { "input.eyezoom_click_reaches_game_point", &TestEyeZoomClickReachesGamePoint },
     { "input.responsive_through_eyezoom_toggles", &TestResponsiveThroughEyeZoomToggles },
     { "gui.toggle_renders_imgui", &TestGuiToggleRendersImGui },
     { "gui.obs_pass_reuses_screen_frame", &TestObsPassReusesScreenImGuiFrame },

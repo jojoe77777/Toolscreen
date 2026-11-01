@@ -2293,6 +2293,7 @@ InputHandlerResult HandleActivate(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lP
 }
 
 bool PushSdlGameWindowResize(HWND hwnd, int width, int height, int clientWidth, int clientHeight);
+bool GetSdlWindowUnitsPerClientPixel(HWND hwnd, int clientWidth, int clientHeight, float& outX, float& outY);
 
 // Minecraft 26.x runs on SDL3, which ignores WM_SIZE. Translate both
 // Toolscreen's posted mode-size WM_SIZE and the OS WM_SIZE that follows a real
@@ -3028,6 +3029,20 @@ bool MapGameClientPointToWindowClient(HWND hWnd, int& x, int& y) {
     return true;
 }
 
+struct SdlTranslatedMousePoint {
+    bool active = false;
+    float x = 0.0f;
+    float y = 0.0f;
+};
+static thread_local SdlTranslatedMousePoint t_sdlTranslatedMousePoint;
+
+bool TryGetSdlTranslatedMousePoint(float& x, float& y) {
+    if (!t_sdlTranslatedMousePoint.active) { return false; }
+    x = t_sdlTranslatedMousePoint.x;
+    y = t_sdlTranslatedMousePoint.y;
+    return true;
+}
+
 InputHandlerResult HandleMouseCoordinateTranslationPhase(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM& lParam) {
     // Only translate messages whose lParam is already in CLIENT coordinates.
     // Wheel messages use SCREEN coordinates and must not be transformed here.
@@ -3099,6 +3114,17 @@ InputHandlerResult HandleMouseCoordinateTranslationPhase(HWND hWnd, UINT uMsg, W
     if (newY < 0) newY = 0;
     if (newX >= geo.width) newX = geo.width - 1;
     if (newY >= geo.height) newY = geo.height - 1;
+
+    float sdlUnitsX = 0.0f;
+    float sdlUnitsY = 0.0f;
+    if (GetSdlWindowUnitsPerClientPixel(hWnd, clientW, clientH, sdlUnitsX, sdlUnitsY)) {
+        // SDL3 clamps its cursor to the real window, so in a mode larger than the window (EyeZoom) the game would
+        // get the point clamped to the window's edge. Give SDL the client point, and ToolscreenSdlEventFilter puts
+        // the game point into the events SDL queues while it handles this message.
+        t_sdlTranslatedMousePoint = { true, static_cast<float>(newX) * sdlUnitsX, static_cast<float>(newY) * sdlUnitsY };
+        lParam = MAKELPARAM(mouseX, mouseY);
+        return { false, 0 };
+    }
 
     lParam = MAKELPARAM(newX, newY);
     return { false, 0 };
@@ -6265,6 +6291,10 @@ LRESULT CALLBACK SubclassedWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
         break;
     }
 
+    // The translated SDL point belongs to this message only, however the message leaves.
+    struct SdlTranslatedMousePointScope {
+        ~SdlTranslatedMousePointScope() { t_sdlTranslatedMousePoint.active = false; }
+    } sdlTranslatedMousePointScope;
     result = HandleMouseCoordinateTranslationPhase(hWnd, uMsg, wParam, lParam);
     if (result.consumed) return result.result;
 
