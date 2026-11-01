@@ -11321,7 +11321,7 @@ void RenderNinjabrainOverlay(const NinjabrainOverlayConfig& nb, ImFont* font, co
         }
     }
 
-    if (numCols == 0 && !failedResult && !hasInformationMessages && !showBoatHeaderIcon) return;
+    if (numCols == 0 && !failedResult && !blindResult && !hasInformationMessages && !showBoatHeaderIcon) return;
 
     int maxRows = 0;
     for (int ci = 0; ci < numCols; ci++) maxRows = (std::max)(maxRows, cols[ci].rowCount);
