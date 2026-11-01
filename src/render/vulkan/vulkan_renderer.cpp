@@ -463,7 +463,6 @@ struct RendererState {
     uint32_t publishedObsCompositionSlot = UINT32_MAX;
     uint64_t nextObsCompositionSerial = 1;
     std::chrono::steady_clock::time_point lastObsCompositionUpdate{};
-    uint64_t obsCompositionThrottleCount = 0;
     std::array<CursorTrailPoint, 512> cursorTrailPoints{};
     size_t cursorTrailStart = 0;
     size_t cursorTrailCount = 0;
@@ -6606,17 +6605,10 @@ ObsCompositionSlot* BeginObsComposition(
          VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) == 0) {
         return nullptr;
     }
-    if (!virtualCameraCaptureRequested && !ShouldUpdateObsTextureNow()) {
-        ++g_state.obsCompositionThrottleCount;
-        if (ShouldLogObsCapture(g_lastObsCompositionLogTick)) {
-            Log("[VULKAN][OBS][COMPOSE] OBS FPS throttle reused the published "
-                "composition; throttledFrames=" +
-                std::to_string(g_state.obsCompositionThrottleCount) +
-                ", targetFps=" + std::to_string(GetObsTargetFramerate()) +
-                ".");
-        }
-        return nullptr;
-    }
+    // OBS samples on its own clock, which is not phase-locked to the game's
+    // presents. Throttling this pass to a separate wall clock makes OBS see
+    // the same composition twice, so compose once per game frame, as the
+    // OpenGL SwapBuffers path does.
 
     std::lock_guard lock(g_obsCompositionMutex);
     for (uint32_t attempt = 0; attempt < kObsCompositionSlotCount; ++attempt) {

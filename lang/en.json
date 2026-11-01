@@ -902,7 +902,7 @@
     "settings.tooltip.capture_fake_cursor": "Draws the current active game cursor texture into the OBS/Virtual Camera capture output without adding it to your own screen.",
     "settings.tooltip.delay_rendering_until_finished": "Calls glFinish() before SwapBuffers to ensure all GPU rendering is complete before presenting.",
     "settings.tooltip.fake_cursor": "Renders a fake cursor overlay at the current mouse position for debugging.",
-    "settings.tooltip.limit_capture_framerate": "When enabled, Toolscreen updates OBS capture at half the detected OBS sampling rate, but never below 60 fps.",
+    "settings.tooltip.limit_capture_framerate": "When enabled, the virtual camera captures at 30 fps instead of 60 fps. OBS game capture always updates once per game frame.",
     "settings.tooltip.profiler_scale": "Scale of the profiler overlay\n25% = tiny, 50% = half size, 100% = normal, 200% = double size",
     "settings.tooltip.restore_windowed_mode_on_fullscreen_exit": "When enabled, Toolscreen re-centers the game window to its windowed restore size after the game leaves a monitor-sized fullscreen or borderless state.",
     "settings.tooltip.video_cache_budget_mib": "Maximum memory budget used when loading MPEG videos.\nIf a video would need more than this amount, Toolscreen skips loading that video entirely.\nSet to Disabled to skip all MPEG video loads.",
