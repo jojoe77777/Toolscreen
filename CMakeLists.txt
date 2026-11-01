@@ -1349,6 +1349,11 @@ foreach(test_case IN LISTS TOOLSCREEN_GUI_INTEGRATION_TEST_CASES)
         toolscreen_integration_${test_name_suffix}
         PROPERTIES TIMEOUT ${TOOLSCREEN_GUI_INTEGRATION_CASE_TIMEOUT_SECONDS}
     )
+    # The rebind cases hold Shift or Caps Lock through SetKeyboardState. Windows carries that state across processes
+    # through the foreground input queue, so two of these cases running at once read each other's modifiers.
+    if(test_case MATCHES "^(key-rebind-|key-repeat-|hotkey-runtime-)")
+        set_tests_properties(toolscreen_integration_${test_name_suffix} PROPERTIES RESOURCE_LOCK toolscreen_keyboard_state)
+    endif()
 endforeach()
 
 set(TOOLSCREEN_GUI_INTEGRATION_TEST_GROUPS
@@ -1371,6 +1376,9 @@ foreach(test_group IN LISTS TOOLSCREEN_GUI_INTEGRATION_TEST_GROUPS)
             LABELS "gui-integration;group;${test_group}"
             TIMEOUT ${TOOLSCREEN_GUI_INTEGRATION_GROUP_TIMEOUT_SECONDS}
     )
+    if(test_group STREQUAL "rebind")
+        set_tests_properties(toolscreen_integration_group_${test_group_suffix} PROPERTIES RESOURCE_LOCK toolscreen_keyboard_state)
+    endif()
 endforeach()
 
 add_executable(toolscreen_interactive_create_tests
