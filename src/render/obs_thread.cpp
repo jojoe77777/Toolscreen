@@ -54,7 +54,6 @@ struct ObsRedirectValidationEntry {
 static constexpr size_t OBS_REDIRECT_VALIDATION_CACHE_SIZE = 8;
 static ObsRedirectValidationEntry g_obsRedirectValidationCache[OBS_REDIRECT_VALIDATION_CACHE_SIZE]{};
 static size_t g_obsRedirectValidationCacheNext = 0;
-static std::atomic<uint64_t> g_obsNextTextureUpdateTickUs{ 0 };
 static std::atomic<uint64_t> g_obsLastGameCaptureSampleTickUs{ 0 };
 static std::atomic<uint64_t> g_obsSmoothedGameCaptureIntervalUs{ 0 };
 
@@ -217,24 +216,6 @@ void WaitForObsOverrideTextureConsumer(GLuint texture) {
     if (glIsSync(fence)) { glDeleteSync(fence); }
 }
 
-bool ShouldUpdateObsTextureNow() {
-    const uint64_t nowUs = GetObsSteadyNowUs();
-    const int targetFramerate = GetObsTargetFramerate();
-    const uint64_t intervalUs = (1000000ull + static_cast<uint64_t>(targetFramerate) - 1ull) /
-                                static_cast<uint64_t>(targetFramerate);
-
-    uint64_t expectedUs = g_obsNextTextureUpdateTickUs.load(std::memory_order_acquire);
-    for (;;) {
-        if (expectedUs != 0 && nowUs < expectedUs) { return false; }
-
-        const uint64_t desiredUs = nowUs + intervalUs;
-        if (g_obsNextTextureUpdateTickUs.compare_exchange_weak(expectedUs, desiredUs, std::memory_order_acq_rel,
-                                                               std::memory_order_acquire)) {
-            return true;
-        }
-    }
-}
-
 int GetObsTargetFramerate() {
     const uint64_t lastSampleUs = g_obsLastGameCaptureSampleTickUs.load(std::memory_order_acquire);
     const uint64_t smoothedIntervalUs = g_obsSmoothedGameCaptureIntervalUs.load(std::memory_order_acquire);
@@ -246,10 +227,6 @@ int GetObsTargetFramerate() {
     }
 
     return ApplyObsCaptureFramerateLimit(CalculateObsTargetFramerate(smoothedIntervalUs));
-}
-
-void ResetObsTextureUpdateSchedule() {
-    g_obsNextTextureUpdateTickUs.store(0, std::memory_order_release);
 }
 
 static GLuint SelectObsRedirectTexture(GLsync& outFence, bool& outNeedsFenceWait, int& outWidth, int& outHeight) {
@@ -401,7 +378,6 @@ void ClearObsOverride() {
     g_obsOverrideTexture.store(0, std::memory_order_release);
     g_obsOverrideWidth.store(0, std::memory_order_release);
     g_obsOverrideHeight.store(0, std::memory_order_release);
-    ResetObsTextureUpdateSchedule();
     g_obsRedirectAttachedTexture = 0;
     g_obsRedirectAttachedWidth = 0;
     g_obsRedirectAttachedHeight = 0;

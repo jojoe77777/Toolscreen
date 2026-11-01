@@ -34,8 +34,6 @@ bool TryObsBlitFramebufferRedirect(GLint readFBO,
 						   GLbitfield mask,
 						   GLenum filter);
 
-void CaptureBackbufferForObs(int width, int height);
-
 // Set the override texture published by the synchronous OBS compose path.
 void SetObsOverrideTexture(GLuint texture, int width, int height);
 
@@ -47,18 +45,11 @@ void WaitForObsOverrideTextureConsumer(GLuint texture);
 
 void ClearObsOverride();
 
-bool ShouldUpdateObsTextureNow();
-
 int GetObsTargetFramerate();
-
-void ResetObsTextureUpdateSchedule();
 
 void EnableObsOverride();
 
 bool IsObsHookDetected();
 
-GLuint GetObsCaptureTexture();
-int GetObsCaptureWidth();
-int GetObsCaptureHeight();
 
 

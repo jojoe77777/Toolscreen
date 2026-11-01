@@ -9711,8 +9711,6 @@ void RenderTextureGridOverlay(bool showTextureGrid, int modeWidth, int modeHeigh
         // OBS textures
         GLuint obsOverride = g_obsOverrideTexture.load(std::memory_order_acquire);
         if (obsOverride != 0) ourTextureIds.insert(obsOverride);
-        GLuint obsCapture = GetObsCaptureTexture();
-        if (obsCapture != 0) ourTextureIds.insert(obsCapture);
 
         // Mirror instance textures (try_lock to avoid blocking)
         {
