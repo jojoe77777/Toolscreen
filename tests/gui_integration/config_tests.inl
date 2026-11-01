@@ -27,6 +27,27 @@ void RunConfigDefaultLoadTest(TestRunMode runMode = TestRunMode::Automated) {
         Expect(!g_config.ninjabrainOverlay.hideIfStale && g_config.ninjabrainOverlay.hideIfStaleDelaySeconds == 30,
             "Expected default config load to use the default stale-hide Ninjabrain settings.");
 
+    // The embedded default.toml has no outputScaleAppliesInGroups keys, so its mirrors keep multiplying their own
+    // scale by the group item % and the Preemptive Pie group keeps its size.
+    const auto pieGroup = std::find_if(g_config.mirrorGroups.begin(), g_config.mirrorGroups.end(),
+                                       [](const MirrorGroupConfig& group) { return group.name == "Preemptive Pie"; });
+    Expect(pieGroup != g_config.mirrorGroups.end(), "Expected the default config to contain the Preemptive Pie mirror group.");
+    if (pieGroup != g_config.mirrorGroups.end()) {
+        for (const MirrorGroupItem& item : pieGroup->mirrors) {
+            const auto mirror = std::find_if(g_config.mirrors.begin(), g_config.mirrors.end(),
+                                             [&](const MirrorConfig& candidate) { return candidate.name == item.mirrorId; });
+            if (mirror == g_config.mirrors.end()) continue;
+            Expect(mirror->outputScaleAppliesInGroups, "Expected default mirrors to keep their output scale inside groups.");
+            const MirrorConfig grouped = BuildGroupedMirrorConfig(*mirror, *pieGroup, item, kWindowWidth, kWindowHeight);
+            if (item.mirrorId == "Pie") {
+                ExpectFloatNear(grouped.output.scaleX, 0.76f, "Expected the default grouped Pie mirror to keep its X scale.");
+                ExpectFloatNear(grouped.output.scaleY, 1.5f, "Expected the default grouped Pie mirror to keep its Y scale.");
+            } else if (item.mirrorId == "blockentities left") {
+                ExpectFloatNear(grouped.output.scaleX, 8.0f, "Expected the default grouped block entities mirror to keep its scale.");
+            }
+        }
+    }
+
     if (runMode == TestRunMode::Visual) {
         RunVisualLoop(window, "config-default-load", &RenderInteractiveSettingsFrame);
     }
@@ -239,6 +260,65 @@ void RunConfigLoadNinjabrainOverlaySliderRangeTest(TestRunMode runMode = TestRun
                               ExpectFloatNear(padding, kNinjabrainOverlayPaddingMax,
                                               "Expected Ninjabrain overlay paddings at the slider maximum to survive a reload.");
                           }
+                      },
+                      runMode);
+}
+
+void RunConfigLoadMirrorGroupScaleFlagTest(TestRunMode runMode = TestRunMode::Automated) {
+    RunConfigLoadCase("config_load_mirror_group_scale_flag",
+                      []() {
+                          WriteRawConfigTomlToDisk(R"(configVersion = 6
+defaultMode = "Grouped"
+
+[[mirror]]
+name = "Older Mirror"
+captureWidth = 20
+captureHeight = 10
+output = { relativeTo = "topLeftScreen", scale = 4.0, scaleX = 1.0, scaleY = 1.0, separateScale = false, x = 0, y = 0 }
+
+[[mirror]]
+name = "Newer Mirror"
+captureWidth = 20
+captureHeight = 10
+outputScaleAppliesInGroups = false
+output = { relativeTo = "topLeftScreen", scale = 4.0, scaleX = 1.0, scaleY = 1.0, separateScale = false, x = 0, y = 0 }
+
+[[mirrorGroup]]
+name = "Group"
+mirrors = [
+    { enabled = true, heightPercent = 0.5, mirrorId = "Older Mirror", offsetX = 0, offsetY = 0, widthPercent = 0.5 },
+    { enabled = true, heightPercent = 0.5, mirrorId = "Newer Mirror", offsetX = 0, offsetY = 40, widthPercent = 0.5 }
+]
+output = { relativeTo = "topLeftScreen", scale = 1.0, scaleX = 1.0, scaleY = 1.0, separateScale = false, x = 0, y = 0 }
+
+[[mode]]
+id = "Grouped"
+width = 800
+height = 600
+sources = [ { type = "mirrorGroup", id = "Group" } ]
+)");
+                      },
+                      []() {
+                          ExpectConfigLoadSucceeded("config-load-mirror-group-scale-flag");
+                          Expect(g_config.mirrors.size() == 2, "Expected both mirrors to load.");
+                          Expect(g_config.mirrors[0].outputScaleAppliesInGroups,
+                                 "Expected a mirror without outputScaleAppliesInGroups to keep its scale inside groups.");
+                          Expect(!g_config.mirrors[1].outputScaleAppliesInGroups,
+                                 "Expected outputScaleAppliesInGroups = false to load as written.");
+                          Expect(!MirrorConfig{}.outputScaleAppliesInGroups,
+                                 "Expected a newly created mirror to be sized by the group item alone.");
+
+                          std::vector<MirrorConfig> activeMirrors;
+                          std::vector<ImageConfig> unusedImages;
+                          std::vector<const WindowOverlayConfig*> unusedWindowOverlays;
+                          std::vector<const BrowserOverlayConfig*> unusedBrowserOverlays;
+                          CollectActiveElementsForMode(g_config, "Grouped", false, 0, activeMirrors, unusedImages, unusedWindowOverlays,
+                                                       unusedBrowserOverlays);
+                          Expect(activeMirrors.size() == 2, "Expected both grouped mirrors to resolve.");
+                          ExpectFloatNear(activeMirrors[0].output.scaleX, 2.0f,
+                                          "Expected the older mirror to multiply its 4x scale by the 50% item width.");
+                          ExpectFloatNear(activeMirrors[1].output.scaleX, 0.5f,
+                                          "Expected the newer mirror to take its width from the 50% item alone.");
                       },
                       runMode);
 }

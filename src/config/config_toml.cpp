@@ -955,6 +955,7 @@ void MirrorConfigToToml(const MirrorConfig& cfg, toml::table& out) {
     out.insert("gradient", gradientTbl);
 
     out.insert("onlyOnMyScreen", cfg.onlyOnMyScreen);
+    out.insert("outputScaleAppliesInGroups", cfg.outputScaleAppliesInGroups);
 }
 
 void MirrorConfigFromToml(const toml::table& tbl, MirrorConfig& cfg) {
@@ -997,6 +998,8 @@ void MirrorConfigFromToml(const toml::table& tbl, MirrorConfig& cfg) {
         cfg.gradient = GradientConfig{};
     }
     cfg.onlyOnMyScreen = GetOr(tbl, "onlyOnMyScreen", ConfigDefaults::MIRROR_ONLY_ON_MY_SCREEN);
+    // A mirror saved before this key existed was sized in groups by its own scale times the item %; keep it that way.
+    cfg.outputScaleAppliesInGroups = GetOr(tbl, "outputScaleAppliesInGroups", true);
 }
 
 void MirrorGroupItemToToml(const MirrorGroupItem& item, toml::table& out) {
@@ -3096,6 +3099,7 @@ const std::vector<std::string>& GetMirrorTomlKeys() {
         "gradientOutput",
         "gradient",
         "onlyOnMyScreen",
+        "outputScaleAppliesInGroups",
         "debug",
     };
     return keys;

@@ -1147,6 +1147,7 @@ set(TOOLSCREEN_GUI_INTEGRATION_TEST_CASES
     config-load-embedded-ninjabrain-presets
     config-load-bundled-font-paths-normalized
     config-load-ninjabrain-overlay-slider-range
+    config-load-mirror-group-scale-flag
     config-load-missing-required-modes
     config-load-invalid-hotkey-mode-references
     config-load-relative-mode-dimensions

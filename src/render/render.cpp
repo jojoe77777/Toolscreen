@@ -300,8 +300,8 @@ struct ActiveModeSourceEntry {
     const BrowserOverlayConfig* browserOverlay = nullptr;
 };
 
-static MirrorConfig BuildGroupedMirrorConfig(const MirrorConfig& mirror, const MirrorGroupConfig& group, const MirrorGroupItem& item,
-                                             int screenW, int screenH) {
+MirrorConfig BuildGroupedMirrorConfig(const MirrorConfig& mirror, const MirrorGroupConfig& group, const MirrorGroupItem& item, int screenW,
+                                      int screenH) {
     MirrorConfig groupedMirror = mirror;
 
     int groupX = group.output.x;
@@ -319,13 +319,15 @@ static MirrorConfig BuildGroupedMirrorConfig(const MirrorConfig& mirror, const M
     groupedMirror.output.relativeY = group.output.relativeY;
     groupedMirror.runtimeGrouped = true;
     groupedMirror.runtimeGroupName = group.name;
-    if (item.widthPercent != 1.0f || item.heightPercent != 1.0f) {
-        groupedMirror.output.separateScale = true;
-        float baseScaleX = mirror.output.separateScale ? mirror.output.scaleX : mirror.output.scale;
-        float baseScaleY = mirror.output.separateScale ? mirror.output.scaleY : mirror.output.scale;
-        groupedMirror.output.scaleX = baseScaleX * item.widthPercent;
-        groupedMirror.output.scaleY = baseScaleY * item.heightPercent;
-    }
+    // The item's width/height % is the whole scale, except for mirrors from older configs, which multiply it by
+    // their own output scale.
+    const bool useOwnScale = mirror.outputScaleAppliesInGroups;
+    const float baseScaleX = useOwnScale ? (mirror.output.separateScale ? mirror.output.scaleX : mirror.output.scale) : 1.0f;
+    const float baseScaleY = useOwnScale ? (mirror.output.separateScale ? mirror.output.scaleY : mirror.output.scale) : 1.0f;
+    groupedMirror.output.scale = 1.0f;
+    groupedMirror.output.separateScale = true;
+    groupedMirror.output.scaleX = baseScaleX * item.widthPercent;
+    groupedMirror.output.scaleY = baseScaleY * item.heightPercent;
 
     return groupedMirror;
 }
@@ -8222,11 +8224,22 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
                 bool isDirect = false;
                 for (const auto& src : modeToRender->sources) { if (src.type == ModeSourceType::Mirror && src.id == s_selectedMirrorName) { isDirect = true; break; } }
                 const bool isDrilledMember = !s_drilledInGroupName.empty();
+                // A member of the drilled-in group is sized by its group item, not by its own output scale.
+                auto findResizeGroupItem = [&](MirrorGroupConfig*& outGroup) -> MirrorGroupItem* {
+                    outGroup = nullptr;
+                    if (isDirect || !isDrilledMember) return nullptr;
+                    MirrorGroupConfig* grp = FindMutableMirrorGroupByName(s_drilledInGroupName);
+                    if (!grp) return nullptr;
+                    for (auto& item : grp->mirrors) { if (item.mirrorId == s_selectedMirrorName) { outGroup = grp; return &item; } }
+                    return nullptr;
+                };
                 if (leftButtonDown && !s_isMirrorDragging && !s_isCornerResizing && !s_selectedMirrorName.empty() && (isDirect || isDrilledMember)) {
                     int corner = hitTestCorners(s_selectedMirrorName, mousePos, 16);
                     if (corner >= 0) {
                         s_isCornerResizing = true; s_resizeCorner = corner;
-                        if (const MirrorConfig* m = getMirror(s_selectedMirrorName)) { s_resizeInitialScale = m->output.scale; s_resizeInitialScaleX = m->output.scaleX; s_resizeInitialScaleY = m->output.scaleY; }
+                        MirrorGroupConfig* resizeGroup = nullptr;
+                        if (MirrorGroupItem* item = findResizeGroupItem(resizeGroup)) { s_resizeInitialScaleX = item->widthPercent; s_resizeInitialScaleY = item->heightPercent; }
+                        else if (const MirrorConfig* m = getMirror(s_selectedMirrorName)) { s_resizeInitialScale = m->output.scale; s_resizeInitialScaleX = m->output.scaleX; s_resizeInitialScaleY = m->output.scaleY; }
                         { std::shared_lock<std::shared_mutex> lock(g_mirrorInstancesMutex, std::try_to_lock);
                           if (lock.owns_lock()) { auto it = g_mirrorInstances.find(s_selectedMirrorName);
                               if (it != g_mirrorInstances.end() && it->second.cachedRenderState.isValid) { const auto& c = it->second.cachedRenderState;
@@ -8236,7 +8249,40 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
                         s_resizeInitialDiag = sqrtf((float)(adx * adx + ady * ady)); if (s_resizeInitialDiag < 1.0f) s_resizeInitialDiag = 1.0f;
                     }
                 }
-                if (s_isCornerResizing && leftButtonDown) {
+                MirrorGroupConfig* resizeGroup = nullptr;
+                MirrorGroupItem* resizeItem = s_isCornerResizing ? findResizeGroupItem(resizeGroup) : nullptr;
+                if (s_isCornerResizing && leftButtonDown && resizeItem) {
+                    int adx = mousePos.x - s_resizeAnchorScreen.x, ady = mousePos.y - s_resizeAnchorScreen.y;
+                    float ratio = sqrtf((float)(adx * adx + ady * ady)) / s_resizeInitialDiag;
+                    resizeItem->widthPercent = std::clamp(s_resizeInitialScaleX * ratio, 0.1f, 20.0f);
+                    resizeItem->heightPercent = std::clamp(s_resizeInitialScaleY * ratio, 0.1f, 20.0f);
+                    // pin opposite corner during resize by moving the item within its group
+                    if (const MirrorConfig* m = getMirror(s_selectedMirrorName)) {
+                        std::shared_lock<std::shared_mutex> lock(g_mirrorInstancesMutex, std::try_to_lock);
+                        if (lock.owns_lock()) {
+                            auto it = g_mirrorInstances.find(m->name);
+                            if (it != g_mirrorInstances.end()) {
+                                const auto& inst = it->second;
+                                const MirrorConfig composed = BuildGroupedMirrorConfig(*m, *resizeGroup, *resizeItem, fullW, fullH);
+                                int newOutW = static_cast<int>(inst.fbo_w * composed.output.scaleX), newOutH = static_cast<int>(inst.fbo_h * composed.output.scaleY);
+                                int sX = 0, sY = 0;
+                                CalculateFinalScreenPos(&composed, inst, currentGeo.gameW, currentGeo.gameH, currentGeo.finalX, currentGeo.finalY,
+                                                        currentGeo.finalW, currentGeo.finalH, fullW, fullH, sX, sY);
+                                const bool fixedRight = (s_resizeCorner == 0 || s_resizeCorner == 2);
+                                const bool fixedBottom = (s_resizeCorner == 0 || s_resizeCorner == 1);
+                                int fixedX = sX + (fixedRight ? newOutW : 0), fixedY = sY + (fixedBottom ? newOutH : 0);
+                                int sdx = s_resizeAnchorScreen.x - fixedX, sdy = s_resizeAnchorScreen.y - fixedY;
+                                if (sdx != 0 || sdy != 0) {
+                                    int cdx = 0, cdy = 0;
+                                    ScreenDeltaToMirrorConfigDelta(resizeGroup->output.relativeTo, sdx, sdy, currentGeo.gameW, currentGeo.gameH,
+                                                                   currentGeo.finalW, currentGeo.finalH, cdx, cdy);
+                                    resizeItem->offsetX += cdx; resizeItem->offsetY += cdy;
+                                }
+                            }
+                        }
+                    }
+                    g_configIsDirty = true;
+                } else if (s_isCornerResizing && leftButtonDown) {
                     int adx = mousePos.x - s_resizeAnchorScreen.x, ady = mousePos.y - s_resizeAnchorScreen.y;
                     float ratio = sqrtf((float)(adx * adx + ady * ady)) / s_resizeInitialDiag;
                     if (MirrorConfig* mptr = getMirror(s_selectedMirrorName)) { auto& m = *mptr;

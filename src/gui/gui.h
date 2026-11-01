@@ -261,6 +261,9 @@ struct MirrorConfig {
     bool gradientOutput = false;
     GradientConfig gradient;
     bool onlyOnMyScreen = false;
+    // Inside a mirror group, multiply this mirror's own output scale by the group item's width/height %. Mirrors
+    // loaded from configs written before this setting existed keep that behaviour; new mirrors use the item % alone.
+    bool outputScaleAppliesInGroups = false;
     bool runtimeGrouped = false;
     std::string runtimeGroupName;
 };

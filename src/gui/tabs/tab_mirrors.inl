@@ -817,7 +817,8 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.mirrors"))) {
             }
 
             ImGui::SeparatorText(trc("mirrors.output_position"));
-            ImGui::TextDisabled(trc("mirrors.tooltip.output_scale"));
+            ImGui::TextDisabled(trc(mirror.outputScaleAppliesInGroups ? "mirrors.tooltip.output_scale_legacy_groups"
+                                                                      : "mirrors.tooltip.output_scale"));
             if (beginMirrorSettingsTable("mirror_output_position_settings")) {
                 mirrorSettingsRowLabel(trc("mirrors.output_scale"));
                 if (ImGui::Checkbox((tr("mirrors.separate_x_y") + "##scale").c_str(), &mirror.output.separateScale)) {
@@ -1313,7 +1314,7 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.mirrors"))) {
                     ImGui::TableSetColumnIndex(2);
                     float widthPct = item.widthPercent * 100.0f;
                     ImGui::SetNextItemWidth(-1);
-                    if (ImGui::SliderFloat("##width_pct", &widthPct, 10.0f, 200.0f, "%.0f%%")) {
+                    if (ImGui::SliderFloat("##width_pct", &widthPct, 10.0f, 2000.0f, "%.0f%%")) {
                         item.widthPercent = widthPct / 100.0f;
                         g_configIsDirty = true;
                     }
@@ -1321,7 +1322,7 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.mirrors"))) {
                     ImGui::TableSetColumnIndex(3);
                     float heightPct = item.heightPercent * 100.0f;
                     ImGui::SetNextItemWidth(-1);
-                    if (ImGui::SliderFloat("##height_pct", &heightPct, 10.0f, 200.0f, "%.0f%%")) {
+                    if (ImGui::SliderFloat("##height_pct", &heightPct, 10.0f, 2000.0f, "%.0f%%")) {
                         item.heightPercent = heightPct / 100.0f;
                         g_configIsDirty = true;
                     }

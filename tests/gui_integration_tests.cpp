@@ -1238,9 +1238,12 @@ MirrorConfig BuildExpectedGroupedMirrorConfig(const MirrorConfig& mirror, const 
     groupedMirror.output.relativeX = group.output.relativeX;
     groupedMirror.output.relativeY = group.output.relativeY;
 
+    // The item's width/height % is the whole scale, times the mirror's own scale for mirrors from older configs.
+    const bool useOwnScale = mirror.outputScaleAppliesInGroups;
+    const float baseScaleX = useOwnScale ? (mirror.output.separateScale ? mirror.output.scaleX : mirror.output.scale) : 1.0f;
+    const float baseScaleY = useOwnScale ? (mirror.output.separateScale ? mirror.output.scaleY : mirror.output.scale) : 1.0f;
+    groupedMirror.output.scale = 1.0f;
     groupedMirror.output.separateScale = true;
-    const float baseScaleX = mirror.output.separateScale ? mirror.output.scaleX : mirror.output.scale;
-    const float baseScaleY = mirror.output.separateScale ? mirror.output.scaleY : mirror.output.scale;
     groupedMirror.output.scaleX = baseScaleX * item.widthPercent;
     groupedMirror.output.scaleY = baseScaleY * item.heightPercent;
     return groupedMirror;

@@ -233,37 +233,13 @@ void UpdateActiveMirrorConfigs() {
         }
 
         const MirrorConfig& mirror = *mirrorIt->second;
-        MirrorConfig activeMirror = mirror;
-
         auto placementIt = mirrorPlacements.find(mirrorId);
         if (placementIt != mirrorPlacements.end() && placementIt->second.group && placementIt->second.item) {
-            const MirrorGroupConfig& group = *placementIt->second.group;
-            const MirrorGroupItem& item = *placementIt->second.item;
-
-            int groupX = group.output.x;
-            int groupY = group.output.y;
-            if (group.output.useRelativePosition) {
-                int screenW = GetCachedWindowWidth();
-                int screenH = GetCachedWindowHeight();
-                groupX = static_cast<int>(group.output.relativeX * screenW);
-                groupY = static_cast<int>(group.output.relativeY * screenH);
-            }
-            activeMirror.output.x = groupX + item.offsetX;
-            activeMirror.output.y = groupY + item.offsetY;
-            activeMirror.output.relativeTo = group.output.relativeTo;
-            activeMirror.output.useRelativePosition = group.output.useRelativePosition;
-            activeMirror.output.relativeX = group.output.relativeX;
-            activeMirror.output.relativeY = group.output.relativeY;
-            if (item.widthPercent != 1.0f || item.heightPercent != 1.0f) {
-                activeMirror.output.separateScale = true;
-                float baseScaleX = mirror.output.separateScale ? mirror.output.scaleX : mirror.output.scale;
-                float baseScaleY = mirror.output.separateScale ? mirror.output.scaleY : mirror.output.scale;
-                activeMirror.output.scaleX = baseScaleX * item.widthPercent;
-                activeMirror.output.scaleY = baseScaleY * item.heightPercent;
-            }
+            activeMirrorsForCapture.push_back(BuildGroupedMirrorConfig(mirror, *placementIt->second.group, *placementIt->second.item,
+                                                                       GetCachedWindowWidth(), GetCachedWindowHeight()));
+        } else {
+            activeMirrorsForCapture.push_back(mirror);
         }
-
-        activeMirrorsForCapture.push_back(activeMirror);
     }
     UpdateMirrorCaptureConfigs(activeMirrorsForCapture);
 

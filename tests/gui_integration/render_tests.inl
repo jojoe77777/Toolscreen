@@ -660,6 +660,10 @@ void RunModeMirrorGroupRenderTest(TestRunMode runMode = TestRunMode::Automated) 
 
             Expect(activeMirrors.size() == 1, "Expected only enabled group mirrors to resolve for the mirror-group render test.");
             Expect(activeMirrors[0].name == leftMirror.name, "Expected the enabled group mirror to preserve group order.");
+            ExpectFloatNear(activeMirrors[0].output.scaleX, group.mirrors[0].widthPercent,
+                            "Expected a grouped mirror to take its width from the group item alone, not its own 4x output scale.");
+            ExpectFloatNear(activeMirrors[0].output.scaleY, group.mirrors[0].heightPercent,
+                            "Expected a grouped mirror to take its height from the group item alone, not its own 4x output scale.");
 
             const ExpectedMirrorRect expectedLeftRect = ComputeExpectedMirrorRect(activeMirrors[0], surface.width, surface.height, 0, 0,
                                                                                   surface.width, surface.height);

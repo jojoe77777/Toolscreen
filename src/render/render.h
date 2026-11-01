@@ -266,6 +266,12 @@ void RenderMirrors(const std::vector<MirrorConfig>& activeMirrors, const GameVie
                    float modeOpacity = 1.0f, bool excludeOnlyOnMyScreen = false);
 void RenderImages(const std::vector<ImageConfig>& activeImages, int fullW, int fullH, float modeOpacity = 1.0f,
                   bool excludeOnlyOnMyScreen = false);
+// The mirror as a member of a group: placed by the group and the item offset, and sized by the item's width/height %
+// (times the mirror's own scale when outputScaleAppliesInGroups). Relative group positions resolve against
+// screenW x screenH.
+MirrorConfig BuildGroupedMirrorConfig(const MirrorConfig& mirror, const MirrorGroupConfig& group, const MirrorGroupItem& item, int screenW,
+                                      int screenH);
+
 void CollectActiveElementsForMode(const Config& config, const std::string& modeId, bool onlyOnMyScreenPass, uint64_t configVersion,
                                   std::vector<MirrorConfig>& outMirrors, std::vector<ImageConfig>& outImages,
                                   std::vector<const WindowOverlayConfig*>& outWindowOverlays,
