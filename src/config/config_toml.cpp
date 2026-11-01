@@ -2768,14 +2768,14 @@ void ConfigFromToml(const toml::table& tbl, Config& config) {
         if (c.cornerRadius < 0.0f) { c.cornerRadius = 0.0f; }
         if (c.coordsDisplay != "block" && c.coordsDisplay != "chunk") { c.coordsDisplay = "chunk"; }
         if (c.sidePadding < 0.0f) { c.sidePadding = 0.0f; }
-        if (c.sidePadding > 200.0f) { c.sidePadding = 200.0f; }
+        if (c.sidePadding > kNinjabrainOverlayPaddingMax) { c.sidePadding = kNinjabrainOverlayPaddingMax; }
         if (c.sectionLayoutMode != "flow" && c.sectionLayoutMode != "manual") { c.sectionLayoutMode = "flow"; }
-        c.contentPaddingTop = std::clamp(c.contentPaddingTop, 0.0f, 160.0f);
-        c.contentPaddingBottom = std::clamp(c.contentPaddingBottom, 0.0f, 160.0f);
+        c.contentPaddingTop = std::clamp(c.contentPaddingTop, 0.0f, kNinjabrainOverlayPaddingMax);
+        c.contentPaddingBottom = std::clamp(c.contentPaddingBottom, 0.0f, kNinjabrainOverlayPaddingMax);
         c.resultsMarginLeft = std::clamp(c.resultsMarginLeft, 0.0f, 400.0f);
         c.resultsMarginRight = std::clamp(c.resultsMarginRight, 0.0f, 400.0f);
-        c.resultsMarginTop = std::clamp(c.resultsMarginTop, 0.0f, 160.0f);
-        c.resultsMarginBottom = std::clamp(c.resultsMarginBottom, 0.0f, 160.0f);
+        c.resultsMarginTop = std::clamp(c.resultsMarginTop, 0.0f, kNinjabrainOverlayPaddingMax);
+        c.resultsMarginBottom = std::clamp(c.resultsMarginBottom, 0.0f, kNinjabrainOverlayPaddingMax);
         c.resultsHeaderPaddingY = std::clamp(c.resultsHeaderPaddingY, 0.0f, 48.0f);
         c.resultsColumnGap = std::clamp(c.resultsColumnGap, 0.0f, 200.0f);
         if (c.resultsAnchor != "topLeft" && c.resultsAnchor != "topRight" && c.resultsAnchor != "bottomLeft" && c.resultsAnchor != "bottomRight") {
@@ -2790,14 +2790,16 @@ void ConfigFromToml(const toml::table& tbl, Config& config) {
             c.informationMessagesPlacement != "bottom") {
             c.informationMessagesPlacement = "middle";
         }
-        c.informationMessagesFontScale = std::clamp(c.informationMessagesFontScale, 0.4f, 3.0f);
+        c.informationMessagesFontScale = std::clamp(c.informationMessagesFontScale, kNinjabrainInfoMessagesFontScaleMin,
+                                                    kNinjabrainInfoMessagesFontScaleMax);
         c.informationMessagesMinWidth = std::clamp(c.informationMessagesMinWidth, 120.0f, 1200.0f);
         c.informationMessagesMarginLeft = std::clamp(c.informationMessagesMarginLeft, 0.0f, 400.0f);
         c.informationMessagesMarginRight = std::clamp(c.informationMessagesMarginRight, 0.0f, 400.0f);
-        c.informationMessagesMarginTop = std::clamp(c.informationMessagesMarginTop, 0.0f, 160.0f);
-        c.informationMessagesMarginBottom = std::clamp(c.informationMessagesMarginBottom, 0.0f, 160.0f);
+        c.informationMessagesMarginTop = std::clamp(c.informationMessagesMarginTop, 0.0f, kNinjabrainOverlayPaddingMax);
+        c.informationMessagesMarginBottom = std::clamp(c.informationMessagesMarginBottom, 0.0f, kNinjabrainOverlayPaddingMax);
         c.informationMessagesIconTextMargin = std::clamp(c.informationMessagesIconTextMargin, 0.0f, 96.0f);
-        c.informationMessagesIconScale = std::clamp(c.informationMessagesIconScale, 0.25f, 4.0f);
+        c.informationMessagesIconScale = std::clamp(c.informationMessagesIconScale, kNinjabrainInfoMessagesIconScaleMin,
+                                                    kNinjabrainInfoMessagesIconScaleMax);
         if (c.informationMessagesAnchor != "topLeft" && c.informationMessagesAnchor != "topRight" &&
             c.informationMessagesAnchor != "bottomLeft" && c.informationMessagesAnchor != "bottomRight") {
             c.informationMessagesAnchor = "topLeft";
@@ -2807,8 +2809,8 @@ void ConfigFromToml(const toml::table& tbl, Config& config) {
         c.informationMessagesDrawOrder = std::clamp(c.informationMessagesDrawOrder, 0, 32);
         c.throwsMarginLeft = std::clamp(c.throwsMarginLeft, 0.0f, 400.0f);
         c.throwsMarginRight = std::clamp(c.throwsMarginRight, 0.0f, 400.0f);
-        c.throwsMarginTop = std::clamp(c.throwsMarginTop, 0.0f, 160.0f);
-        c.throwsMarginBottom = std::clamp(c.throwsMarginBottom, 0.0f, 160.0f);
+        c.throwsMarginTop = std::clamp(c.throwsMarginTop, 0.0f, kNinjabrainOverlayPaddingMax);
+        c.throwsMarginBottom = std::clamp(c.throwsMarginBottom, 0.0f, kNinjabrainOverlayPaddingMax);
         c.throwsHeaderPaddingY = std::clamp(c.throwsHeaderPaddingY, 0.0f, 48.0f);
         c.throwsRowPaddingY = std::clamp(c.throwsRowPaddingY, 0.0f, 48.0f);
         c.eyeThrowRows = std::clamp(c.eyeThrowRows, 1, static_cast<int>(kNinjabrainThrowLimit));
@@ -2820,8 +2822,8 @@ void ConfigFromToml(const toml::table& tbl, Config& config) {
         c.throwsDrawOrder = std::clamp(c.throwsDrawOrder, 0, 32);
         c.failureMarginLeft = std::clamp(c.failureMarginLeft, 0.0f, 400.0f);
         c.failureMarginRight = std::clamp(c.failureMarginRight, 0.0f, 400.0f);
-        c.failureMarginTop = std::clamp(c.failureMarginTop, 0.0f, 160.0f);
-        c.failureMarginBottom = std::clamp(c.failureMarginBottom, 0.0f, 160.0f);
+        c.failureMarginTop = std::clamp(c.failureMarginTop, 0.0f, kNinjabrainOverlayPaddingMax);
+        c.failureMarginBottom = std::clamp(c.failureMarginBottom, 0.0f, kNinjabrainOverlayPaddingMax);
         c.failureLineGap = std::clamp(c.failureLineGap, 0.0f, 96.0f);
         c.borderRadius = std::clamp(c.borderRadius, 0.0f, 160.0f);
         if (c.failureAnchor != "topLeft" && c.failureAnchor != "topRight" && c.failureAnchor != "bottomLeft" && c.failureAnchor != "bottomRight") {
@@ -2832,8 +2834,8 @@ void ConfigFromToml(const toml::table& tbl, Config& config) {
         c.failureDrawOrder = std::clamp(c.failureDrawOrder, 0, 32);
         c.blindMarginLeft = std::clamp(c.blindMarginLeft, 0.0f, 400.0f);
         c.blindMarginRight = std::clamp(c.blindMarginRight, 0.0f, 400.0f);
-        c.blindMarginTop = std::clamp(c.blindMarginTop, 0.0f, 160.0f);
-        c.blindMarginBottom = std::clamp(c.blindMarginBottom, 0.0f, 160.0f);
+        c.blindMarginTop = std::clamp(c.blindMarginTop, 0.0f, kNinjabrainOverlayPaddingMax);
+        c.blindMarginBottom = std::clamp(c.blindMarginBottom, 0.0f, kNinjabrainOverlayPaddingMax);
         c.blindLineGap = std::clamp(c.blindLineGap, 0.0f, 96.0f);
         if (c.blindAnchor != "topLeft" && c.blindAnchor != "topRight" && c.blindAnchor != "bottomLeft" && c.blindAnchor != "bottomRight") {
             c.blindAnchor = "topLeft";

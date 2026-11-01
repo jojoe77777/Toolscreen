@@ -10829,7 +10829,8 @@ void RenderNinjabrainOverlay(const NinjabrainOverlayConfig& nb, ImFont* font, co
             : "middle";
     const float infoMarginLeft = (std::max)(0.0f, nb.informationMessagesMarginLeft) * scale;
     const float infoMarginRight = (std::max)(0.0f, nb.informationMessagesMarginRight) * scale;
-    const float infoFontScale = (std::max)(0.4f, nb.informationMessagesFontScale);
+    const float infoFontScale = std::clamp(nb.informationMessagesFontScale, kNinjabrainInfoMessagesFontScaleMin,
+                                           kNinjabrainInfoMessagesFontScaleMax);
     const float infoFs = fs * infoFontScale;
     const float infoLineH = (std::max)(1.0f, infoFs);
     const float throwsMarginLeft = (std::max)(0.0f, nb.throwsMarginLeft) * scale;
@@ -11546,7 +11547,8 @@ void RenderNinjabrainOverlay(const NinjabrainOverlayConfig& nb, ImFont* font, co
     const float infoMessageMarginBottom = (std::max)(0.0f, nb.informationMessagesMarginBottom) * scale;
     const float infoIconTextMargin = (std::max)(0.0f, nb.informationMessagesIconTextMargin) * scale;
     const float infoLineGap = 2.0f * scale * infoFontScale;
-    const float infoIconSize = infoLineH * 0.82f * std::clamp(nb.informationMessagesIconScale, 0.25f, 4.0f);
+    const float infoIconSize = infoLineH * 0.82f * std::clamp(nb.informationMessagesIconScale, kNinjabrainInfoMessagesIconScaleMin,
+                                                                    kNinjabrainInfoMessagesIconScaleMax);
     const float infoTextInset = infoIconSize + infoIconTextMargin;
     std::array<NinjabrainFormattedInformationMessage, kNinjabrainInformationMessageLimit> formattedInformationMessages{};
     for (int index = 0; index < data.informationMessageCount; ++index) {

@@ -53,6 +53,7 @@ const auto& GetTestCaseDefinitions() {
         {"config-roundtrip-debug-settings", &RunConfigRoundtripDebugSettingsTest},
         {"config-load-embedded-ninjabrain-presets", &RunConfigLoadEmbeddedNinjabrainPresetsTest},
         {"config-load-bundled-font-paths-normalized", &RunConfigLoadBundledFontPathsNormalizedTest},
+        {"config-load-ninjabrain-overlay-slider-range", &RunConfigLoadNinjabrainOverlaySliderRangeTest},
         {"config-load-missing-required-modes", &RunConfigLoadMissingRequiredModesTest},
         {"config-load-invalid-hotkey-mode-references", &RunConfigLoadInvalidHotkeyModeReferencesTest},
         {"config-load-relative-mode-dimensions", &RunConfigLoadRelativeModeDimensionsTest},

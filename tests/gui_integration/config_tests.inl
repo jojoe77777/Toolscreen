@@ -188,6 +188,61 @@ void RunConfigLoadBundledFontPathsNormalizedTest(TestRunMode runMode = TestRunMo
                       runMode);
 }
 
+void RunConfigLoadNinjabrainOverlaySliderRangeTest(TestRunMode runMode = TestRunMode::Automated) {
+    constexpr float kOverlayScale = 0.3f;
+    constexpr float kInfoFontScale = 150.0f / (kNinjabrainOverlayBaseFontSize * kOverlayScale);
+    constexpr float kInfoIconScale = 120.0f;
+    RunConfigLoadCase("config_load_ninjabrain_overlay_slider_range",
+                      []() {
+                          Config config;
+                          auto& nb = config.ninjabrainOverlay;
+                          nb.overlayScale = kOverlayScale;
+                          nb.informationMessagesFontScale = kInfoFontScale;
+                          nb.informationMessagesIconScale = kInfoIconScale;
+                          nb.sidePadding = kNinjabrainOverlayPaddingMax;
+                          nb.contentPaddingTop = kNinjabrainOverlayPaddingMax;
+                          nb.contentPaddingBottom = kNinjabrainOverlayPaddingMax;
+                          nb.resultsMarginTop = kNinjabrainOverlayPaddingMax;
+                          nb.resultsMarginBottom = kNinjabrainOverlayPaddingMax;
+                          nb.informationMessagesMarginTop = kNinjabrainOverlayPaddingMax;
+                          nb.informationMessagesMarginBottom = kNinjabrainOverlayPaddingMax;
+                          nb.throwsMarginTop = kNinjabrainOverlayPaddingMax;
+                          nb.throwsMarginBottom = kNinjabrainOverlayPaddingMax;
+                          nb.failureMarginTop = kNinjabrainOverlayPaddingMax;
+                          nb.failureMarginBottom = kNinjabrainOverlayPaddingMax;
+                          nb.blindMarginTop = kNinjabrainOverlayPaddingMax;
+                          nb.blindMarginBottom = kNinjabrainOverlayPaddingMax;
+
+                          WriteConfigFixtureToDisk(config);
+                      },
+                      []() {
+                          ExpectConfigLoadSucceeded("config-load-ninjabrain-overlay-slider-range");
+                          const auto& nb = g_config.ninjabrainOverlay;
+                          ExpectFloatNear(nb.informationMessagesFontScale, kInfoFontScale,
+                                          "Expected a 150 px info message font at 30% overlay scale to survive a reload.");
+                          ExpectFloatNear(nb.informationMessagesIconScale, kInfoIconScale,
+                                          "Expected a slider-reachable info message icon scale to survive a reload.");
+                          const float paddings[] = {nb.sidePadding,
+                                                    nb.contentPaddingTop,
+                                                    nb.contentPaddingBottom,
+                                                    nb.resultsMarginTop,
+                                                    nb.resultsMarginBottom,
+                                                    nb.informationMessagesMarginTop,
+                                                    nb.informationMessagesMarginBottom,
+                                                    nb.throwsMarginTop,
+                                                    nb.throwsMarginBottom,
+                                                    nb.failureMarginTop,
+                                                    nb.failureMarginBottom,
+                                                    nb.blindMarginTop,
+                                                    nb.blindMarginBottom};
+                          for (float padding : paddings) {
+                              ExpectFloatNear(padding, kNinjabrainOverlayPaddingMax,
+                                              "Expected Ninjabrain overlay paddings at the slider maximum to survive a reload.");
+                          }
+                      },
+                      runMode);
+}
+
 void RunConfigLoadMissingRequiredModesTest(TestRunMode runMode = TestRunMode::Automated) {
     RunConfigLoadCase("config_load_missing_required_modes",
                       []() {

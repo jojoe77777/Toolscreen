@@ -272,7 +272,8 @@ if (BeginSelectableSettingsNestedTabItem(trc("ninjabrain.title"))) {
         ImGui::NextColumn();
         float scalePercent = nb.overlayScale * 100.0f;
         ImGui::SetNextItemWidth(250);
-        if (ImGui::SliderFloat("##nbScale", &scalePercent, 5.0f, 100.0f, "%.0f%%")) {
+        if (ImGui::SliderFloat("##nbScale", &scalePercent, kNinjabrainOverlayScaleMin * 100.0f, kNinjabrainOverlayScaleMax * 100.0f,
+                               "%.0f%%", ImGuiSliderFlags_AlwaysClamp)) {
             nb.overlayScale = scalePercent / 100.0f;
             changed = true;
             g_eyeZoomFontNeedsReload.store(true);
@@ -532,19 +533,19 @@ if (BeginSelectableSettingsNestedTabItem(trc("ninjabrain.title"))) {
             ImGui::Text("%s", trc("ninjabrain.side_padding"));
             ImGui::NextColumn();
             ImGui::SetNextItemWidth(250);
-            if (ImGui::SliderFloat("##nbSidePadding", &nb.sidePadding, 0.0f, 300.0f, "%.0f px")) changed = true;
+            if (ImGui::SliderFloat("##nbSidePadding", &nb.sidePadding, 0.0f, kNinjabrainOverlayPaddingMax, "%.0f px")) changed = true;
             ImGui::NextColumn();
 
             ImGui::Text("%s", trc("ninjabrain.content_padding_top"));
             ImGui::NextColumn();
             ImGui::SetNextItemWidth(250);
-            if (ImGui::SliderFloat("##nbContentPaddingTop", &nb.contentPaddingTop, 0.0f, 300.0f, "%.0f px")) changed = true;
+            if (ImGui::SliderFloat("##nbContentPaddingTop", &nb.contentPaddingTop, 0.0f, kNinjabrainOverlayPaddingMax, "%.0f px")) changed = true;
             ImGui::NextColumn();
 
             ImGui::Text("%s", trc("ninjabrain.content_padding_bottom"));
             ImGui::NextColumn();
             ImGui::SetNextItemWidth(250);
-            if (ImGui::SliderFloat("##nbContentPaddingBottom", &nb.contentPaddingBottom, 0.0f, 300.0f, "%.0f px")) changed = true;
+            if (ImGui::SliderFloat("##nbContentPaddingBottom", &nb.contentPaddingBottom, 0.0f, kNinjabrainOverlayPaddingMax, "%.0f px")) changed = true;
             ImGui::NextColumn();
 
             ImGui::Columns(1);
@@ -557,25 +558,25 @@ if (BeginSelectableSettingsNestedTabItem(trc("ninjabrain.title"))) {
             ImGui::Text("%s", trc("ninjabrain.results_margin_left"));
             ImGui::NextColumn();
             ImGui::SetNextItemWidth(250);
-            if (ImGui::SliderFloat("##nbResultsMarginLeft", &nb.resultsMarginLeft, 0.0f, 300.0f, "%.0f px")) changed = true;
+            if (ImGui::SliderFloat("##nbResultsMarginLeft", &nb.resultsMarginLeft, 0.0f, kNinjabrainOverlayPaddingMax, "%.0f px")) changed = true;
             ImGui::NextColumn();
 
             ImGui::Text("%s", trc("ninjabrain.results_margin_right"));
             ImGui::NextColumn();
             ImGui::SetNextItemWidth(250);
-            if (ImGui::SliderFloat("##nbResultsMarginRight", &nb.resultsMarginRight, 0.0f, 300.0f, "%.0f px")) changed = true;
+            if (ImGui::SliderFloat("##nbResultsMarginRight", &nb.resultsMarginRight, 0.0f, kNinjabrainOverlayPaddingMax, "%.0f px")) changed = true;
             ImGui::NextColumn();
 
             ImGui::Text("%s", trc("ninjabrain.results_margin_top"));
             ImGui::NextColumn();
             ImGui::SetNextItemWidth(250);
-            if (ImGui::SliderFloat("##nbResultsMarginTop", &nb.resultsMarginTop, 0.0f, 300.0f, "%.0f px")) changed = true;
+            if (ImGui::SliderFloat("##nbResultsMarginTop", &nb.resultsMarginTop, 0.0f, kNinjabrainOverlayPaddingMax, "%.0f px")) changed = true;
             ImGui::NextColumn();
 
             ImGui::Text("%s", trc("ninjabrain.results_margin_bottom"));
             ImGui::NextColumn();
             ImGui::SetNextItemWidth(250);
-            if (ImGui::SliderFloat("##nbResultsMarginBottom", &nb.resultsMarginBottom, 0.0f, 300.0f, "%.0f px")) changed = true;
+            if (ImGui::SliderFloat("##nbResultsMarginBottom", &nb.resultsMarginBottom, 0.0f, kNinjabrainOverlayPaddingMax, "%.0f px")) changed = true;
             ImGui::NextColumn();
 
             ImGui::Text("%s", trc("ninjabrain.results_header_padding_y"));
@@ -723,7 +724,8 @@ if (BeginSelectableSettingsNestedTabItem(trc("ninjabrain.title"))) {
                 const float baseFontSize = (std::max)(1.0f, kNinjabrainOverlayBaseFontSize * ((nb.overlayScale > 0.01f) ? nb.overlayScale : 1.0f));
                 float infoFontSize = baseFontSize * nb.informationMessagesFontScale;
                 ImGui::SetNextItemWidth(250);
-                if (ImGui::SliderFloat("##nbInfoMessagesFontSize", &infoFontSize, 12.0f, 160.0f, "%.0f px")) {
+                if (ImGui::SliderFloat("##nbInfoMessagesFontSize", &infoFontSize, kNinjabrainInfoMessagesFontSizeMinPx,
+                                       kNinjabrainInfoMessagesFontSizeMaxPx, "%.0f px", ImGuiSliderFlags_AlwaysClamp)) {
                     nb.informationMessagesFontScale = infoFontSize / baseFontSize;
                     changed = true;
                 }
@@ -734,10 +736,11 @@ if (BeginSelectableSettingsNestedTabItem(trc("ninjabrain.title"))) {
             ImGui::NextColumn();
             {
                 const float baseFontSize = (std::max)(1.0f, kNinjabrainOverlayBaseFontSize * ((nb.overlayScale > 0.01f) ? nb.overlayScale : 1.0f));
-                const float baseIconSize = (std::max)(1.0f, baseFontSize * nb.informationMessagesFontScale * 1.2f * 0.82f);
+                const float baseIconSize = (std::max)(1.0f, baseFontSize * nb.informationMessagesFontScale * kNinjabrainInfoMessagesIconLineRatio);
                 float infoIconSize = baseIconSize * nb.informationMessagesIconScale;
                 ImGui::SetNextItemWidth(250);
-                if (ImGui::SliderFloat("##nbInfoMessagesIconSize", &infoIconSize, 8.0f, 160.0f, "%.0f px")) {
+                if (ImGui::SliderFloat("##nbInfoMessagesIconSize", &infoIconSize, kNinjabrainInfoMessagesIconSizeMinPx,
+                                       kNinjabrainInfoMessagesIconSizeMaxPx, "%.0f px", ImGuiSliderFlags_AlwaysClamp)) {
                     nb.informationMessagesIconScale = infoIconSize / baseIconSize;
                     changed = true;
                 }
@@ -747,25 +750,25 @@ if (BeginSelectableSettingsNestedTabItem(trc("ninjabrain.title"))) {
             ImGui::Text("%s", trc("ninjabrain.info_messages_margin_left"));
             ImGui::NextColumn();
             ImGui::SetNextItemWidth(250);
-            if (ImGui::SliderFloat("##nbInfoMessagesMarginLeft", &nb.informationMessagesMarginLeft, 0.0f, 300.0f, "%.0f px")) changed = true;
+            if (ImGui::SliderFloat("##nbInfoMessagesMarginLeft", &nb.informationMessagesMarginLeft, 0.0f, kNinjabrainOverlayPaddingMax, "%.0f px")) changed = true;
             ImGui::NextColumn();
 
             ImGui::Text("%s", trc("ninjabrain.info_messages_margin_right"));
             ImGui::NextColumn();
             ImGui::SetNextItemWidth(250);
-            if (ImGui::SliderFloat("##nbInfoMessagesMarginRight", &nb.informationMessagesMarginRight, 0.0f, 300.0f, "%.0f px")) changed = true;
+            if (ImGui::SliderFloat("##nbInfoMessagesMarginRight", &nb.informationMessagesMarginRight, 0.0f, kNinjabrainOverlayPaddingMax, "%.0f px")) changed = true;
             ImGui::NextColumn();
 
             ImGui::Text("%s", trc("ninjabrain.info_messages_margin_top"));
             ImGui::NextColumn();
             ImGui::SetNextItemWidth(250);
-            if (ImGui::SliderFloat("##nbInfoMessagesMarginTop", &nb.informationMessagesMarginTop, 0.0f, 300.0f, "%.0f px")) changed = true;
+            if (ImGui::SliderFloat("##nbInfoMessagesMarginTop", &nb.informationMessagesMarginTop, 0.0f, kNinjabrainOverlayPaddingMax, "%.0f px")) changed = true;
             ImGui::NextColumn();
 
             ImGui::Text("%s", trc("ninjabrain.info_messages_margin_bottom"));
             ImGui::NextColumn();
             ImGui::SetNextItemWidth(250);
-            if (ImGui::SliderFloat("##nbInfoMessagesMarginBottom", &nb.informationMessagesMarginBottom, 0.0f, 300.0f, "%.0f px")) changed = true;
+            if (ImGui::SliderFloat("##nbInfoMessagesMarginBottom", &nb.informationMessagesMarginBottom, 0.0f, kNinjabrainOverlayPaddingMax, "%.0f px")) changed = true;
             ImGui::NextColumn();
 
             ImGui::Text("%s", trc("ninjabrain.info_messages_icon_text_margin"));
@@ -784,25 +787,25 @@ if (BeginSelectableSettingsNestedTabItem(trc("ninjabrain.title"))) {
             ImGui::Text("%s", trc("ninjabrain.throws_margin_left"));
             ImGui::NextColumn();
             ImGui::SetNextItemWidth(250);
-            if (ImGui::SliderFloat("##nbThrowsMarginLeft", &nb.throwsMarginLeft, 0.0f, 300.0f, "%.0f px")) changed = true;
+            if (ImGui::SliderFloat("##nbThrowsMarginLeft", &nb.throwsMarginLeft, 0.0f, kNinjabrainOverlayPaddingMax, "%.0f px")) changed = true;
             ImGui::NextColumn();
 
             ImGui::Text("%s", trc("ninjabrain.throws_margin_right"));
             ImGui::NextColumn();
             ImGui::SetNextItemWidth(250);
-            if (ImGui::SliderFloat("##nbThrowsMarginRight", &nb.throwsMarginRight, 0.0f, 300.0f, "%.0f px")) changed = true;
+            if (ImGui::SliderFloat("##nbThrowsMarginRight", &nb.throwsMarginRight, 0.0f, kNinjabrainOverlayPaddingMax, "%.0f px")) changed = true;
             ImGui::NextColumn();
 
             ImGui::Text("%s", trc("ninjabrain.throws_margin_top"));
             ImGui::NextColumn();
             ImGui::SetNextItemWidth(250);
-            if (ImGui::SliderFloat("##nbThrowsMarginTop", &nb.throwsMarginTop, 0.0f, 300.0f, "%.0f px")) changed = true;
+            if (ImGui::SliderFloat("##nbThrowsMarginTop", &nb.throwsMarginTop, 0.0f, kNinjabrainOverlayPaddingMax, "%.0f px")) changed = true;
             ImGui::NextColumn();
 
             ImGui::Text("%s", trc("ninjabrain.throws_margin_bottom"));
             ImGui::NextColumn();
             ImGui::SetNextItemWidth(250);
-            if (ImGui::SliderFloat("##nbThrowsMarginBottom", &nb.throwsMarginBottom, 0.0f, 300.0f, "%.0f px")) changed = true;
+            if (ImGui::SliderFloat("##nbThrowsMarginBottom", &nb.throwsMarginBottom, 0.0f, kNinjabrainOverlayPaddingMax, "%.0f px")) changed = true;
             ImGui::NextColumn();
 
             ImGui::Text("%s", trc("ninjabrain.throws_header_padding_y"));
@@ -827,25 +830,25 @@ if (BeginSelectableSettingsNestedTabItem(trc("ninjabrain.title"))) {
             ImGui::Text("%s", trc("ninjabrain.failure_margin_left"));
             ImGui::NextColumn();
             ImGui::SetNextItemWidth(250);
-            if (ImGui::SliderFloat("##nbFailureMarginLeft", &nb.failureMarginLeft, 0.0f, 300.0f, "%.0f px")) changed = true;
+            if (ImGui::SliderFloat("##nbFailureMarginLeft", &nb.failureMarginLeft, 0.0f, kNinjabrainOverlayPaddingMax, "%.0f px")) changed = true;
             ImGui::NextColumn();
 
             ImGui::Text("%s", trc("ninjabrain.failure_margin_right"));
             ImGui::NextColumn();
             ImGui::SetNextItemWidth(250);
-            if (ImGui::SliderFloat("##nbFailureMarginRight", &nb.failureMarginRight, 0.0f, 300.0f, "%.0f px")) changed = true;
+            if (ImGui::SliderFloat("##nbFailureMarginRight", &nb.failureMarginRight, 0.0f, kNinjabrainOverlayPaddingMax, "%.0f px")) changed = true;
             ImGui::NextColumn();
 
             ImGui::Text("%s", trc("ninjabrain.failure_margin_top"));
             ImGui::NextColumn();
             ImGui::SetNextItemWidth(250);
-            if (ImGui::SliderFloat("##nbFailureMarginTop", &nb.failureMarginTop, 0.0f, 300.0f, "%.0f px")) changed = true;
+            if (ImGui::SliderFloat("##nbFailureMarginTop", &nb.failureMarginTop, 0.0f, kNinjabrainOverlayPaddingMax, "%.0f px")) changed = true;
             ImGui::NextColumn();
 
             ImGui::Text("%s", trc("ninjabrain.failure_margin_bottom"));
             ImGui::NextColumn();
             ImGui::SetNextItemWidth(250);
-            if (ImGui::SliderFloat("##nbFailureMarginBottom", &nb.failureMarginBottom, 0.0f, 300.0f, "%.0f px")) changed = true;
+            if (ImGui::SliderFloat("##nbFailureMarginBottom", &nb.failureMarginBottom, 0.0f, kNinjabrainOverlayPaddingMax, "%.0f px")) changed = true;
             ImGui::NextColumn();
 
             ImGui::Text("%s", trc("ninjabrain.failure_line_gap"));
@@ -864,25 +867,25 @@ if (BeginSelectableSettingsNestedTabItem(trc("ninjabrain.title"))) {
             ImGui::Text("%s", trc("ninjabrain.blind_margin_left"));
             ImGui::NextColumn();
             ImGui::SetNextItemWidth(250);
-            if (ImGui::SliderFloat("##nbBlindMarginLeft", &nb.blindMarginLeft, 0.0f, 300.0f, "%.0f px")) changed = true;
+            if (ImGui::SliderFloat("##nbBlindMarginLeft", &nb.blindMarginLeft, 0.0f, kNinjabrainOverlayPaddingMax, "%.0f px")) changed = true;
             ImGui::NextColumn();
 
             ImGui::Text("%s", trc("ninjabrain.blind_margin_right"));
             ImGui::NextColumn();
             ImGui::SetNextItemWidth(250);
-            if (ImGui::SliderFloat("##nbBlindMarginRight", &nb.blindMarginRight, 0.0f, 300.0f, "%.0f px")) changed = true;
+            if (ImGui::SliderFloat("##nbBlindMarginRight", &nb.blindMarginRight, 0.0f, kNinjabrainOverlayPaddingMax, "%.0f px")) changed = true;
             ImGui::NextColumn();
 
             ImGui::Text("%s", trc("ninjabrain.blind_margin_top"));
             ImGui::NextColumn();
             ImGui::SetNextItemWidth(250);
-            if (ImGui::SliderFloat("##nbBlindMarginTop", &nb.blindMarginTop, 0.0f, 300.0f, "%.0f px")) changed = true;
+            if (ImGui::SliderFloat("##nbBlindMarginTop", &nb.blindMarginTop, 0.0f, kNinjabrainOverlayPaddingMax, "%.0f px")) changed = true;
             ImGui::NextColumn();
 
             ImGui::Text("%s", trc("ninjabrain.blind_margin_bottom"));
             ImGui::NextColumn();
             ImGui::SetNextItemWidth(250);
-            if (ImGui::SliderFloat("##nbBlindMarginBottom", &nb.blindMarginBottom, 0.0f, 300.0f, "%.0f px")) changed = true;
+            if (ImGui::SliderFloat("##nbBlindMarginBottom", &nb.blindMarginBottom, 0.0f, kNinjabrainOverlayPaddingMax, "%.0f px")) changed = true;
             ImGui::NextColumn();
 
             ImGui::Text("%s", trc("ninjabrain.blind_line_gap"));

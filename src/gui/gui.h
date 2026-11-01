@@ -858,6 +858,24 @@ struct NinjabrainColumn {
 };
 
 constexpr float kNinjabrainOverlayBaseFontSize = 64.0f;
+constexpr float kNinjabrainOverlayScaleMin = 0.05f;
+constexpr float kNinjabrainOverlayScaleMax = 1.0f;
+constexpr float kNinjabrainInfoMessagesFontSizeMinPx = 12.0f;
+constexpr float kNinjabrainInfoMessagesFontSizeMaxPx = 160.0f;
+constexpr float kNinjabrainInfoMessagesIconSizeMinPx = 8.0f;
+constexpr float kNinjabrainInfoMessagesIconSizeMaxPx = 160.0f;
+constexpr float kNinjabrainInfoMessagesIconLineRatio = 1.2f * 0.82f;
+// The info message sizes are stored as ratios of the scaled base font (and the icon as a ratio of the info font),
+// so these limits cover every pixel size the sliders can pick at any overlay scale.
+constexpr float kNinjabrainInfoMessagesFontScaleMin =
+    kNinjabrainInfoMessagesFontSizeMinPx / (kNinjabrainOverlayBaseFontSize * kNinjabrainOverlayScaleMax);
+constexpr float kNinjabrainInfoMessagesFontScaleMax =
+    kNinjabrainInfoMessagesFontSizeMaxPx / (kNinjabrainOverlayBaseFontSize * kNinjabrainOverlayScaleMin);
+constexpr float kNinjabrainInfoMessagesIconScaleMin =
+    kNinjabrainInfoMessagesIconSizeMinPx / (kNinjabrainOverlayBaseFontSize * kNinjabrainOverlayScaleMax *
+                                            kNinjabrainInfoMessagesFontScaleMax * kNinjabrainInfoMessagesIconLineRatio);
+constexpr float kNinjabrainInfoMessagesIconScaleMax = kNinjabrainInfoMessagesIconSizeMaxPx;
+constexpr float kNinjabrainOverlayPaddingMax = 300.0f;
 
 struct NinjabrainOverlayConfig {
     bool enabled = false;
