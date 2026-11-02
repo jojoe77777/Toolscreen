@@ -8,12 +8,11 @@ permissions:
   contents: read
 
 # The run publishes one artifact, Toolscreen-<version>-signed:
-#   Toolscreen-<version>-double-click-me-not-legal-for-speedruns.jar        signed universal JAR installer
-#   Toolscreen-<version>-double-click-me-x64-not-legal-for-speedruns.exe    signed x64 EXE installer
-#   Toolscreen-<version>-double-click-me-arm64-not-legal-for-speedruns.exe  signed ARM64 EXE installer
-#   toolscreen-downloader-not-legal-for-speedruns.jar                       downloader JAR
-#   toolscreen-downloader-<arch>-not-legal-for-speedruns.exe                signed downloader EXEs
-#   x64/ and arm64/                                                          signed Toolscreen DLL, liblogger DLL, PDBs
+#   Toolscreen-<version>-double-click-me-not-legal-for-speedruns.jar  signed universal JAR installer
+#   Toolscreen-<version>-double-click-me-not-legal-for-speedruns.exe  signed universal EXE installer
+#   toolscreen-downloader-not-legal-for-speedruns.jar                 downloader JAR
+#   toolscreen-downloader-not-legal-for-speedruns.exe                 signed downloader EXE
+#   x64/ and arm64/                                                    signed Toolscreen DLL, liblogger DLL, PDBs
 #   SHA512SUMS.txt
 # The jobs below upload signed-part-* artifacts with original file names; the last job renames and checksums them
 # into that layout and deletes every other artifact of the run.
@@ -231,8 +230,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # The JAR installer and the downloader JAR are universal, so only the x64 leg builds and signs them. The
-          # EXE installer and downloader are native programs for their own architecture.
+          # Every installer is universal: each embeds the x64 and ARM64 DLLs, and the x64 EXEs also run on ARM64
+          # Windows under emulation. The one x64 leg keeps the job name and the SignPath input names unchanged.
           - arch: x64
             vs_arch: x64
             packaging_preset: ci-ninja-x64-packaging
@@ -240,17 +239,7 @@ jobs:
             logger_name: liblogger_x64
             packaging_build_dir: out/build-ci-package
             packaging_artifact_dir: out/build-ci-package/bin/Release
-            build_jar: true
             package_tests: ^(toolscreen_exe_exists|toolscreen_exe_embeds_dll|toolscreen_exe_resources_readable|toolscreen_downloader_exe_exists|toolscreen_jar_exists|toolscreen_downloader_jar_exists)$
-          - arch: arm64
-            vs_arch: amd64_arm64
-            packaging_preset: ci-ninja-arm64-packaging
-            package_build_preset: ci-package-arm64
-            logger_name: liblogger_arm64
-            packaging_build_dir: out/build-ci-package-arm64
-            packaging_artifact_dir: out/build-ci-package-arm64/bin/Release
-            build_jar: false
-            package_tests: ^(toolscreen_exe_exists|toolscreen_exe_embeds_dll|toolscreen_downloader_exe_exists)$
     env:
       TOOLSCREEN_PACKAGING_BUILD_DIR: ${{ matrix.packaging_build_dir }}
       TOOLSCREEN_ARTIFACT_DIR: ${{ matrix.packaging_artifact_dir }}
@@ -306,7 +295,6 @@ jobs:
               "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
           - name: Set up Java 17
-            if: ${{ matrix.build_jar }}
             uses: actions/setup-java@v4
             with:
               distribution: temurin
@@ -331,7 +319,6 @@ jobs:
                 windows-${{ matrix.arch }}-vcpkg-binary-v2-
 
           - name: Restore Maven repository cache
-            if: ${{ matrix.build_jar }}
             uses: actions/cache@v4
             with:
               path: ~/.m2/repository
@@ -379,18 +366,9 @@ jobs:
           $x64LoggerDllPath = (Resolve-Path 'out/signed-native/x64/liblogger_x64.dll').Path
           $arm64LoggerDllPath = (Resolve-Path 'out/signed-native/arm64/liblogger_arm64.dll').Path
 
-          if ('${{ matrix.arch }}' -eq 'x64') {
-            $currentDllPath = $x64DllPath
-            $currentLoggerDllPath = $x64LoggerDllPath
-            $currentLoggerPdbPath = (Resolve-Path 'out/signed-native/x64/liblogger_x64.pdb').Path
-          } else {
-            $currentDllPath = $arm64DllPath
-            $currentLoggerDllPath = $arm64LoggerDllPath
-            $currentLoggerPdbPath = (Resolve-Path 'out/signed-native/arm64/liblogger_arm64.pdb').Path
-          }
-          $jarPackaging = if ('${{ matrix.build_jar }}' -eq 'true') { 'ON' } else { 'OFF' }
+          $x64LoggerPdbPath = (Resolve-Path 'out/signed-native/x64/liblogger_x64.pdb').Path
 
-          cmake --preset ${{ matrix.packaging_preset }} -DTOOLSCREEN_ENABLE_JAR_PACKAGING="$jarPackaging" -DTOOLSCREEN_ENABLE_EXE_PACKAGING=ON -DTOOLSCREEN_BUILD_DOWNLOADER_ARTIFACTS=ON -DTOOLSCREEN_PACKAGING_DLL_PATH="$currentDllPath" -DTOOLSCREEN_PACKAGING_LIBLOGGER_PATH="$currentLoggerDllPath" -DTOOLSCREEN_PACKAGING_X64_DLL_PATH="$x64DllPath" -DTOOLSCREEN_PACKAGING_ARM64_DLL_PATH="$arm64DllPath" -DTOOLSCREEN_PACKAGING_X64_LIBLOGGER_PATH="$x64LoggerDllPath" -DTOOLSCREEN_PACKAGING_ARM64_LIBLOGGER_PATH="$arm64LoggerDllPath" -DTOOLSCREEN_PREBUILT_LIBLOGGER_DLL_PATH="$currentLoggerDllPath" -DTOOLSCREEN_PREBUILT_LIBLOGGER_PDB_PATH="$currentLoggerPdbPath"
+          cmake --preset ${{ matrix.packaging_preset }} -DTOOLSCREEN_ENABLE_JAR_PACKAGING=ON -DTOOLSCREEN_ENABLE_EXE_PACKAGING=ON -DTOOLSCREEN_BUILD_DOWNLOADER_ARTIFACTS=ON -DTOOLSCREEN_PACKAGING_DLL_PATH="$x64DllPath" -DTOOLSCREEN_PACKAGING_LIBLOGGER_PATH="$x64LoggerDllPath" -DTOOLSCREEN_PACKAGING_X64_DLL_PATH="$x64DllPath" -DTOOLSCREEN_PACKAGING_ARM64_DLL_PATH="$arm64DllPath" -DTOOLSCREEN_PACKAGING_X64_LIBLOGGER_PATH="$x64LoggerDllPath" -DTOOLSCREEN_PACKAGING_ARM64_LIBLOGGER_PATH="$arm64LoggerDllPath" -DTOOLSCREEN_PREBUILT_LIBLOGGER_DLL_PATH="$x64LoggerDllPath" -DTOOLSCREEN_PREBUILT_LIBLOGGER_PDB_PATH="$x64LoggerPdbPath"
 
       - name: Remove stale packaged artifacts
         shell: pwsh
@@ -418,7 +396,6 @@ jobs:
         run: cmake --build --preset ${{ matrix.package_build_preset }} --parallel --target downloader_exe
 
       - name: Build universal JAR packages
-        if: ${{ matrix.build_jar }}
         shell: pwsh
         run: cmake --build --preset ${{ matrix.package_build_preset }} --parallel --target jar
 
@@ -459,7 +436,6 @@ jobs:
       - parallel:
           - name: Upload main installer JAR for SignPath
             id: signpath_jar_upload
-            if: ${{ matrix.build_jar }}
             uses: actions/upload-artifact@v4
             with:
               name: toolscreen-${{ matrix.arch }}-signpath-main-installer-jar-input
@@ -492,7 +468,6 @@ jobs:
       # SignPath round trips can overlap instead of queueing behind each other.
       - parallel:
           - name: Submit main installer JAR to SignPath with origin verification
-            if: ${{ matrix.build_jar }}
             uses: signpath/github-action-submit-signing-request@v2
             with:
               api-token: ${{ env.SIGNPATH_API_TOKEN }}
@@ -535,7 +510,6 @@ jobs:
                 version: ${{ toJSON(steps.signpath_version.outputs.version) }}
 
       - name: Replace main installer JAR with origin-verified signed output
-        if: ${{ matrix.build_jar }}
         shell: pwsh
         run: |
           $artifactDir = Join-Path $env:GITHUB_WORKSPACE $env:TOOLSCREEN_ARTIFACT_DIR
@@ -591,8 +565,7 @@ jobs:
         run: |
           $artifactDir = Join-Path $env:GITHUB_WORKSPACE $env:TOOLSCREEN_ARTIFACT_DIR
           $partDir = Join-Path $env:GITHUB_WORKSPACE $env:TOOLSCREEN_RELEASE_PART_DIR
-          $archDir = Join-Path $partDir '${{ matrix.arch }}'
-          New-Item -ItemType Directory -Force -Path $archDir | Out-Null
+          New-Item -ItemType Directory -Force -Path $partDir | Out-Null
 
           function Get-SingleArtifact([string]$Pattern) {
             $found = @(Get-ChildItem -Path $artifactDir -File -Filter $Pattern)
@@ -602,13 +575,8 @@ jobs:
             return $found[0]
           }
 
-          # Both architectures build EXEs with the same names, so they go in a folder per architecture here.
-          Copy-Item -LiteralPath (Get-SingleArtifact 'Toolscreen-*-double-click-me.exe').FullName -Destination $archDir
-          Copy-Item -LiteralPath (Get-SingleArtifact 'toolscreen-downloader.exe').FullName -Destination $archDir
-
-          if ('${{ matrix.build_jar }}' -eq 'true') {
-            Copy-Item -LiteralPath (Get-SingleArtifact 'Toolscreen-*-double-click-me.jar').FullName -Destination $partDir
-            Copy-Item -LiteralPath (Get-SingleArtifact 'toolscreen-downloader.jar').FullName -Destination $partDir
+          foreach ($pattern in 'Toolscreen-*-double-click-me.exe', 'toolscreen-downloader.exe', 'Toolscreen-*-double-click-me.jar', 'toolscreen-downloader.jar') {
+            Copy-Item -LiteralPath (Get-SingleArtifact $pattern).FullName -Destination $partDir
           }
 
       - name: Upload signed installers
@@ -671,10 +639,11 @@ jobs:
           Copy-Renamed $jar $releaseDir
           Copy-Renamed (Get-SingleFile $partsDir 'toolscreen-downloader.jar') $releaseDir
 
+          Copy-Renamed (Get-SingleFile $partsDir 'Toolscreen-*-double-click-me.exe') $releaseDir
+          Copy-Renamed (Get-SingleFile $partsDir 'toolscreen-downloader.exe') $releaseDir
+
           foreach ($arch in 'x64', 'arm64') {
             $archPartDir = Join-Path $partsDir $arch
-            Copy-Renamed (Get-SingleFile $archPartDir 'Toolscreen-*-double-click-me.exe') $releaseDir "-$arch"
-            Copy-Renamed (Get-SingleFile $archPartDir 'toolscreen-downloader.exe') $releaseDir "-$arch"
             foreach ($nativeFile in 'Toolscreen.dll', 'Toolscreen.pdb', "liblogger_$arch.dll", "liblogger_$arch.pdb") {
               Copy-Renamed (Get-SingleFile $archPartDir $nativeFile) (Join-Path $releaseDir $arch)
             }

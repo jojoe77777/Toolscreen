@@ -77,12 +77,6 @@
       }
     },
     {
-      "name": "ci-ninja-arm64-packaging",
-      "displayName": "CI Ninja ARM64 Packaging",
-      "inherits": "ci-ninja-arm64",
-      "binaryDir": "${sourceDir}/out/build-ci-package-arm64"
-    },
-    {
       "name": "vs2022-arm64-ninjabrain-manual-tests",
       "displayName": "Visual Studio 2022 ARM64 (Manual Ninjabrain Tests)",
       "inherits": "vs2022-arm64",
@@ -144,11 +138,6 @@
       "name": "ci-release-arm64",
       "displayName": "CI ARM64 Release",
       "configurePreset": "ci-ninja-arm64"
-    },
-    {
-      "name": "ci-package-arm64",
-      "displayName": "CI ARM64 Packaging",
-      "configurePreset": "ci-ninja-arm64-packaging"
     },
     {
       "name": "release-arm64-ninjabrain-manual-tests",

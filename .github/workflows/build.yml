@@ -23,10 +23,9 @@ concurrency:
   cancel-in-progress: true
 
 # Every run publishes one artifact, Toolscreen-<version>-<commit>-unsigned:
-#   Toolscreen-<version>-double-click-me-not-legal-for-speedruns.jar        universal JAR installer
-#   Toolscreen-<version>-double-click-me-x64-not-legal-for-speedruns.exe    x64 EXE installer
-#   Toolscreen-<version>-double-click-me-arm64-not-legal-for-speedruns.exe  ARM64 EXE installer
-#   x64/ and arm64/                                                          Toolscreen and liblogger DLLs and PDBs
+#   Toolscreen-<version>-double-click-me-not-legal-for-speedruns.jar  universal JAR installer
+#   Toolscreen-<version>-double-click-me-not-legal-for-speedruns.exe  universal EXE installer
+#   x64/ and arm64/                                                    Toolscreen and liblogger DLLs and PDBs
 # The jobs below each upload their share of that layout, and the last job merges the shares into the single artifact.
 
 jobs:
@@ -219,42 +218,20 @@ jobs:
         run: sccache --show-stats
 
   installers:
-    name: Build ${{ matrix.arch }} installer
+    name: Build installers
     needs: native
     runs-on: windows-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # The JAR installer is universal, so only the x64 leg builds it. Each EXE installer is a native program
-          # for its own architecture, and both embed the x64 and ARM64 DLLs.
-          - arch: x64
-            vs_arch: x64
-            packaging_preset: ci-ninja-x64-packaging
-            package_build_preset: ci-package
-            packaging_build_dir: out/build-ci-package
-            packaging_artifact_dir: out/build-ci-package/bin/Release
-            build_jar: true
-            build_targets: jar installer_exe
-            package_tests: ^(toolscreen_jar_exists|toolscreen_exe_exists|toolscreen_exe_embeds_dll|toolscreen_exe_resources_readable)$
-          - arch: arm64
-            vs_arch: amd64_arm64
-            packaging_preset: ci-ninja-arm64-packaging
-            package_build_preset: ci-package-arm64
-            packaging_build_dir: out/build-ci-package-arm64
-            packaging_artifact_dir: out/build-ci-package-arm64/bin/Release
-            build_jar: false
-            build_targets: installer_exe
-            package_tests: ^(toolscreen_exe_exists|toolscreen_exe_embeds_dll)$
     env:
-      TOOLSCREEN_PACKAGING_BUILD_DIR: ${{ matrix.packaging_build_dir }}
-      TOOLSCREEN_PACKAGING_ARTIFACT_DIR: ${{ matrix.packaging_artifact_dir }}
+      TOOLSCREEN_PACKAGING_BUILD_DIR: out/build-ci-package
+      TOOLSCREEN_PACKAGING_ARTIFACT_DIR: out/build-ci-package/bin/Release
       TOOLSCREEN_BUNDLE_DIR: out/bundle
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/.cache/vcpkg/archives
       VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/.cache/vcpkg/archives,readwrite
       VCPKG_DISABLE_METRICS: '1'
       SCCACHE_GHA_ENABLED: 'true'
 
+    # Both installers are universal: each embeds the x64 and ARM64 DLLs, and the x64 EXE also runs on ARM64
+    # Windows under emulation, where it injects the DLLs that match the game's JVM.
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -275,13 +252,12 @@ jobs:
           - name: Set up MSVC developer command prompt
             uses: ilammy/msvc-dev-cmd@v1
             with:
-              arch: ${{ matrix.vs_arch }}
+              arch: x64
 
           - name: Set up sccache
             uses: mozilla-actions/sccache-action@v0.0.9
 
           - name: Set up Java 17
-            if: ${{ matrix.build_jar }}
             uses: actions/setup-java@v4
             with:
               distribution: temurin
@@ -293,20 +269,19 @@ jobs:
               path: |
                 ${{ env.TOOLSCREEN_PACKAGING_BUILD_DIR }}/_deps
                 ${{ env.TOOLSCREEN_PACKAGING_BUILD_DIR }}/downloads
-              key: windows-${{ matrix.arch }}-package-deps-v2-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'src/vcpkg.json') }}
+              key: windows-x64-package-deps-v2-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'src/vcpkg.json') }}
               restore-keys: |
-                windows-${{ matrix.arch }}-package-deps-v2-
+                windows-x64-package-deps-v2-
 
           - name: Restore vcpkg binary cache
             uses: actions/cache@v4
             with:
               path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
-              key: windows-${{ matrix.arch }}-vcpkg-binary-v2-${{ hashFiles('src/vcpkg.json') }}
+              key: windows-x64-vcpkg-binary-v2-${{ hashFiles('src/vcpkg.json') }}
               restore-keys: |
-                windows-${{ matrix.arch }}-vcpkg-binary-v2-
+                windows-x64-vcpkg-binary-v2-
 
           - name: Restore Maven repository cache
-            if: ${{ matrix.build_jar }}
             uses: actions/cache@v4
             with:
               path: ~/.m2/repository
@@ -321,19 +296,16 @@ jobs:
           $arm64DllPath = (Resolve-Path 'out/native/arm64/Toolscreen-not-legal-for-speedruns.dll').Path
           $x64LoggerPath = (Resolve-Path 'out/native/x64/liblogger_x64-not-legal-for-speedruns.dll').Path
           $arm64LoggerPath = (Resolve-Path 'out/native/arm64/liblogger_arm64-not-legal-for-speedruns.dll').Path
-          $currentDllPath = if ('${{ matrix.arch }}' -eq 'x64') { $x64DllPath } else { $arm64DllPath }
-          $currentLoggerPath = if ('${{ matrix.arch }}' -eq 'x64') { $x64LoggerPath } else { $arm64LoggerPath }
-          $jarPackaging = if ('${{ matrix.build_jar }}' -eq 'true') { 'ON' } else { 'OFF' }
 
-          cmake --preset ${{ matrix.packaging_preset }} -DTOOLSCREEN_ENABLE_JAR_PACKAGING="$jarPackaging" -DTOOLSCREEN_ENABLE_EXE_PACKAGING=ON -DTOOLSCREEN_BUILD_DOWNLOADER_ARTIFACTS=OFF -DTOOLSCREEN_STAGE_LIBLOGGER_PDB=OFF -DTOOLSCREEN_PACKAGING_DLL_PATH="$currentDllPath" -DTOOLSCREEN_PACKAGING_LIBLOGGER_PATH="$currentLoggerPath" -DTOOLSCREEN_PACKAGING_X64_DLL_PATH="$x64DllPath" -DTOOLSCREEN_PACKAGING_ARM64_DLL_PATH="$arm64DllPath" -DTOOLSCREEN_PACKAGING_X64_LIBLOGGER_PATH="$x64LoggerPath" -DTOOLSCREEN_PACKAGING_ARM64_LIBLOGGER_PATH="$arm64LoggerPath"
+          cmake --preset ci-ninja-x64-packaging -DTOOLSCREEN_ENABLE_JAR_PACKAGING=ON -DTOOLSCREEN_ENABLE_EXE_PACKAGING=ON -DTOOLSCREEN_BUILD_DOWNLOADER_ARTIFACTS=OFF -DTOOLSCREEN_STAGE_LIBLOGGER_PDB=OFF -DTOOLSCREEN_PACKAGING_DLL_PATH="$x64DllPath" -DTOOLSCREEN_PACKAGING_LIBLOGGER_PATH="$x64LoggerPath" -DTOOLSCREEN_PACKAGING_X64_DLL_PATH="$x64DllPath" -DTOOLSCREEN_PACKAGING_ARM64_DLL_PATH="$arm64DllPath" -DTOOLSCREEN_PACKAGING_X64_LIBLOGGER_PATH="$x64LoggerPath" -DTOOLSCREEN_PACKAGING_ARM64_LIBLOGGER_PATH="$arm64LoggerPath"
 
       - name: Build installers
         shell: pwsh
-        run: cmake --build --preset ${{ matrix.package_build_preset }} --parallel --target ${{ matrix.build_targets }}
+        run: cmake --build --preset ci-package --parallel --target jar installer_exe
 
       - name: Check installer contents
         shell: pwsh
-        run: ctest --test-dir $env:TOOLSCREEN_PACKAGING_BUILD_DIR --output-on-failure --tests-regex "${{ matrix.package_tests }}"
+        run: ctest --test-dir $env:TOOLSCREEN_PACKAGING_BUILD_DIR --output-on-failure --tests-regex "^(toolscreen_jar_exists|toolscreen_exe_exists|toolscreen_exe_embeds_dll|toolscreen_exe_resources_readable)$"
 
       - name: Stage installers
         shell: pwsh
@@ -342,21 +314,13 @@ jobs:
           $stageDir = Join-Path $env:GITHUB_WORKSPACE $env:TOOLSCREEN_BUNDLE_DIR
           New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
 
-          function Get-SingleFile([string]$Pattern) {
-            $found = @(Get-ChildItem -Path $sourceDir -File -Filter $Pattern)
+          foreach ($pattern in 'Toolscreen-*-double-click-me.exe', 'Toolscreen-*-double-click-me.jar') {
+            $found = @(Get-ChildItem -Path $sourceDir -File -Filter $pattern)
             if ($found.Count -ne 1) {
-              throw "Expected exactly one file matching '$Pattern' in $sourceDir, found $($found.Count)"
+              throw "Expected exactly one file matching '$pattern' in $sourceDir, found $($found.Count)"
             }
-            return $found[0]
-          }
-
-          # Both architectures build an EXE with the same name, so the architecture goes into the name here.
-          $exe = Get-SingleFile 'Toolscreen-*-double-click-me.exe'
-          Copy-Item -LiteralPath $exe.FullName -Destination (Join-Path $stageDir ('{0}-${{ matrix.arch }}-not-legal-for-speedruns.exe' -f $exe.BaseName))
-
-          if ('${{ matrix.build_jar }}' -eq 'true') {
-            $jar = Get-SingleFile 'Toolscreen-*-double-click-me.jar'
-            Copy-Item -LiteralPath $jar.FullName -Destination (Join-Path $stageDir ('{0}-not-legal-for-speedruns.jar' -f $jar.BaseName))
+            $file = $found[0]
+            Copy-Item -LiteralPath $file.FullName -Destination (Join-Path $stageDir ('{0}-not-legal-for-speedruns{1}' -f $file.BaseName, $file.Extension))
           }
 
           Get-ChildItem -Path $stageDir -File | ForEach-Object { Write-Host "Staged $($_.Name) ($([math]::Round($_.Length / 1MB, 2)) MiB)" }
@@ -364,7 +328,7 @@ jobs:
       - name: Upload installers
         uses: actions/upload-artifact@v4
         with:
-          name: bundle-part-installer-${{ matrix.arch }}
+          name: bundle-part-installers
           compression-level: 6
           if-no-files-found: error
           retention-days: 1
@@ -400,7 +364,7 @@ jobs:
           }
           "artifact=Toolscreen-$($parts -join '.')-$($env:COMMIT_SHA.Substring(0, 7))-unsigned" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-      # Combines the four parts into one artifact and deletes the parts, so the run shows a single download.
+      # Combines the three parts into one artifact and deletes the parts, so the run shows a single download.
       - name: Merge build artifact
         uses: actions/upload-artifact/merge@v4
         with:
