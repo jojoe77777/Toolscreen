@@ -22,8 +22,16 @@ concurrency:
   group: build-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+# Every run publishes one artifact, Toolscreen-<version>-<commit>-unsigned:
+#   Toolscreen-<version>-double-click-me-not-legal-for-speedruns.jar        universal JAR installer
+#   Toolscreen-<version>-double-click-me-x64-not-legal-for-speedruns.exe    x64 EXE installer
+#   Toolscreen-<version>-double-click-me-arm64-not-legal-for-speedruns.exe  ARM64 EXE installer
+#   x64/ and arm64/                                                          Toolscreen and liblogger DLLs and PDBs
+# The jobs below each upload their share of that layout, and the last job merges the shares into the single artifact.
+
 jobs:
-  build_core:
+  native:
+    name: Build ${{ matrix.arch }} DLLs
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -36,7 +44,9 @@ jobs:
             logger_name: liblogger_x64
             build_dir: out/build-ci
             artifact_dir: out/build-ci/bin/Release
-            can_run: true
+            # The test runners only run on x64 hosts, so only this leg builds them.
+            run_tests: true
+            build_targets: Toolscreen toolscreen_gui_integration_tests toolscreen_interactive_create_tests toolscreen_game_state_source_tests toolscreen_path_sanitize_tests toolscreen_background_fit_layout_tests toolscreen_startup_lifecycle_tests toolscreen_expression_parser_tests toolscreen_base64_tests
           - arch: arm64
             vs_arch: amd64_arm64
             configure_preset: ci-ninja-arm64
@@ -44,14 +54,12 @@ jobs:
             logger_name: liblogger_arm64
             build_dir: out/build-ci-arm64
             artifact_dir: out/build-ci-arm64/bin/Release
-            can_run: false
-    permissions:
-      actions: read
-      contents: read
+            run_tests: false
+            build_targets: Toolscreen
     env:
       TOOLSCREEN_BUILD_DIR: ${{ matrix.build_dir }}
       TOOLSCREEN_ARTIFACT_DIR: ${{ matrix.artifact_dir }}
-      TOOLSCREEN_RELEASE_DIR: out/release-unsigned
+      TOOLSCREEN_BUNDLE_DIR: out/bundle
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/.cache/vcpkg/archives
       VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/.cache/vcpkg/archives,readwrite
       VCPKG_DISABLE_METRICS: '1'
@@ -106,51 +114,52 @@ jobs:
           $destination = Join-Path (Get-Location) 'out/prebuilt-liblogger'
           & .\scripts\fetch_signed_liblogger.ps1 -DestinationDirectory $destination -Architecture '${{ matrix.arch }}'
 
-      - name: Configure core build preset
+      - name: Configure native build
         shell: pwsh
         run: |
           $prebuiltLoggerDllPath = (Resolve-Path 'out/prebuilt-liblogger/${{ matrix.logger_name }}.dll').Path
+          $prebuiltLoggerPdbPath = (Resolve-Path 'out/prebuilt-liblogger/${{ matrix.logger_name }}.pdb').Path
 
-          cmake --preset ${{ matrix.configure_preset }} -DTOOLSCREEN_ENABLE_JAR_PACKAGING=OFF -DTOOLSCREEN_ENABLE_EXE_PACKAGING=OFF -DTOOLSCREEN_BUILD_DOWNLOADER_ARTIFACTS=OFF -DTOOLSCREEN_STAGE_LIBLOGGER_PDB=OFF -DTOOLSCREEN_PREBUILT_LIBLOGGER_DLL_PATH="$prebuiltLoggerDllPath"
+          cmake --preset ${{ matrix.configure_preset }} -DTOOLSCREEN_ENABLE_JAR_PACKAGING=OFF -DTOOLSCREEN_ENABLE_EXE_PACKAGING=OFF -DTOOLSCREEN_BUILD_DOWNLOADER_ARTIFACTS=OFF -DTOOLSCREEN_STAGE_LIBLOGGER_PDB=ON -DTOOLSCREEN_PREBUILT_LIBLOGGER_DLL_PATH="$prebuiltLoggerDllPath" -DTOOLSCREEN_PREBUILT_LIBLOGGER_PDB_PATH="$prebuiltLoggerPdbPath"
 
-      - name: Build DLLs and test runners
+      - name: Build
         shell: pwsh
-        run: cmake --build --preset ${{ matrix.build_preset }} --parallel --target Toolscreen toolscreen_gui_integration_tests toolscreen_interactive_create_tests toolscreen_game_state_source_tests toolscreen_path_sanitize_tests toolscreen_background_fit_layout_tests toolscreen_startup_lifecycle_tests toolscreen_expression_parser_tests toolscreen_base64_tests
+        run: cmake --build --preset ${{ matrix.build_preset }} --parallel --target ${{ matrix.build_targets }}
+
+      - name: Check native artifacts
+        shell: pwsh
+        run: ctest --preset ${{ matrix.build_preset }} --tests-regex "^(toolscreen_artifact_exists|liblogger_artifact_exists)$"
 
       - name: Run fast CTest smoke tests
-        if: ${{ matrix.can_run }}
+        if: ${{ matrix.run_tests }}
         shell: pwsh
         run: ctest --preset ${{ matrix.build_preset }} --exclude-regex "^toolscreen_integration_"
 
       - name: Run GUI integration tests in parallel
-        if: ${{ matrix.can_run }}
+        if: ${{ matrix.run_tests }}
         shell: pwsh
         run: |
           & "$env:GITHUB_WORKSPACE\$env:TOOLSCREEN_ARTIFACT_DIR\toolscreen_gui_integration_tests.exe" --run-groups-parallel
 
-      - name: Assemble unsigned native release inputs
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Stage DLLs and PDBs
         shell: pwsh
         run: |
-          $releaseDir = Join-Path $env:GITHUB_WORKSPACE $env:TOOLSCREEN_RELEASE_DIR
-          $coreDir = Join-Path $env:GITHUB_WORKSPACE $env:TOOLSCREEN_ARTIFACT_DIR
+          $sourceDir = Join-Path $env:GITHUB_WORKSPACE $env:TOOLSCREEN_ARTIFACT_DIR
+          $stageDir = Join-Path $env:GITHUB_WORKSPACE "$env:TOOLSCREEN_BUNDLE_DIR/${{ matrix.arch }}"
+          New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
 
-          New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
-
-          Copy-Item -Path (Join-Path $coreDir 'Toolscreen.dll') -Destination (Join-Path $releaseDir 'Toolscreen.dll') -Force
-          Copy-Item -Path (Join-Path $coreDir 'Toolscreen.pdb') -Destination (Join-Path $releaseDir 'Toolscreen.pdb') -Force
-          Copy-Item -Path (Join-Path $coreDir '${{ matrix.logger_name }}.dll') -Destination (Join-Path $releaseDir '${{ matrix.logger_name }}.dll') -Force
-
-      - name: Strip private symbols from unsigned PDB
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-        shell: pwsh
-        run: |
-          $artifactDir = Join-Path $env:GITHUB_WORKSPACE $env:TOOLSCREEN_RELEASE_DIR
-          $pdbPath = Join-Path $artifactDir 'Toolscreen.pdb'
-
-          if (-not (Test-Path $pdbPath)) {
-            throw "Expected unsigned Toolscreen PDB not found: $pdbPath"
+          foreach ($fileName in @('Toolscreen.dll', 'Toolscreen.pdb', '${{ matrix.logger_name }}.dll', '${{ matrix.logger_name }}.pdb')) {
+            $sourcePath = Join-Path $sourceDir $fileName
+            if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
+              throw "Expected native artifact not found: $sourcePath"
+            }
+            Copy-Item -LiteralPath $sourcePath -Destination $stageDir -Force
           }
+
+      - name: Strip private symbols from Toolscreen.pdb
+        shell: pwsh
+        run: |
+          $pdbPath = Join-Path $env:GITHUB_WORKSPACE "$env:TOOLSCREEN_BUNDLE_DIR/${{ matrix.arch }}/Toolscreen.pdb"
 
           $pdbCopyCommand = Get-Command pdbcopy.exe -ErrorAction SilentlyContinue
           $pdbCopyPath = if ($pdbCopyCommand) {
@@ -177,84 +186,70 @@ jobs:
             throw "Failed to strip private symbols from $pdbPath using $pdbCopyPath"
           }
 
-          Remove-Item -Path $pdbPath -Force
-          Move-Item -Path $strippedPdbPath -Destination $pdbPath
+          Move-Item -Path $strippedPdbPath -Destination $pdbPath -Force
 
           $afterSizeBytes = (Get-Item $pdbPath).Length
           Write-Host ('Reduced Toolscreen.pdb from {0} MiB to {1} MiB using PDBCopy.' -f [math]::Round($beforeSizeBytes / 1MB, 2), [math]::Round($afterSizeBytes / 1MB, 2))
 
       - name: Validate unsigned PE metadata
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         shell: pwsh
         run: |
           $scriptPath = Join-Path $env:GITHUB_WORKSPACE 'scripts\verify_unsigned_pe_metadata.ps1'
-          $artifactDirectory = Join-Path $env:GITHUB_WORKSPACE $env:TOOLSCREEN_RELEASE_DIR
-          & $scriptPath -ArtifactDirectory $artifactDirectory
+          & $scriptPath -ArtifactDirectory (Join-Path $env:GITHUB_WORKSPACE "$env:TOOLSCREEN_BUNDLE_DIR/${{ matrix.arch }}")
 
-      - name: Rename native release artifacts
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Mark DLLs and PDBs as unsigned
         shell: pwsh
         run: |
-          $outputDir = Join-Path $env:GITHUB_WORKSPACE $env:TOOLSCREEN_RELEASE_DIR
-          $suffix = '-not-legal-for-speedruns'
-          $filesToRename = @(
-            Join-Path $outputDir 'Toolscreen.dll'
-            Join-Path $outputDir 'Toolscreen.pdb'
-            Join-Path $outputDir '${{ matrix.logger_name }}.dll'
-          )
-
-          foreach ($filePath in $filesToRename) {
-            if (-not (Test-Path $filePath)) {
-              throw "Expected artifact not found: $filePath"
-            }
-
-            $item = Get-Item $filePath
-            $renamed = '{0}{1}{2}' -f $item.BaseName, $suffix, $item.Extension
-            Move-Item -Path $item.FullName -Destination (Join-Path $item.DirectoryName $renamed)
+          Get-ChildItem -Path (Join-Path $env:GITHUB_WORKSPACE "$env:TOOLSCREEN_BUNDLE_DIR/${{ matrix.arch }}") -File | ForEach-Object {
+            Rename-Item -LiteralPath $_.FullName -NewName ('{0}-not-legal-for-speedruns{1}' -f $_.BaseName, $_.Extension)
           }
 
-      - parallel:
-          - name: Upload native payloads for universal packaging
-            if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-            uses: actions/upload-artifact@v4
-            with:
-              name: toolscreen-${{ matrix.arch }}-packaging-inputs
-              compression-level: 6
-              if-no-files-found: error
-              retention-days: 1
-              path: |
-                ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/Toolscreen.dll
-                ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/${{ matrix.logger_name }}.dll
-
-          - name: Upload unsigned native release inputs
-            if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-            uses: actions/upload-artifact@v4
-            with:
-              name: toolscreen-${{ matrix.arch }}-unsigned-release-inputs
-              compression-level: 6
-              if-no-files-found: error
-              retention-days: 1
-              path: |
-                ${{ env.TOOLSCREEN_RELEASE_DIR }}/Toolscreen-not-legal-for-speedruns.dll
-                ${{ env.TOOLSCREEN_RELEASE_DIR }}/Toolscreen-not-legal-for-speedruns.pdb
-                ${{ env.TOOLSCREEN_RELEASE_DIR }}/${{ matrix.logger_name }}-not-legal-for-speedruns.dll
+      - name: Upload DLLs and PDBs
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundle-part-native-${{ matrix.arch }}
+          compression-level: 6
+          if-no-files-found: error
+          retention-days: 1
+          path: ${{ env.TOOLSCREEN_BUNDLE_DIR }}/
 
       - name: Show sccache stats
         if: ${{ always() }}
         shell: pwsh
         run: sccache --show-stats
 
-  package_universal:
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    needs: build_core
+  installers:
+    name: Build ${{ matrix.arch }} installer
+    needs: native
     runs-on: windows-latest
-    permissions:
-      actions: read
-      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The JAR installer is universal, so only the x64 leg builds it. Each EXE installer is a native program
+          # for its own architecture, and both embed the x64 and ARM64 DLLs.
+          - arch: x64
+            vs_arch: x64
+            packaging_preset: ci-ninja-x64-packaging
+            package_build_preset: ci-package
+            packaging_build_dir: out/build-ci-package
+            packaging_artifact_dir: out/build-ci-package/bin/Release
+            build_jar: true
+            build_targets: jar installer_exe
+            package_tests: ^(toolscreen_jar_exists|toolscreen_exe_exists|toolscreen_exe_embeds_dll|toolscreen_exe_resources_readable)$
+          - arch: arm64
+            vs_arch: amd64_arm64
+            packaging_preset: ci-ninja-arm64-packaging
+            package_build_preset: ci-package-arm64
+            packaging_build_dir: out/build-ci-package-arm64
+            packaging_artifact_dir: out/build-ci-package-arm64/bin/Release
+            build_jar: false
+            build_targets: installer_exe
+            package_tests: ^(toolscreen_exe_exists|toolscreen_exe_embeds_dll)$
     env:
-      TOOLSCREEN_PACKAGING_BUILD_DIR: out/build-ci-package
-      TOOLSCREEN_PACKAGING_ARTIFACT_DIR: out/build-ci-package/bin/Release
-      TOOLSCREEN_RELEASE_DIR: out/release-unsigned-universal
+      TOOLSCREEN_PACKAGING_BUILD_DIR: ${{ matrix.packaging_build_dir }}
+      TOOLSCREEN_PACKAGING_ARTIFACT_DIR: ${{ matrix.packaging_artifact_dir }}
+      TOOLSCREEN_BUNDLE_DIR: out/bundle
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/.cache/vcpkg/archives
       VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/.cache/vcpkg/archives,readwrite
       VCPKG_DISABLE_METRICS: '1'
@@ -265,39 +260,28 @@ jobs:
         uses: actions/checkout@v4
 
       - parallel:
-          - name: Download x64 packaging inputs
+          - name: Download x64 DLLs
             uses: actions/download-artifact@v4
             with:
-              name: toolscreen-x64-packaging-inputs
-              path: out/packaging-inputs/x64
+              name: bundle-part-native-x64
+              path: out/native
 
-          - name: Download ARM64 packaging inputs
+          - name: Download ARM64 DLLs
             uses: actions/download-artifact@v4
             with:
-              name: toolscreen-arm64-packaging-inputs
-              path: out/packaging-inputs/arm64
-
-          - name: Download x64 native release inputs
-            uses: actions/download-artifact@v4
-            with:
-              name: toolscreen-x64-unsigned-release-inputs
-              path: out/release-bundles/x64
-
-          - name: Download ARM64 native release inputs
-            uses: actions/download-artifact@v4
-            with:
-              name: toolscreen-arm64-unsigned-release-inputs
-              path: out/release-bundles/arm64
+              name: bundle-part-native-arm64
+              path: out/native
 
           - name: Set up MSVC developer command prompt
             uses: ilammy/msvc-dev-cmd@v1
             with:
-              arch: x64
+              arch: ${{ matrix.vs_arch }}
 
           - name: Set up sccache
             uses: mozilla-actions/sccache-action@v0.0.9
 
           - name: Set up Java 17
+            if: ${{ matrix.build_jar }}
             uses: actions/setup-java@v4
             with:
               distribution: temurin
@@ -309,19 +293,20 @@ jobs:
               path: |
                 ${{ env.TOOLSCREEN_PACKAGING_BUILD_DIR }}/_deps
                 ${{ env.TOOLSCREEN_PACKAGING_BUILD_DIR }}/downloads
-              key: windows-universal-package-deps-v1-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'src/vcpkg.json') }}
+              key: windows-${{ matrix.arch }}-package-deps-v2-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'src/vcpkg.json') }}
               restore-keys: |
-                windows-universal-package-deps-v1-
+                windows-${{ matrix.arch }}-package-deps-v2-
 
           - name: Restore vcpkg binary cache
             uses: actions/cache@v4
             with:
               path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
-              key: windows-x64-vcpkg-binary-v2-${{ hashFiles('src/vcpkg.json') }}
+              key: windows-${{ matrix.arch }}-vcpkg-binary-v2-${{ hashFiles('src/vcpkg.json') }}
               restore-keys: |
-                windows-x64-vcpkg-binary-v2-
+                windows-${{ matrix.arch }}-vcpkg-binary-v2-
 
           - name: Restore Maven repository cache
+            if: ${{ matrix.build_jar }}
             uses: actions/cache@v4
             with:
               path: ~/.m2/repository
@@ -329,117 +314,99 @@ jobs:
               restore-keys: |
                 windows-maven-v2-
 
-      - name: Configure universal packaging build
+      - name: Configure packaging build
         shell: pwsh
         run: |
-          $x64DllPath = (Resolve-Path 'out/packaging-inputs/x64/Toolscreen.dll').Path
-          $arm64DllPath = (Resolve-Path 'out/packaging-inputs/arm64/Toolscreen.dll').Path
-          $x64LoggerPath = (Resolve-Path 'out/packaging-inputs/x64/liblogger_x64.dll').Path
-          $arm64LoggerPath = (Resolve-Path 'out/packaging-inputs/arm64/liblogger_arm64.dll').Path
+          $x64DllPath = (Resolve-Path 'out/native/x64/Toolscreen-not-legal-for-speedruns.dll').Path
+          $arm64DllPath = (Resolve-Path 'out/native/arm64/Toolscreen-not-legal-for-speedruns.dll').Path
+          $x64LoggerPath = (Resolve-Path 'out/native/x64/liblogger_x64-not-legal-for-speedruns.dll').Path
+          $arm64LoggerPath = (Resolve-Path 'out/native/arm64/liblogger_arm64-not-legal-for-speedruns.dll').Path
+          $currentDllPath = if ('${{ matrix.arch }}' -eq 'x64') { $x64DllPath } else { $arm64DllPath }
+          $currentLoggerPath = if ('${{ matrix.arch }}' -eq 'x64') { $x64LoggerPath } else { $arm64LoggerPath }
+          $jarPackaging = if ('${{ matrix.build_jar }}' -eq 'true') { 'ON' } else { 'OFF' }
 
-          cmake --preset ci-ninja-x64-packaging -DTOOLSCREEN_ENABLE_JAR_PACKAGING=ON -DTOOLSCREEN_ENABLE_EXE_PACKAGING=OFF -DTOOLSCREEN_BUILD_DOWNLOADER_ARTIFACTS=OFF -DTOOLSCREEN_STAGE_LIBLOGGER_PDB=OFF -DTOOLSCREEN_PACKAGING_DLL_PATH="$x64DllPath" -DTOOLSCREEN_PACKAGING_LIBLOGGER_PATH="$x64LoggerPath" -DTOOLSCREEN_PACKAGING_X64_DLL_PATH="$x64DllPath" -DTOOLSCREEN_PACKAGING_ARM64_DLL_PATH="$arm64DllPath" -DTOOLSCREEN_PACKAGING_X64_LIBLOGGER_PATH="$x64LoggerPath" -DTOOLSCREEN_PACKAGING_ARM64_LIBLOGGER_PATH="$arm64LoggerPath"
+          cmake --preset ${{ matrix.packaging_preset }} -DTOOLSCREEN_ENABLE_JAR_PACKAGING="$jarPackaging" -DTOOLSCREEN_ENABLE_EXE_PACKAGING=ON -DTOOLSCREEN_BUILD_DOWNLOADER_ARTIFACTS=OFF -DTOOLSCREEN_STAGE_LIBLOGGER_PDB=OFF -DTOOLSCREEN_PACKAGING_DLL_PATH="$currentDllPath" -DTOOLSCREEN_PACKAGING_LIBLOGGER_PATH="$currentLoggerPath" -DTOOLSCREEN_PACKAGING_X64_DLL_PATH="$x64DllPath" -DTOOLSCREEN_PACKAGING_ARM64_DLL_PATH="$arm64DllPath" -DTOOLSCREEN_PACKAGING_X64_LIBLOGGER_PATH="$x64LoggerPath" -DTOOLSCREEN_PACKAGING_ARM64_LIBLOGGER_PATH="$arm64LoggerPath"
 
-      - name: Build universal JAR package
+      - name: Build installers
         shell: pwsh
-        run: cmake --build --preset ci-package --parallel --target jar
+        run: cmake --build --preset ${{ matrix.package_build_preset }} --parallel --target ${{ matrix.build_targets }}
 
-      - name: Validate universal JAR contents
+      - name: Check installer contents
         shell: pwsh
-        run: ctest --test-dir $env:TOOLSCREEN_PACKAGING_BUILD_DIR --output-on-failure -R "^toolscreen_jar_exists$"
+        run: ctest --test-dir $env:TOOLSCREEN_PACKAGING_BUILD_DIR --output-on-failure --tests-regex "${{ matrix.package_tests }}"
 
-      - name: Assemble unsigned universal release input
-        shell: pwsh
-        run: |
-          $releaseDir = Join-Path $env:GITHUB_WORKSPACE $env:TOOLSCREEN_RELEASE_DIR
-          $jarDir = Join-Path $env:GITHUB_WORKSPACE $env:TOOLSCREEN_PACKAGING_ARTIFACT_DIR
-          $jarMatches = Get-ChildItem -Path $jarDir -File -Filter 'Toolscreen-*-double-click-me.jar'
-
-          if ($jarMatches.Count -ne 1) {
-            throw "Expected exactly one packaged Toolscreen jar in $jarDir, found $($jarMatches.Count)"
-          }
-
-          New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
-          Copy-Item -Path $jarMatches[0].FullName -Destination (Join-Path $releaseDir $jarMatches[0].Name) -Force
-
-      - name: Rename universal release artifact
+      - name: Stage installers
         shell: pwsh
         run: |
-          $outputDir = Join-Path $env:GITHUB_WORKSPACE $env:TOOLSCREEN_RELEASE_DIR
-          $jarMatches = Get-ChildItem -Path $outputDir -File -Filter 'Toolscreen-*-double-click-me.jar'
+          $sourceDir = Join-Path $env:GITHUB_WORKSPACE $env:TOOLSCREEN_PACKAGING_ARTIFACT_DIR
+          $stageDir = Join-Path $env:GITHUB_WORKSPACE $env:TOOLSCREEN_BUNDLE_DIR
+          New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
 
-          if ($jarMatches.Count -ne 1) {
-            throw "Expected exactly one universal Toolscreen jar in $outputDir, found $($jarMatches.Count)"
-          }
-
-          $jar = $jarMatches[0]
-          $renamed = '{0}-not-legal-for-speedruns{1}' -f $jar.BaseName, $jar.Extension
-          Move-Item -Path $jar.FullName -Destination (Join-Path $jar.DirectoryName $renamed)
-
-      - name: Add universal JAR to per-architecture release bundles
-        shell: pwsh
-        run: |
-          $jarMatches = Get-ChildItem -Path $env:TOOLSCREEN_RELEASE_DIR -File -Filter 'Toolscreen-*-double-click-me-not-legal-for-speedruns.jar'
-          if ($jarMatches.Count -ne 1) {
-            throw "Expected exactly one renamed universal Toolscreen jar, found $($jarMatches.Count)"
-          }
-
-          $bundleSpecs = @(
-            @{ Architecture = 'x64'; Logger = 'liblogger_x64-not-legal-for-speedruns.dll' }
-            @{ Architecture = 'arm64'; Logger = 'liblogger_arm64-not-legal-for-speedruns.dll' }
-          )
-
-          foreach ($bundleSpec in $bundleSpecs) {
-            $bundleDir = Join-Path 'out/release-bundles' $bundleSpec.Architecture
-            Copy-Item -Path $jarMatches[0].FullName -Destination (Join-Path $bundleDir $jarMatches[0].Name) -Force
-
-            $expectedFiles = @(
-              'Toolscreen-not-legal-for-speedruns.dll'
-              'Toolscreen-not-legal-for-speedruns.pdb'
-              $bundleSpec.Logger
-              $jarMatches[0].Name
-            )
-
-            foreach ($expectedFile in $expectedFiles) {
-              $expectedPath = Join-Path $bundleDir $expectedFile
-              if (-not (Test-Path $expectedPath -PathType Leaf)) {
-                throw "Expected release artifact not found: $expectedPath"
-              }
+          function Get-SingleFile([string]$Pattern) {
+            $found = @(Get-ChildItem -Path $sourceDir -File -Filter $Pattern)
+            if ($found.Count -ne 1) {
+              throw "Expected exactly one file matching '$Pattern' in $sourceDir, found $($found.Count)"
             }
-
-            $actualFiles = Get-ChildItem -Path $bundleDir -File
-            if ($actualFiles.Count -ne $expectedFiles.Count) {
-              throw "Expected exactly $($expectedFiles.Count) files in $bundleDir, found $($actualFiles.Count)"
-            }
+            return $found[0]
           }
 
-      - parallel:
-          - name: Upload unsigned x64 release artifacts
-            uses: actions/upload-artifact@v4
-            with:
-              name: toolscreen-x64-unsigned-artifacts
-              compression-level: 6
-              if-no-files-found: error
-              retention-days: 7
-              path: |
-                out/release-bundles/x64/Toolscreen-not-legal-for-speedruns.dll
-                out/release-bundles/x64/Toolscreen-not-legal-for-speedruns.pdb
-                out/release-bundles/x64/liblogger_x64-not-legal-for-speedruns.dll
-                out/release-bundles/x64/Toolscreen-*-double-click-me-not-legal-for-speedruns.jar
+          # Both architectures build an EXE with the same name, so the architecture goes into the name here.
+          $exe = Get-SingleFile 'Toolscreen-*-double-click-me.exe'
+          Copy-Item -LiteralPath $exe.FullName -Destination (Join-Path $stageDir ('{0}-${{ matrix.arch }}-not-legal-for-speedruns.exe' -f $exe.BaseName))
 
-          - name: Upload unsigned ARM64 release artifacts
-            uses: actions/upload-artifact@v4
-            with:
-              name: toolscreen-arm64-unsigned-artifacts
-              compression-level: 6
-              if-no-files-found: error
-              retention-days: 7
-              path: |
-                out/release-bundles/arm64/Toolscreen-not-legal-for-speedruns.dll
-                out/release-bundles/arm64/Toolscreen-not-legal-for-speedruns.pdb
-                out/release-bundles/arm64/liblogger_arm64-not-legal-for-speedruns.dll
-                out/release-bundles/arm64/Toolscreen-*-double-click-me-not-legal-for-speedruns.jar
+          if ('${{ matrix.build_jar }}' -eq 'true') {
+            $jar = Get-SingleFile 'Toolscreen-*-double-click-me.jar'
+            Copy-Item -LiteralPath $jar.FullName -Destination (Join-Path $stageDir ('{0}-not-legal-for-speedruns.jar' -f $jar.BaseName))
+          }
+
+          Get-ChildItem -Path $stageDir -File | ForEach-Object { Write-Host "Staged $($_.Name) ($([math]::Round($_.Length / 1MB, 2)) MiB)" }
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundle-part-installer-${{ matrix.arch }}
+          compression-level: 6
+          if-no-files-found: error
+          retention-days: 1
+          path: ${{ env.TOOLSCREEN_BUNDLE_DIR }}/
 
       - name: Show sccache stats
         if: ${{ always() }}
         shell: pwsh
         run: sccache --show-stats
+
+  bundle:
+    name: Bundle build artifact
+    needs: [native, installers]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out version file
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: ToolscreenVersion.cmake
+          sparse-checkout-cone-mode: false
+
+      - name: Name the artifact
+        id: name
+        shell: pwsh
+        env:
+          COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          $content = Get-Content -LiteralPath 'ToolscreenVersion.cmake' -Raw
+          $parts = foreach ($component in 'MAJOR', 'MINOR', 'PATCH') {
+            $match = [regex]::Match($content, "set\(TOOLSCREEN_VERSION_$component\s+(\d+)\)")
+            if (-not $match.Success) { throw "Failed to parse TOOLSCREEN_VERSION_$component from ToolscreenVersion.cmake" }
+            $match.Groups[1].Value
+          }
+          "artifact=Toolscreen-$($parts -join '.')-$($env:COMMIT_SHA.Substring(0, 7))-unsigned" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      # Combines the four parts into one artifact and deletes the parts, so the run shows a single download.
+      - name: Merge build artifact
+        uses: actions/upload-artifact/merge@v4
+        with:
+          name: ${{ steps.name.outputs.artifact }}
+          pattern: bundle-part-*
+          separate-directories: false
+          delete-merged: true
+          compression-level: 6
+          retention-days: 7
