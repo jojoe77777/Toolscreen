@@ -817,8 +817,8 @@ if (BeginSelectableSettingsNestedTabItem(trc("tabs.mirrors"))) {
             }
 
             ImGui::SeparatorText(trc("mirrors.output_position"));
-            ImGui::TextDisabled(trc(mirror.outputScaleAppliesInGroups ? "mirrors.tooltip.output_scale_legacy_groups"
-                                                                      : "mirrors.tooltip.output_scale"));
+            ImGui::TextDisabled("%s", trc(mirror.outputScaleAppliesInGroups ? "mirrors.tooltip.output_scale_legacy_groups"
+                                                                           : "mirrors.tooltip.output_scale"));
             if (beginMirrorSettingsTable("mirror_output_position_settings")) {
                 mirrorSettingsRowLabel(trc("mirrors.output_scale"));
                 if (ImGui::Checkbox((tr("mirrors.separate_x_y") + "##scale").c_str(), &mirror.output.separateScale)) {
