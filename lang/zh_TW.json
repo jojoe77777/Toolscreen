@@ -567,6 +567,7 @@
     "mirrors.tooltip.color_passthrough": "啟用後，匹配的像素輸出其原始顏色，而非輸出顏色",
     "mirrors.tooltip.enable_in_group": "在組中啟用/停用此投影",
     "mirrors.tooltip.output_scale": "注意：此處的投影輸出設定不會影響在投影組內渲染的投影。",
+    "mirrors.tooltip.output_scale_legacy_groups": "注意：此投影來自舊版設定，因此在投影組內，其輸出縮放會與該組的寬度% 和 高度% 相乘。其他輸出設定在組內不生效。",
     "mirrors.tooltip.per_item_sizing": "寬度% 和 高度% 僅在作為此組的一部分渲染時影響投影。\n在此組外使用的投影將以原始大小渲染。",
     "mirrors.tooltip.position_size_offsets": "位置/大小偏移（相對於投影）",
     "mirrors.tooltip.relative_to_screen": "啟用後，位置將儲存為螢幕大小的百分比。\n這使得設定可以跨不同的螢幕解析度移植。",

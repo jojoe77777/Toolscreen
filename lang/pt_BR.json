@@ -565,6 +565,7 @@
     "mirrors.tooltip.color_passthrough": "Quando ativado, os pixels correspondentes exibem sua cor original em vez da Cor de Saída",
     "mirrors.tooltip.enable_in_group": "Ativar/desativar este espelho no grupo",
     "mirrors.tooltip.output_scale": "Nota: As configurações de saída do espelho aqui não afetam espelhos renderizados dentro de um Grupo de Espelhos.",
+    "mirrors.tooltip.output_scale_legacy_groups": "Nota: Este espelho vem de uma configuração antiga, então dentro de um Grupo de Espelhos sua escala de saída é multiplicada pela % de Largura e % de Altura do grupo. As demais configurações de saída dele não se aplicam ali.",
     "mirrors.tooltip.per_item_sizing": "% de Largura e % de Altura afetam os espelhos apenas quando renderizados como parte deste grupo.\nEspelhos usados fora deste grupo serão renderizados no tamanho original.",
     "mirrors.tooltip.position_size_offsets": "Deslocamentos de Posição/Tamanho (relativo ao espelho)",
     "mirrors.tooltip.relative_to_screen": "Quando ativado, a posição é armazenada como porcentagens do tamanho da tela.\nIsso torna as configurações portáveis entre diferentes resoluções de tela.",
