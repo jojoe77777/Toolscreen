@@ -7,6 +7,17 @@ permissions:
   actions: read
   contents: read
 
+# The run publishes one artifact, Toolscreen-<version>-signed:
+#   Toolscreen-<version>-double-click-me-not-legal-for-speedruns.jar        signed universal JAR installer
+#   Toolscreen-<version>-double-click-me-x64-not-legal-for-speedruns.exe    signed x64 EXE installer
+#   Toolscreen-<version>-double-click-me-arm64-not-legal-for-speedruns.exe  signed ARM64 EXE installer
+#   toolscreen-downloader-not-legal-for-speedruns.jar                       downloader JAR
+#   toolscreen-downloader-<arch>-not-legal-for-speedruns.exe                signed downloader EXEs
+#   x64/ and arm64/                                                          signed Toolscreen DLL, liblogger DLL, PDBs
+#   SHA512SUMS.txt
+# The jobs below upload signed-part-* artifacts with original file names; the last job renames and checksums them
+# into that layout and deletes every other artifact of the run.
+
 jobs:
   build_signed_native:
     name: Build and sign native ${{ matrix.arch }} payload
@@ -22,7 +33,9 @@ jobs:
             logger_name: liblogger_x64
             build_dir: out/build-ci
             artifact_dir: out/build-ci/bin/Release
+            # The test runners only run on x64 hosts, so only this leg builds them.
             can_run: true
+            build_targets: Toolscreen toolscreen_gui_integration_tests toolscreen_interactive_create_tests toolscreen_game_state_source_tests toolscreen_path_sanitize_tests toolscreen_background_fit_layout_tests toolscreen_startup_lifecycle_tests toolscreen_expression_parser_tests toolscreen_base64_tests
           - arch: arm64
             vs_arch: amd64_arm64
             configure_preset: ci-ninja-arm64
@@ -31,6 +44,7 @@ jobs:
             build_dir: out/build-ci-arm64
             artifact_dir: out/build-ci-arm64/bin/Release
             can_run: false
+            build_targets: Toolscreen
     env:
       TOOLSCREEN_BUILD_DIR: ${{ matrix.build_dir }}
       TOOLSCREEN_ARTIFACT_DIR: ${{ matrix.artifact_dir }}
@@ -127,11 +141,11 @@ jobs:
 
           cmake --preset ${{ matrix.configure_preset }} -DTOOLSCREEN_ENABLE_JAR_PACKAGING=OFF -DTOOLSCREEN_ENABLE_EXE_PACKAGING=OFF -DTOOLSCREEN_BUILD_DOWNLOADER_ARTIFACTS=OFF -DTOOLSCREEN_STAGE_LIBLOGGER_PDB=ON -DTOOLSCREEN_PREBUILT_LIBLOGGER_DLL_PATH="$prebuiltLoggerDllPath" -DTOOLSCREEN_PREBUILT_LIBLOGGER_PDB_PATH="$prebuiltLoggerPdbPath"
 
-      - name: Build native DLLs and all test runners
+      - name: Build native DLLs
         shell: pwsh
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: cmake --build --preset ${{ matrix.build_preset }} --parallel --target Toolscreen toolscreen_gui_integration_tests toolscreen_interactive_create_tests toolscreen_game_state_source_tests toolscreen_path_sanitize_tests toolscreen_background_fit_layout_tests toolscreen_startup_lifecycle_tests toolscreen_expression_parser_tests toolscreen_base64_tests
+        run: cmake --build --preset ${{ matrix.build_preset }} --parallel --target ${{ matrix.build_targets }}
 
       - name: Run non-GUI native tests
         if: ${{ matrix.can_run }}
@@ -144,8 +158,7 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE\$env:TOOLSCREEN_ARTIFACT_DIR\toolscreen_gui_integration_tests.exe" --run-groups-parallel
 
-      - name: Validate ARM64 native artifacts
-        if: ${{ matrix.can_run == false }}
+      - name: Validate native artifacts
         shell: pwsh
         run: ctest --preset ${{ matrix.build_preset }} --tests-regex "^(toolscreen_artifact_exists|liblogger_artifact_exists)$"
 
@@ -177,7 +190,7 @@ jobs:
         shell: pwsh
         run: |
           $artifactDir = Join-Path $env:GITHUB_WORKSPACE $env:TOOLSCREEN_ARTIFACT_DIR
-          $payloadDir = Join-Path $env:GITHUB_WORKSPACE $env:TOOLSCREEN_SIGNED_NATIVE_DIR
+          $payloadDir = Join-Path $env:GITHUB_WORKSPACE "$env:TOOLSCREEN_SIGNED_NATIVE_DIR/${{ matrix.arch }}"
           $signedDllPath = Join-Path $env:GITHUB_WORKSPACE 'out/signpath-dll-output/Toolscreen.dll'
           $sourceFiles = @(
             $signedDllPath
@@ -199,15 +212,11 @@ jobs:
       - name: Upload signed native payload
         uses: actions/upload-artifact@v4
         with:
-          name: toolscreen-${{ matrix.arch }}-signed-native-payload
+          name: signed-part-native-${{ matrix.arch }}
           compression-level: 6
           if-no-files-found: error
           retention-days: 2
-          path: |
-            ${{ env.TOOLSCREEN_SIGNED_NATIVE_DIR }}/Toolscreen.dll
-            ${{ env.TOOLSCREEN_SIGNED_NATIVE_DIR }}/Toolscreen.pdb
-            ${{ env.TOOLSCREEN_SIGNED_NATIVE_DIR }}/${{ matrix.logger_name }}.dll
-            ${{ env.TOOLSCREEN_SIGNED_NATIVE_DIR }}/${{ matrix.logger_name }}.pdb
+          path: ${{ env.TOOLSCREEN_SIGNED_NATIVE_DIR }}/
 
       - name: Show sccache stats
         if: ${{ always() }}
@@ -222,6 +231,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # The JAR installer and the downloader JAR are universal, so only the x64 leg builds and signs them. The
+          # EXE installer and downloader are native programs for their own architecture.
           - arch: x64
             vs_arch: x64
             packaging_preset: ci-ninja-x64-packaging
@@ -229,6 +240,8 @@ jobs:
             logger_name: liblogger_x64
             packaging_build_dir: out/build-ci-package
             packaging_artifact_dir: out/build-ci-package/bin/Release
+            build_jar: true
+            package_tests: ^(toolscreen_exe_exists|toolscreen_exe_embeds_dll|toolscreen_exe_resources_readable|toolscreen_downloader_exe_exists|toolscreen_jar_exists|toolscreen_downloader_jar_exists)$
           - arch: arm64
             vs_arch: amd64_arm64
             packaging_preset: ci-ninja-arm64-packaging
@@ -236,9 +249,12 @@ jobs:
             logger_name: liblogger_arm64
             packaging_build_dir: out/build-ci-package-arm64
             packaging_artifact_dir: out/build-ci-package-arm64/bin/Release
+            build_jar: false
+            package_tests: ^(toolscreen_exe_exists|toolscreen_exe_embeds_dll|toolscreen_downloader_exe_exists)$
     env:
       TOOLSCREEN_PACKAGING_BUILD_DIR: ${{ matrix.packaging_build_dir }}
       TOOLSCREEN_ARTIFACT_DIR: ${{ matrix.packaging_artifact_dir }}
+      TOOLSCREEN_RELEASE_PART_DIR: out/release-part
       SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
       SIGNPATH_ORGANIZATION_ID: '0126c615-e5f1-4fed-a438-6b8de149c8f4'
       SIGNPATH_PROJECT_SLUG: 'Toolscreen'
@@ -290,6 +306,7 @@ jobs:
               "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
           - name: Set up Java 17
+            if: ${{ matrix.build_jar }}
             uses: actions/setup-java@v4
             with:
               distribution: temurin
@@ -314,6 +331,7 @@ jobs:
                 windows-${{ matrix.arch }}-vcpkg-binary-v2-
 
           - name: Restore Maven repository cache
+            if: ${{ matrix.build_jar }}
             uses: actions/cache@v4
             with:
               path: ~/.m2/repository
@@ -324,14 +342,14 @@ jobs:
           - name: Download signed x64 native payload
             uses: actions/download-artifact@v4
             with:
-              name: toolscreen-x64-signed-native-payload
-              path: out/signed-native/x64
+              name: signed-part-native-x64
+              path: out/signed-native
 
           - name: Download signed ARM64 native payload
             uses: actions/download-artifact@v4
             with:
-              name: toolscreen-arm64-signed-native-payload
-              path: out/signed-native/arm64
+              name: signed-part-native-arm64
+              path: out/signed-native
 
       - name: Validate signed native payloads
         shell: pwsh
@@ -370,8 +388,9 @@ jobs:
             $currentLoggerDllPath = $arm64LoggerDllPath
             $currentLoggerPdbPath = (Resolve-Path 'out/signed-native/arm64/liblogger_arm64.pdb').Path
           }
+          $jarPackaging = if ('${{ matrix.build_jar }}' -eq 'true') { 'ON' } else { 'OFF' }
 
-          cmake --preset ${{ matrix.packaging_preset }} -DTOOLSCREEN_ENABLE_JAR_PACKAGING=ON -DTOOLSCREEN_ENABLE_EXE_PACKAGING=ON -DTOOLSCREEN_BUILD_DOWNLOADER_ARTIFACTS=ON -DTOOLSCREEN_PACKAGING_DLL_PATH="$currentDllPath" -DTOOLSCREEN_PACKAGING_LIBLOGGER_PATH="$currentLoggerDllPath" -DTOOLSCREEN_PACKAGING_X64_DLL_PATH="$x64DllPath" -DTOOLSCREEN_PACKAGING_ARM64_DLL_PATH="$arm64DllPath" -DTOOLSCREEN_PACKAGING_X64_LIBLOGGER_PATH="$x64LoggerDllPath" -DTOOLSCREEN_PACKAGING_ARM64_LIBLOGGER_PATH="$arm64LoggerDllPath" -DTOOLSCREEN_PREBUILT_LIBLOGGER_DLL_PATH="$currentLoggerDllPath" -DTOOLSCREEN_PREBUILT_LIBLOGGER_PDB_PATH="$currentLoggerPdbPath"
+          cmake --preset ${{ matrix.packaging_preset }} -DTOOLSCREEN_ENABLE_JAR_PACKAGING="$jarPackaging" -DTOOLSCREEN_ENABLE_EXE_PACKAGING=ON -DTOOLSCREEN_BUILD_DOWNLOADER_ARTIFACTS=ON -DTOOLSCREEN_PACKAGING_DLL_PATH="$currentDllPath" -DTOOLSCREEN_PACKAGING_LIBLOGGER_PATH="$currentLoggerDllPath" -DTOOLSCREEN_PACKAGING_X64_DLL_PATH="$x64DllPath" -DTOOLSCREEN_PACKAGING_ARM64_DLL_PATH="$arm64DllPath" -DTOOLSCREEN_PACKAGING_X64_LIBLOGGER_PATH="$x64LoggerDllPath" -DTOOLSCREEN_PACKAGING_ARM64_LIBLOGGER_PATH="$arm64LoggerDllPath" -DTOOLSCREEN_PREBUILT_LIBLOGGER_DLL_PATH="$currentLoggerDllPath" -DTOOLSCREEN_PREBUILT_LIBLOGGER_PDB_PATH="$currentLoggerPdbPath"
 
       - name: Remove stale packaged artifacts
         shell: pwsh
@@ -399,6 +418,7 @@ jobs:
         run: cmake --build --preset ${{ matrix.package_build_preset }} --parallel --target downloader_exe
 
       - name: Build universal JAR packages
+        if: ${{ matrix.build_jar }}
         shell: pwsh
         run: cmake --build --preset ${{ matrix.package_build_preset }} --parallel --target jar
 
@@ -432,13 +452,14 @@ jobs:
           $artifactDirectory = Join-Path $env:GITHUB_WORKSPACE $env:TOOLSCREEN_ARTIFACT_DIR
           & $scriptPath -ArtifactDirectory $artifactDirectory
 
-      - name: Run universal packaging smoke tests
+      - name: Run packaging smoke tests
         shell: pwsh
-        run: ctest --test-dir ${{ env.TOOLSCREEN_PACKAGING_BUILD_DIR }} --output-on-failure --tests-regex "^(toolscreen_exe_exists|toolscreen_exe_embeds_dll|toolscreen_exe_resources_readable|toolscreen_downloader_exe_exists|toolscreen_jar_exists|toolscreen_downloader_jar_exists)$"
+        run: ctest --test-dir ${{ env.TOOLSCREEN_PACKAGING_BUILD_DIR }} --output-on-failure --tests-regex "${{ matrix.package_tests }}"
 
       - parallel:
           - name: Upload main installer JAR for SignPath
             id: signpath_jar_upload
+            if: ${{ matrix.build_jar }}
             uses: actions/upload-artifact@v4
             with:
               name: toolscreen-${{ matrix.arch }}-signpath-main-installer-jar-input
@@ -467,10 +488,11 @@ jobs:
               retention-days: 1
               path: ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/toolscreen-downloader.exe
 
-      # Each signing request writes to its own output directory, so the three
+      # Each signing request writes to its own output directory, so the
       # SignPath round trips can overlap instead of queueing behind each other.
       - parallel:
           - name: Submit main installer JAR to SignPath with origin verification
+            if: ${{ matrix.build_jar }}
             uses: signpath/github-action-submit-signing-request@v2
             with:
               api-token: ${{ env.SIGNPATH_API_TOKEN }}
@@ -513,6 +535,7 @@ jobs:
                 version: ${{ toJSON(steps.signpath_version.outputs.version) }}
 
       - name: Replace main installer JAR with origin-verified signed output
+        if: ${{ matrix.build_jar }}
         shell: pwsh
         run: |
           $artifactDir = Join-Path $env:GITHUB_WORKSPACE $env:TOOLSCREEN_ARTIFACT_DIR
@@ -563,122 +586,129 @@ jobs:
 
           Copy-Item -Path $signedDownloaderPath -Destination $downloaderPath -Force
 
-      - name: Rename release artifacts
-        shell: pwsh
-        run: |
-          $outputDir = Join-Path $env:GITHUB_WORKSPACE $env:TOOLSCREEN_ARTIFACT_DIR
-          $suffix = '-not-legal-for-speedruns'
-
-          function Get-SingleArtifactPath {
-            param(
-              [string]$Pattern,
-              [string]$Label
-            )
-
-            $matches = Get-ChildItem $outputDir -File -Filter $Pattern
-
-            if ($matches.Count -ne 1) {
-              throw "Expected exactly one $Label matching '$Pattern' in $outputDir, found $($matches.Count)"
-            }
-
-            return $matches[0].FullName
-          }
-
-          $filesToRename = @(
-            Join-Path $outputDir 'Toolscreen.dll'
-            Join-Path $outputDir 'Toolscreen.pdb'
-            Join-Path $outputDir '${{ matrix.logger_name }}.dll'
-            Join-Path $outputDir '${{ matrix.logger_name }}.pdb'
-            Get-SingleArtifactPath 'Toolscreen-*-double-click-me.jar' 'main installer jar'
-            Get-SingleArtifactPath 'Toolscreen-*-double-click-me.exe' 'main installer exe'
-            Join-Path $outputDir 'toolscreen-downloader.jar'
-            Join-Path $outputDir 'toolscreen-downloader.exe'
-          )
-
-          foreach ($filePath in $filesToRename) {
-            if (-not (Test-Path $filePath)) {
-              throw "Expected artifact not found: $filePath"
-            }
-
-            $item = Get-Item $filePath
-            $renamed = '{0}{1}{2}' -f $item.BaseName, $suffix, $item.Extension
-            Move-Item -Path $item.FullName -Destination (Join-Path $item.DirectoryName $renamed)
-          }
-
-      - name: Log signed artifact SHA-512 hashes
+      - name: Stage signed installers
         shell: pwsh
         run: |
           $artifactDir = Join-Path $env:GITHUB_WORKSPACE $env:TOOLSCREEN_ARTIFACT_DIR
-          $manifestPath = Join-Path $artifactDir 'SHA512SUMS.txt'
+          $partDir = Join-Path $env:GITHUB_WORKSPACE $env:TOOLSCREEN_RELEASE_PART_DIR
+          $archDir = Join-Path $partDir '${{ matrix.arch }}'
+          New-Item -ItemType Directory -Force -Path $archDir | Out-Null
 
-          function Get-SingleArtifactPath {
-            param(
-              [string]$Pattern,
-              [string]$Label
-            )
-
-            $matches = Get-ChildItem $artifactDir -File -Filter $Pattern
-
-            if ($matches.Count -ne 1) {
-              throw "Expected exactly one $Label matching '$Pattern' in $artifactDir, found $($matches.Count)"
+          function Get-SingleArtifact([string]$Pattern) {
+            $found = @(Get-ChildItem -Path $artifactDir -File -Filter $Pattern)
+            if ($found.Count -ne 1) {
+              throw "Expected exactly one file matching '$Pattern' in $artifactDir, found $($found.Count)"
             }
-
-            return $matches[0].FullName
+            return $found[0]
           }
 
-          $artifactPaths = @(
-            (Join-Path $artifactDir 'Toolscreen-not-legal-for-speedruns.dll')
-            (Join-Path $artifactDir 'Toolscreen-not-legal-for-speedruns.pdb')
-            (Join-Path $artifactDir '${{ matrix.logger_name }}-not-legal-for-speedruns.dll')
-            (Join-Path $artifactDir '${{ matrix.logger_name }}-not-legal-for-speedruns.pdb')
-            (Get-SingleArtifactPath 'Toolscreen-*-double-click-me-not-legal-for-speedruns.jar' 'main installer jar')
-            (Get-SingleArtifactPath 'Toolscreen-*-double-click-me-not-legal-for-speedruns.exe' 'main installer exe')
-            (Join-Path $artifactDir 'toolscreen-downloader-not-legal-for-speedruns.jar')
-            (Join-Path $artifactDir 'toolscreen-downloader-not-legal-for-speedruns.exe')
-          )
+          # Both architectures build EXEs with the same names, so they go in a folder per architecture here.
+          Copy-Item -LiteralPath (Get-SingleArtifact 'Toolscreen-*-double-click-me.exe').FullName -Destination $archDir
+          Copy-Item -LiteralPath (Get-SingleArtifact 'toolscreen-downloader.exe').FullName -Destination $archDir
 
-          $manifestLines = foreach ($artifactPath in $artifactPaths) {
-            if (-not (Test-Path $artifactPath)) {
-              throw "Expected artifact not found: $artifactPath"
-            }
-
-            $hash = (Get-FileHash -Path $artifactPath -Algorithm SHA512).Hash.ToLowerInvariant()
-            $fileName = Split-Path $artifactPath -Leaf
-            Write-Host ('SHA512 {0}  {1}' -f $hash, $fileName)
-            '{0}  {1}' -f $hash, $fileName
+          if ('${{ matrix.build_jar }}' -eq 'true') {
+            Copy-Item -LiteralPath (Get-SingleArtifact 'Toolscreen-*-double-click-me.jar').FullName -Destination $partDir
+            Copy-Item -LiteralPath (Get-SingleArtifact 'toolscreen-downloader.jar').FullName -Destination $partDir
           }
 
-          Set-Content -Path $manifestPath -Value $manifestLines -Encoding utf8
-
-      - parallel:
-          - name: Upload signed release artifacts
-            uses: actions/upload-artifact@v4
-            with:
-              name: toolscreen-${{ matrix.arch }}-signed-release-artifacts
-              compression-level: 6
-              if-no-files-found: error
-              retention-days: 14
-              path: |
-                ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/Toolscreen-not-legal-for-speedruns.dll
-                ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/Toolscreen-not-legal-for-speedruns.pdb
-                ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/${{ matrix.logger_name }}-not-legal-for-speedruns.dll
-                ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/${{ matrix.logger_name }}-not-legal-for-speedruns.pdb
-                ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/Toolscreen-*-double-click-me-not-legal-for-speedruns.jar
-                ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/Toolscreen-*-double-click-me-not-legal-for-speedruns.exe
-                ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/toolscreen-downloader-not-legal-for-speedruns.jar
-                ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/toolscreen-downloader-not-legal-for-speedruns.exe
-                ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/SHA512SUMS.txt
-
-          - name: Upload final signed JAR artifact
-            uses: actions/upload-artifact@v4
-            with:
-              name: toolscreen-${{ matrix.arch }}-final-signed-jar
-              compression-level: 6
-              if-no-files-found: error
-              retention-days: 14
-              path: ${{ env.TOOLSCREEN_ARTIFACT_DIR }}/Toolscreen-*-double-click-me-not-legal-for-speedruns.jar
+      - name: Upload signed installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-part-installer-${{ matrix.arch }}
+          compression-level: 6
+          if-no-files-found: error
+          retention-days: 2
+          path: ${{ env.TOOLSCREEN_RELEASE_PART_DIR }}/
 
       - name: Show sccache stats
         if: ${{ always() }}
         shell: pwsh
         run: sccache --show-stats
+
+  bundle_signed_release:
+    name: Bundle signed release artifact
+    needs: [build_signed_native, package_signed_release]
+    runs-on: ubuntu-latest
+    permissions:
+      # Deletes the run's intermediate artifacts once the release artifact is uploaded.
+      actions: write
+      contents: read
+    env:
+      TOOLSCREEN_RELEASE_DIR: out/release
+    steps:
+      - name: Download signed release parts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: signed-part-*
+          merge-multiple: true
+          path: out/parts
+
+      - name: Assemble release artifact
+        id: assemble
+        shell: pwsh
+        run: |
+          $partsDir = Join-Path $env:GITHUB_WORKSPACE 'out/parts'
+          $releaseDir = Join-Path $env:GITHUB_WORKSPACE $env:TOOLSCREEN_RELEASE_DIR
+          $suffix = '-not-legal-for-speedruns'
+          New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
+
+          function Get-SingleFile([string]$Directory, [string]$Pattern) {
+            $found = @(Get-ChildItem -Path $Directory -File -Filter $Pattern)
+            if ($found.Count -ne 1) {
+              throw "Expected exactly one file matching '$Pattern' in $Directory, found $($found.Count)"
+            }
+            return $found[0]
+          }
+
+          function Copy-Renamed([System.IO.FileInfo]$File, [string]$Destination, [string]$Tag = '') {
+            New-Item -ItemType Directory -Force -Path $Destination | Out-Null
+            Copy-Item -LiteralPath $File.FullName -Destination (Join-Path $Destination ('{0}{1}{2}{3}' -f $File.BaseName, $Tag, $suffix, $File.Extension))
+          }
+
+          $jar = Get-SingleFile $partsDir 'Toolscreen-*-double-click-me.jar'
+          $version = [regex]::Match($jar.Name, '^Toolscreen-(.+)-double-click-me\.jar$').Groups[1].Value
+          if (-not $version) { throw "Could not read the version from $($jar.Name)" }
+          Copy-Renamed $jar $releaseDir
+          Copy-Renamed (Get-SingleFile $partsDir 'toolscreen-downloader.jar') $releaseDir
+
+          foreach ($arch in 'x64', 'arm64') {
+            $archPartDir = Join-Path $partsDir $arch
+            Copy-Renamed (Get-SingleFile $archPartDir 'Toolscreen-*-double-click-me.exe') $releaseDir "-$arch"
+            Copy-Renamed (Get-SingleFile $archPartDir 'toolscreen-downloader.exe') $releaseDir "-$arch"
+            foreach ($nativeFile in 'Toolscreen.dll', 'Toolscreen.pdb', "liblogger_$arch.dll", "liblogger_$arch.pdb") {
+              Copy-Renamed (Get-SingleFile $archPartDir $nativeFile) (Join-Path $releaseDir $arch)
+            }
+          }
+
+          $manifestLines = Get-ChildItem -Path $releaseDir -File -Recurse | Sort-Object FullName | ForEach-Object {
+            $relativePath = [System.IO.Path]::GetRelativePath($releaseDir, $_.FullName).Replace('\', '/')
+            $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA512).Hash.ToLowerInvariant()
+            Write-Host ('SHA512 {0}  {1}' -f $hash, $relativePath)
+            '{0}  {1}' -f $hash, $relativePath
+          }
+          Set-Content -Path (Join-Path $releaseDir 'SHA512SUMS.txt') -Value $manifestLines -Encoding utf8
+
+          "artifact=Toolscreen-$version-signed" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Upload signed release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.assemble.outputs.artifact }}
+          compression-level: 6
+          if-no-files-found: error
+          retention-days: 14
+          path: ${{ env.TOOLSCREEN_RELEASE_DIR }}/
+
+      # SignPath has finished with its inputs and the parts are inside the release artifact, so the run keeps
+      # only the one download.
+      - name: Delete intermediate artifacts
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FINAL_ARTIFACT: ${{ steps.assemble.outputs.artifact }}
+        run: |
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts" \
+            --jq '.artifacts[] | select(.name != $ENV.FINAL_ARTIFACT) | .id' |
+            while read -r artifact_id; do
+              gh api -X DELETE "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}"
+            done
