@@ -50,33 +50,38 @@ bool RetryFileOperation(Operation&& operation) {
     return false;
 }
 
-bool DeletePathIfPresentWithRetries(const std::wstring& path) {
-    return RetryFileOperation([&]() {
-        if (DeleteFileW(path.c_str())) {
-            return true;
-        }
-
-        const DWORD errorCode = GetLastError();
-        if (errorCode == ERROR_FILE_NOT_FOUND || errorCode == ERROR_PATH_NOT_FOUND) {
-            SetLastError(ERROR_SUCCESS);
-            return true;
-        }
-
-        SetLastError(errorCode);
-        return false;
-    });
-}
-
 bool ReplacePathAtomically(const std::wstring& tempPath, const std::wstring& finalPath) {
     if (MovePathWithRetries(tempPath, finalPath, MOVEFILE_REPLACE_EXISTING)) {
         return true;
     }
 
-    if (!DeletePathIfPresentWithRetries(finalPath)) {
+    const DWORD attributes = GetFileAttributesW(finalPath.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
+        return MovePathWithRetries(tempPath, finalPath, 0);
+    }
+    if ((attributes & (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_DIRECTORY)) != 0) {
+        SetLastError(ERROR_ACCESS_DENIED);
         return false;
     }
 
-    return MovePathWithRetries(tempPath, finalPath, 0);
+    const std::wstring asidePath = MakeTempSiblingPath(finalPath, L".rename-");
+    if (!MovePathWithRetries(finalPath, asidePath, 0)) {
+        return false;
+    }
+
+    if (MovePathWithRetries(tempPath, finalPath, 0)) {
+        std::error_code removeError;
+        std::filesystem::remove(std::filesystem::path(asidePath), removeError);
+        return true;
+    }
+
+    const DWORD lastError = GetLastError();
+    if (!MovePathWithRetries(asidePath, finalPath, 0)) {
+        Log("ERROR: Could not put " + WideToUtf8(finalPath) + " back after a failed save; the previous copy is " +
+            WideToUtf8(asidePath));
+    }
+    SetLastError(lastError);
+    return false;
 }
 
 // WriteFile + FlushFileBuffers, so the bytes are on disk before the rename that publishes them. Without the flush a
@@ -468,7 +473,12 @@ void RemoveStaleConfigTempFiles(const std::wstring& directory) {
         }
 
         const std::wstring name = entry.path().filename().wstring();
-        if (name.find(L".toml.tmp-") == std::wstring::npos && name.find(L".toml.rename-") == std::wstring::npos) {
+        const size_t renameAt = name.find(L".rename-");
+        const bool isRenameLeftover = renameAt != std::wstring::npos && name.find(L".toml") != std::wstring::npos;
+        if (!isRenameLeftover && name.find(L".toml.tmp-") == std::wstring::npos) {
+            continue;
+        }
+        if (isRenameLeftover && !std::filesystem::exists(entry.path().parent_path() / name.substr(0, renameAt), entryError)) {
             continue;
         }
 
