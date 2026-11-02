@@ -7,6 +7,7 @@
 namespace {
 
 constexpr int kMaxTiles = 4096;
+constexpr float kTileGrowthStep = 1.1f;
 
 float ClampScale(float scale) {
     if (!(scale > 0.0f)) { return 1.0f; }
@@ -15,6 +16,12 @@ float ClampScale(float scale) {
 
 int ScaledDimension(int dimension, float scale) {
     return (std::max)(1, static_cast<int>(std::lround(static_cast<float>(dimension) * scale)));
+}
+
+long long MaxVisibleTiles(int tileW, int tileH, int gap, int areaW, int areaH) {
+    const long long columns = areaW / (tileW + gap) + 2;
+    const long long rows = areaH / (tileH + gap) + 2;
+    return columns * rows;
 }
 
 bool IEquals(std::string_view a, std::string_view b) {
@@ -85,9 +92,17 @@ std::vector<BackgroundFitRect> ComputeBackgroundTileRects(float tileScale, int s
     if (imageW <= 0 || imageH <= 0 || areaW <= 0 || areaH <= 0) { return rects; }
 
     const float scale = ClampScale(tileScale);
-    const int tileW = ScaledDimension(imageW, scale);
-    const int tileH = ScaledDimension(imageH, scale);
+    int tileW = ScaledDimension(imageW, scale);
+    int tileH = ScaledDimension(imageH, scale);
     const int gap = (std::min)(kBackgroundImageSpacingMax, (std::max)(0, spacing));
+    const int baseTileW = tileW;
+    const int baseTileH = tileH;
+    float growth = 1.0f;
+    while (MaxVisibleTiles(tileW, tileH, gap, areaW, areaH) > kMaxTiles) {
+        growth *= kTileGrowthStep;
+        tileW = ScaledDimension(baseTileW, growth);
+        tileH = ScaledDimension(baseTileH, growth);
+    }
     const int periodX = tileW + gap;
     const int periodY = tileH + gap;
 
