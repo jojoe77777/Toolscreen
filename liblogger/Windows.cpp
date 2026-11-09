@@ -571,9 +571,33 @@ std::wstring ResolveLoadLibraryPath(LPCWSTR requestedPath) {
     }
 }
 
-bool ShouldBlockLoadLibrary(LPCWSTR requestedPath, std::wstring& blockedPath) {
+std::wstring GetLoadedModulePath(HMODULE hModule);
+
+HMODULE PinModuleLoadedFromPath(const std::wstring& resolvedPath) noexcept {
+    HMODULE loaded = nullptr;
+    if (!GetModuleHandleExW(0, resolvedPath.c_str(), &loaded) || !loaded) {
+        return nullptr;
+    }
+    try {
+        const std::wstring loadedPath = GetLoadedModulePath(loaded);
+        if (!loadedPath.empty() &&
+            CompareStringOrdinal(loadedPath.c_str(), -1, resolvedPath.c_str(), -1, TRUE) == CSTR_EQUAL) {
+            return loaded;
+        }
+    } catch (...) {
+    }
+    FreeLibrary(loaded);
+    return nullptr;
+}
+
+bool ShouldBlockLoadLibrary(LPCWSTR requestedPath, std::wstring& blockedPath, HMODULE& pinnedModule) {
     std::wstring resolvedPath = ResolveLoadLibraryPath(requestedPath);
     if (resolvedPath.empty()) {
+        return false;
+    }
+
+    pinnedModule = PinModuleLoadedFromPath(resolvedPath);
+    if (pinnedModule) {
         return false;
     }
 
@@ -639,7 +663,8 @@ bool CurrentThreadOwnsLoaderLock() {
     return loaderLock && HandleToULong(loaderLock->OwningThread) == GetCurrentThreadId();
 }
 
-bool IsBlockedLoadLibraryRequest(LPCWSTR requestedPath, std::wstring& blockedPath) {
+bool IsBlockedLoadLibraryRequest(LPCWSTR requestedPath, std::wstring& blockedPath, HMODULE& pinnedModule) {
+    pinnedModule = nullptr;
     if (g_isCheckingLoadSignature || IsProcessShuttingDown() || CurrentThreadOwnsLoaderLock()) {
         return false;
     }
@@ -647,7 +672,7 @@ bool IsBlockedLoadLibraryRequest(LPCWSTR requestedPath, std::wstring& blockedPat
     g_isCheckingLoadSignature = true;
     bool shouldBlock = false;
     try {
-        shouldBlock = ShouldBlockLoadLibrary(requestedPath, blockedPath);
+        shouldBlock = ShouldBlockLoadLibrary(requestedPath, blockedPath, pinnedModule);
     } catch (...) {
         // Signature inspection is fail-open so unrelated DLL loads are not
         // broken by path, trust-provider, or allocation failures.
@@ -656,7 +681,8 @@ bool IsBlockedLoadLibraryRequest(LPCWSTR requestedPath, std::wstring& blockedPat
     return shouldBlock;
 }
 
-bool IsBlockedLoadLibraryRequest(LPCSTR requestedPath, std::wstring& blockedPath) {
+bool IsBlockedLoadLibraryRequest(LPCSTR requestedPath, std::wstring& blockedPath, HMODULE& pinnedModule) {
+    pinnedModule = nullptr;
     if (g_isCheckingLoadSignature || IsProcessShuttingDown() || CurrentThreadOwnsLoaderLock()) {
         return false;
     }
@@ -665,7 +691,7 @@ bool IsBlockedLoadLibraryRequest(LPCSTR requestedPath, std::wstring& blockedPath
     bool shouldBlock = false;
     try {
         std::wstring widePath = ConvertAnsiToWchar(requestedPath);
-        shouldBlock = !widePath.empty() && ShouldBlockLoadLibrary(widePath.c_str(), blockedPath);
+        shouldBlock = !widePath.empty() && ShouldBlockLoadLibrary(widePath.c_str(), blockedPath, pinnedModule);
     } catch (...) {
         // Keep the same fail-open behavior as the wide-character hook.
     }
@@ -1327,7 +1353,8 @@ void HandleBlockedModule(const std::wstring& blockedPath) noexcept {
 
 HMODULE WINAPI DetourLoadLibraryW(LPCWSTR lpLibFileName) {
     std::wstring blockedPath;
-    if (IsBlockedLoadLibraryRequest(lpLibFileName, blockedPath)) {
+    HMODULE pinnedModule = nullptr;
+    if (IsBlockedLoadLibraryRequest(lpLibFileName, blockedPath, pinnedModule)) {
         HandleBlockedModule(blockedPath);
         SetLastError(ERROR_ACCESS_DENIED);
         return nullptr;
@@ -1335,6 +1362,9 @@ HMODULE WINAPI DetourLoadLibraryW(LPCWSTR lpLibFileName) {
 
     HMODULE hModule = pOriginalLoadLibraryW(lpLibFileName);
     DWORD loadError = GetLastError();
+    if (pinnedModule) {
+        FreeLibrary(pinnedModule);
+    }
     HandleLoadedModule(hModule);
     SetLastError(loadError);
     return hModule;
@@ -1342,7 +1372,8 @@ HMODULE WINAPI DetourLoadLibraryW(LPCWSTR lpLibFileName) {
 
 HMODULE WINAPI DetourLoadLibraryA(LPCSTR lpLibFileName) {
     std::wstring blockedPath;
-    if (IsBlockedLoadLibraryRequest(lpLibFileName, blockedPath)) {
+    HMODULE pinnedModule = nullptr;
+    if (IsBlockedLoadLibraryRequest(lpLibFileName, blockedPath, pinnedModule)) {
         HandleBlockedModule(blockedPath);
         SetLastError(ERROR_ACCESS_DENIED);
         return nullptr;
@@ -1350,6 +1381,9 @@ HMODULE WINAPI DetourLoadLibraryA(LPCSTR lpLibFileName) {
 
     HMODULE hModule = pOriginalLoadLibraryA(lpLibFileName);
     DWORD loadError = GetLastError();
+    if (pinnedModule) {
+        FreeLibrary(pinnedModule);
+    }
     HandleLoadedModule(hModule);
     SetLastError(loadError);
     return hModule;
@@ -1357,7 +1391,8 @@ HMODULE WINAPI DetourLoadLibraryA(LPCSTR lpLibFileName) {
 
 HMODULE WINAPI DetourLoadLibraryExW(LPCWSTR lpLibFileName, HANDLE hFile, DWORD dwFlags) {
     std::wstring blockedPath;
-    if (IsBlockedLoadLibraryRequest(lpLibFileName, blockedPath)) {
+    HMODULE pinnedModule = nullptr;
+    if (IsBlockedLoadLibraryRequest(lpLibFileName, blockedPath, pinnedModule)) {
         HandleBlockedModule(blockedPath);
         SetLastError(ERROR_ACCESS_DENIED);
         return nullptr;
@@ -1365,6 +1400,9 @@ HMODULE WINAPI DetourLoadLibraryExW(LPCWSTR lpLibFileName, HANDLE hFile, DWORD d
 
     HMODULE hModule = pOriginalLoadLibraryExW(lpLibFileName, hFile, dwFlags);
     DWORD loadError = GetLastError();
+    if (pinnedModule) {
+        FreeLibrary(pinnedModule);
+    }
     HandleLoadedModule(hModule);
     SetLastError(loadError);
     return hModule;
@@ -1372,7 +1410,8 @@ HMODULE WINAPI DetourLoadLibraryExW(LPCWSTR lpLibFileName, HANDLE hFile, DWORD d
 
 HMODULE WINAPI DetourLoadLibraryExA(LPCSTR lpLibFileName, HANDLE hFile, DWORD dwFlags) {
     std::wstring blockedPath;
-    if (IsBlockedLoadLibraryRequest(lpLibFileName, blockedPath)) {
+    HMODULE pinnedModule = nullptr;
+    if (IsBlockedLoadLibraryRequest(lpLibFileName, blockedPath, pinnedModule)) {
         HandleBlockedModule(blockedPath);
         SetLastError(ERROR_ACCESS_DENIED);
         return nullptr;
@@ -1380,6 +1419,9 @@ HMODULE WINAPI DetourLoadLibraryExA(LPCSTR lpLibFileName, HANDLE hFile, DWORD dw
 
     HMODULE hModule = pOriginalLoadLibraryExA(lpLibFileName, hFile, dwFlags);
     DWORD loadError = GetLastError();
+    if (pinnedModule) {
+        FreeLibrary(pinnedModule);
+    }
     HandleLoadedModule(hModule);
     SetLastError(loadError);
     return hModule;

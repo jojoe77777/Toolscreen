@@ -6,6 +6,7 @@
 #include "runtime/logic_thread.h"
 #include "render/mirror_thread.h"
 #include "profiler.h"
+#include "resize_perf.h"
 
 #include <nlohmann/json.hpp>
 #include <chrono>
@@ -3517,6 +3518,7 @@ void ToggleBorderlessWindowedFullscreen(HWND hwnd) {
 
     std::lock_guard<std::mutex> lock(s_borderlessMutex);
     BorderlessWindowState& state = s_borderlessStateByHwnd[hwnd];
+    ResizePerf::Trigger(state.active ? "borderless_off" : "borderless_on");
 
     RECT targetRect{};
     if (!GetMonitorRectForWindow(hwnd, targetRect)) {

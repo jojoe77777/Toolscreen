@@ -9,6 +9,7 @@
 #include "render/obs_thread.h"
 #include "common/font_assets.h"
 #include "common/profiler.h"
+#include "common/resize_perf.h"
 #include "render/render.h"
 #include "render/render_backend.h"
 #include "render/vulkan/vulkan_hooks.h"
@@ -4386,6 +4387,7 @@ static BOOL SwapBuffersHook_Impl(WGLSWAPBUFFERS next, HDC hDc) {
 
         auto swapStartTime = std::chrono::high_resolution_clock::now();
         BOOL result = next(hDc);
+        ResizePerf::OnFrameEnd();
 
         auto swapEndTime = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double, std::milli> swapDuration = swapEndTime - swapStartTime;
@@ -4463,26 +4465,57 @@ static void NotifyLateGraphicsModule(HMODULE module) {
     if (_wcsicmp(leaf, L"SDL3.dll") == 0) TryInstallSdlHooks(module);
 }
 
+static thread_local int t_timedLoadLibraryDepth = 0;
+
+static std::string LoadLibraryLeafName(const std::string& path) {
+    const size_t slash = path.find_last_of("\\/");
+    return slash == std::string::npos ? path : path.substr(slash + 1);
+}
+
+template <typename LoadCall>
+static HMODULE TimedLoadLibrary(LPCWSTR widePath, LPCSTR narrowPath, LoadCall&& load) {
+    if (t_timedLoadLibraryDepth > 0 || !ResizePerf::Watching()) { return load(); }
+    HMODULE existing = nullptr;
+    if (widePath && widePath[0] != L'\0') {
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, widePath, &existing);
+    } else if (narrowPath && narrowPath[0] != '\0') {
+        GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, narrowPath, &existing);
+    }
+    ++t_timedLoadLibraryDepth;
+    const int64_t start = ResizePerf::NowUs();
+    HMODULE module = load();
+    const DWORD loadError = GetLastError();
+    const int64_t duration = ResizePerf::NowUs() - start;
+    --t_timedLoadLibraryDepth;
+    try {
+        const std::string requested = widePath ? WideToUtf8(widePath) : std::string(narrowPath ? narrowPath : "");
+        ResizePerf::RecordLoadLibrary(duration, existing != nullptr && module == existing, LoadLibraryLeafName(requested));
+    } catch (...) {
+    }
+    SetLastError(loadError);
+    return module;
+}
+
 HMODULE WINAPI hkLoadLibraryA(LPCSTR path) {
-    HMODULE module = oLoadLibraryA ? oLoadLibraryA(path) : nullptr;
+    HMODULE module = TimedLoadLibrary(nullptr, path, [&] { return oLoadLibraryA ? oLoadLibraryA(path) : nullptr; });
     NotifyLateGraphicsModule(module);
     return module;
 }
 
 HMODULE WINAPI hkLoadLibraryW(LPCWSTR path) {
-    HMODULE module = oLoadLibraryW ? oLoadLibraryW(path) : nullptr;
+    HMODULE module = TimedLoadLibrary(path, nullptr, [&] { return oLoadLibraryW ? oLoadLibraryW(path) : nullptr; });
     NotifyLateGraphicsModule(module);
     return module;
 }
 
 HMODULE WINAPI hkLoadLibraryExA(LPCSTR path, HANDLE file, DWORD flags) {
-    HMODULE module = oLoadLibraryExA ? oLoadLibraryExA(path, file, flags) : nullptr;
+    HMODULE module = TimedLoadLibrary(nullptr, path, [&] { return oLoadLibraryExA ? oLoadLibraryExA(path, file, flags) : nullptr; });
     NotifyLateGraphicsModule(module);
     return module;
 }
 
 HMODULE WINAPI hkLoadLibraryExW(LPCWSTR path, HANDLE file, DWORD flags) {
-    HMODULE module = oLoadLibraryExW ? oLoadLibraryExW(path, file, flags) : nullptr;
+    HMODULE module = TimedLoadLibrary(path, nullptr, [&] { return oLoadLibraryExW ? oLoadLibraryExW(path, file, flags) : nullptr; });
     NotifyLateGraphicsModule(module);
     return module;
 }

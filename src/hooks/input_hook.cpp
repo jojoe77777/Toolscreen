@@ -7,6 +7,7 @@
 #include "gui/imgui_cache.h"
 #include "runtime/logic_thread.h"
 #include "common/profiler.h"
+#include "common/resize_perf.h"
 #include "render/render_backend.h"
 #include "render/render.h"
 #include "common/utils.h"
@@ -1276,6 +1277,7 @@ static void SyncWindowMetricsFromMessage(HWND hWnd, UINT uMsg, WPARAM wParam, LP
                 }
 
                 clientSizeChanged = (clientW != prevW) || (clientH != prevH);
+                if (clientSizeChanged) { ResizePerf::Trigger("resize"); }
                 UpdateCachedWindowMetricsFromSize(clientW, clientH);
             }
         }
@@ -6103,6 +6105,15 @@ LRESULT CALLBACK SubclassedWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
     if (expectedHwnd != NULL && hWnd != expectedHwnd) {
         return DefWindowProc(hWnd, uMsg, wParam, lParam);
     }
+
+    if ((uMsg == WM_KEYDOWN || uMsg == WM_SYSKEYDOWN) && wParam == VK_F11 && (lParam & (static_cast<LPARAM>(1) << 30)) == 0) {
+        ResizePerf::Trigger("f11");
+    } else if (uMsg == WM_ENTERSIZEMOVE || uMsg == WM_ENTERMENULOOP) {
+        ResizePerf::EnterModalLoop();
+    } else if (uMsg == WM_EXITSIZEMOVE || uMsg == WM_EXITMENULOOP) {
+        ResizePerf::ExitModalLoop();
+    }
+    ResizePerf::ScopedWindowMessage resizePerfMessage(uMsg);
 
     if (uMsg == WM_TOOLSCREEN_VULKAN_FAST_PATH_KEY) {
         DispatchQueuedVulkanFastPathKeyCopy(hWnd);
