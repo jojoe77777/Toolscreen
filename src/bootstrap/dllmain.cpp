@@ -1334,6 +1334,8 @@ GLFWCREATEWINDOW oglfwCreateWindow = NULL;
 GLFWGETWIN32WINDOW glfwGetWin32WindowProc = NULL;
 GLFWWINDOWHINT oglfwWindowHint = NULL;
 GLFWDESTROYWINDOW oglfwDestroyWindow = NULL;
+typedef int (*GLFWGETWINDOWATTRIBPROC)(void* window, int attrib);
+static std::atomic<GLFWGETWINDOWATTRIBPROC> g_glfwGetWindowAttribProc{ nullptr };
 typedef void (*GLFWWINDOWSIZEFUN)(void* window, int width, int height);
 typedef GLFWWINDOWSIZEFUN (*GLFWSETWINDOWSIZECALLBACK)(void* window, GLFWWINDOWSIZEFUN callback);
 GLFWSETWINDOWSIZECALLBACK oglfwSetWindowSizeCallback = NULL;
@@ -2566,6 +2568,20 @@ static bool IsTrackedGlfwNoApiWindow() {
     return GetTrackedGlfwWindow(window, hwnd, generation, noApi) && noApi;
 }
 
+static bool ClearGlfwNoApiIfWindowReportsClientApi() {
+    const GLFWGETWINDOWATTRIBPROC getWindowAttrib = g_glfwGetWindowAttribProc.load(std::memory_order_acquire);
+    if (!getWindowAttrib) return false;
+    {
+        std::lock_guard<std::mutex> lock(g_glfwWindowStateMutex);
+        if (!g_glfwWindowState.noApi || !g_glfwWindowState.window) return false;
+        if (getWindowAttrib(g_glfwWindowState.window, GLFW_CLIENT_API_HINT) == GLFW_NO_API_VALUE) return false;
+        g_glfwWindowState.noApi = false;
+        g_glfwNoApiRequested.store(false, std::memory_order_release);
+    }
+    Log("[WINDOW] Adopted window has an OpenGL context; leaving no-API mode.");
+    return true;
+}
+
 static void TrackGlfwWindow(void* window, HWND hwnd, bool noApi, DWORD ownerThreadId) {
     if (!window || !hwnd) return;
     std::lock_guard<std::mutex> lock(g_glfwWindowStateMutex);
@@ -2671,6 +2687,8 @@ static bool TryInstallGlfwHooks(HMODULE glfw) {
     CreateHookOrDie(GetProcAddress(glfw, "glfwSetFramebufferSizeCallback"), &hkglfwSetFramebufferSizeCallback,
                     &oglfwSetFramebufferSizeCallback, "glfwSetFramebufferSizeCallback");
     glfwGetCurrentContextProc.store(reinterpret_cast<GLFWGETCURRENTCONTEXTPROC>(GetProcAddress(glfw, "glfwGetCurrentContext")),
+                                    std::memory_order_release);
+    g_glfwGetWindowAttribProc.store(reinterpret_cast<GLFWGETWINDOWATTRIBPROC>(GetProcAddress(glfw, "glfwGetWindowAttrib")),
                                     std::memory_order_release);
     CreateHookOrDie(GetProcAddress(glfw, "glfwDestroyWindow"), &hkglfwDestroyWindow, &oglfwDestroyWindow, "glfwDestroyWindow");
     if (g_minHookEnabled.load(std::memory_order_acquire) && MH_EnableHook(createWindow) != MH_OK) {
@@ -3809,7 +3827,7 @@ static BOOL SwapBuffersHook_Impl(WGLSWAPBUFFERS next, HDC hDc) {
     // from latching, initializing GLEW, creating GL objects, or activating the
     // OpenGL OBS redirect in native Vulkan mode. Older OpenGL versions keep the
     // original path byte-for-byte below this gate.
-    if (IsTrackedGlfwNoApiWindow() || IsTrackedSdlNoApiWindow()) {
+    if ((IsTrackedGlfwNoApiWindow() && !ClearGlfwNoApiIfWindowReportsClientApi()) || IsTrackedSdlNoApiWindow()) {
         static std::atomic<bool> loggedVulkanBootstrapPassThrough{false};
         if (!loggedVulkanBootstrapPassThrough.exchange(
                 true, std::memory_order_acq_rel)) {
