@@ -131,6 +131,11 @@ struct GLState {
     GLint draw_buffer;
     GLint read_buffer;
     GLint pack_row_length;
+    GLint pack_alignment;
+    GLint unpack_row_length;
+    GLint unpack_skip_pixels;
+    GLint unpack_skip_rows;
+    GLint unpack_alignment;
 
     GLint vp[4];
     GLint sb[4];

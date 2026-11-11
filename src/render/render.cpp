@@ -2495,6 +2495,11 @@ void SaveGLState(GLState* s) {
         glGetIntegerv(GL_DRAW_BUFFER, &s->draw_buffer);
         glGetIntegerv(GL_READ_BUFFER, &s->read_buffer);
         glGetIntegerv(GL_PACK_ROW_LENGTH, &s->pack_row_length);
+        glGetIntegerv(GL_PACK_ALIGNMENT, &s->pack_alignment);
+        glGetIntegerv(GL_UNPACK_ROW_LENGTH, &s->unpack_row_length);
+        glGetIntegerv(GL_UNPACK_SKIP_PIXELS, &s->unpack_skip_pixels);
+        glGetIntegerv(GL_UNPACK_SKIP_ROWS, &s->unpack_skip_rows);
+        glGetIntegerv(GL_UNPACK_ALIGNMENT, &s->unpack_alignment);
 
         glGetIntegerv(GL_VIEWPORT, &s->vp[0]);
         glGetIntegerv(GL_SCISSOR_BOX, s->sb);
@@ -2580,6 +2585,11 @@ void RestoreGLState(const GLState& s) {
         glDrawBuffer(s.draw_buffer);
         glReadBuffer(s.read_buffer);
         glPixelStorei(GL_PACK_ROW_LENGTH, s.pack_row_length);
+        glPixelStorei(GL_PACK_ALIGNMENT, s.pack_alignment);
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, s.unpack_row_length);
+        glPixelStorei(GL_UNPACK_SKIP_PIXELS, s.unpack_skip_pixels);
+        glPixelStorei(GL_UNPACK_SKIP_ROWS, s.unpack_skip_rows);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, s.unpack_alignment);
 
         if (oglViewport)
             oglViewport(s.vp[0], s.vp[1], s.vp[2], s.vp[3]);

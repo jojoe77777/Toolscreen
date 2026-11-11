@@ -88,6 +88,33 @@ private:
     GLboolean blend_ = GL_FALSE, depth_ = GL_FALSE, cull_ = GL_FALSE, scissor_ = GL_FALSE, stencil_ = GL_FALSE;
 };
 
+class ScopedUnpackState {
+public:
+    explicit ScopedUnpackState(GLint alignment) {
+        glGetIntegerv(GL_UNPACK_ROW_LENGTH, &rowLength_);
+        glGetIntegerv(GL_UNPACK_SKIP_PIXELS, &skipPixels_);
+        glGetIntegerv(GL_UNPACK_SKIP_ROWS, &skipRows_);
+        glGetIntegerv(GL_UNPACK_ALIGNMENT, &alignment_);
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+        glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, alignment);
+    }
+
+    ~ScopedUnpackState() {
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, rowLength_);
+        glPixelStorei(GL_UNPACK_SKIP_PIXELS, skipPixels_);
+        glPixelStorei(GL_UNPACK_SKIP_ROWS, skipRows_);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, alignment_);
+    }
+
+    ScopedUnpackState(const ScopedUnpackState&) = delete;
+    ScopedUnpackState& operator=(const ScopedUnpackState&) = delete;
+
+private:
+    GLint rowLength_ = 0, skipPixels_ = 0, skipRows_ = 0, alignment_ = 4;
+};
+
 class QuadBatch {
 public:
     bool Ensure() {

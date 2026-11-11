@@ -1659,6 +1659,98 @@ void RunRenderNinjabrainInformationMessageTranslationSpansTest(TestRunMode runMo
            "Expected the next-throw information message to remain a single unstyled run after translation.");
 }
 
+void RunGlStateRestoresPixelStoreTest(TestRunMode runMode = TestRunMode::Automated) {
+    DummyWindow window(kWindowWidth, kWindowHeight, runMode == TestRunMode::Visual);
+    if (!g_hasModernGL) { std::cout << "SKIP (no GL 3.3+)" << std::endl; return; }
+
+    struct PixelStoreValues {
+        GLint packRowLength;
+        GLint packAlignment;
+        GLint unpackRowLength;
+        GLint unpackSkipPixels;
+        GLint unpackSkipRows;
+        GLint unpackAlignment;
+    };
+    auto apply = [](const PixelStoreValues& values) {
+        glPixelStorei(GL_PACK_ROW_LENGTH, values.packRowLength);
+        glPixelStorei(GL_PACK_ALIGNMENT, values.packAlignment);
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, values.unpackRowLength);
+        glPixelStorei(GL_UNPACK_SKIP_PIXELS, values.unpackSkipPixels);
+        glPixelStorei(GL_UNPACK_SKIP_ROWS, values.unpackSkipRows);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, values.unpackAlignment);
+    };
+    auto read = []() {
+        PixelStoreValues values{};
+        glGetIntegerv(GL_PACK_ROW_LENGTH, &values.packRowLength);
+        glGetIntegerv(GL_PACK_ALIGNMENT, &values.packAlignment);
+        glGetIntegerv(GL_UNPACK_ROW_LENGTH, &values.unpackRowLength);
+        glGetIntegerv(GL_UNPACK_SKIP_PIXELS, &values.unpackSkipPixels);
+        glGetIntegerv(GL_UNPACK_SKIP_ROWS, &values.unpackSkipRows);
+        glGetIntegerv(GL_UNPACK_ALIGNMENT, &values.unpackAlignment);
+        return values;
+    };
+
+    const PixelStoreValues gameValues{ 7, 8, 128, 3, 5, 2 };
+    const PixelStoreValues scrambledValues{ 0, 1, 0, 0, 0, 4 };
+
+    apply(gameValues);
+    GLState saved{};
+    SaveGLState(&saved);
+    apply(scrambledValues);
+    RestoreGLState(saved);
+    const PixelStoreValues restored = read();
+    apply(PixelStoreValues{ 0, 4, 0, 0, 0, 4 });
+
+    Expect(restored.packRowLength == gameValues.packRowLength, "Expected RestoreGLState to restore GL_PACK_ROW_LENGTH.");
+    Expect(restored.packAlignment == gameValues.packAlignment, "Expected RestoreGLState to restore GL_PACK_ALIGNMENT.");
+    Expect(restored.unpackRowLength == gameValues.unpackRowLength, "Expected RestoreGLState to restore GL_UNPACK_ROW_LENGTH.");
+    Expect(restored.unpackSkipPixels == gameValues.unpackSkipPixels, "Expected RestoreGLState to restore GL_UNPACK_SKIP_PIXELS.");
+    Expect(restored.unpackSkipRows == gameValues.unpackSkipRows, "Expected RestoreGLState to restore GL_UNPACK_SKIP_ROWS.");
+    Expect(restored.unpackAlignment == gameValues.unpackAlignment, "Expected RestoreGLState to restore GL_UNPACK_ALIGNMENT.");
+}
+
+void RunScopedUnpackStateTest(TestRunMode runMode = TestRunMode::Automated) {
+    DummyWindow window(kWindowWidth, kWindowHeight, runMode == TestRunMode::Visual);
+    if (!g_hasModernGL) { std::cout << "SKIP (no GL 3.3+)" << std::endl; return; }
+
+    constexpr GLint kGameRowLength = 128;
+    constexpr GLint kGameSkipPixels = 3;
+    constexpr GLint kGameSkipRows = 5;
+    constexpr GLint kGameAlignment = 1;
+    constexpr GLint kScopedAlignment = 4;
+
+    auto readUnpack = [](GLint (&values)[4]) {
+        glGetIntegerv(GL_UNPACK_ROW_LENGTH, &values[0]);
+        glGetIntegerv(GL_UNPACK_SKIP_PIXELS, &values[1]);
+        glGetIntegerv(GL_UNPACK_SKIP_ROWS, &values[2]);
+        glGetIntegerv(GL_UNPACK_ALIGNMENT, &values[3]);
+    };
+
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, kGameRowLength);
+    glPixelStorei(GL_UNPACK_SKIP_PIXELS, kGameSkipPixels);
+    glPixelStorei(GL_UNPACK_SKIP_ROWS, kGameSkipRows);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, kGameAlignment);
+
+    GLint inside[4] = {};
+    {
+        gloverlay::ScopedUnpackState scoped(kScopedAlignment);
+        readUnpack(inside);
+    }
+    GLint after[4] = {};
+    readUnpack(after);
+
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+    glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, kScopedAlignment);
+
+    Expect(inside[0] == 0 && inside[1] == 0 && inside[2] == 0, "Expected ScopedUnpackState to clear row length and skip values while in scope.");
+    Expect(inside[3] == kScopedAlignment, "Expected ScopedUnpackState to apply the requested alignment while in scope.");
+    Expect(after[0] == kGameRowLength && after[1] == kGameSkipPixels && after[2] == kGameSkipRows,
+           "Expected ScopedUnpackState to restore row length and skip values on scope exit.");
+    Expect(after[3] == kGameAlignment, "Expected ScopedUnpackState to restore the unpack alignment on scope exit.");
+}
+
 void RunRebindIndicatorRendersBelowSettingsGuiTest(TestRunMode runMode = TestRunMode::Automated) {
     DummyWindow window(kWindowWidth, kWindowHeight, runMode == TestRunMode::Visual);
     if (!g_hasModernGL) { std::cout << "SKIP (no GL 3.3+)" << std::endl; return; }

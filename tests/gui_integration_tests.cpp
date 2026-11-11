@@ -1,6 +1,7 @@
 #include "common/i18n.h"
 #include "common/ninjabrain_information_messages.h"
 #include "common/font_assets.h"
+#include "common/gl_overlay.h"
 #include "common/mode_dimensions.h"
 #include "common/profiler.h"
 #include "common/utils.h"

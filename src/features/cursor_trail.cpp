@@ -27,6 +27,7 @@ constexpr int kMaxStamps = 512;
 constexpr int kMaxStampsPerFrame = kMaxStamps / 4;
 constexpr int kMaxSpritePixels = 256;
 constexpr int kProceduralSpriteSize = 64;
+constexpr GLint kSpriteUnpackAlignment = 4;
 constexpr uint64_t kMaxSampleGapMs = 100;
 
 struct TrailStamp {
@@ -136,6 +137,8 @@ std::vector<unsigned char> BuildProceduralDot() {
 void UploadTexture(const unsigned char* rgba, int w, int h) {
     if (g_trail.texture == 0) { glGenTextures(1, &g_trail.texture); }
     if (g_trail.texture == 0) { return; }
+    gloverlay::ScopedUnpackState unpackState(kSpriteUnpackAlignment);
+
     BindTextureDirect(GL_TEXTURE_2D, g_trail.texture);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
