@@ -188,7 +188,7 @@ static void ClearFailedCursorLoads() {
 
 // A load attempted before the OpenGL context is current fails only because glGenTextures
 // returns 0; remembering that failure would disable the cursor for the whole session.
-static bool CanCacheCursorLoadFailure() {
+static bool CanLoadCursorTextures() {
     return GetRenderBackend() == RenderBackend::Vulkan || wglGetCurrentContext() != nullptr;
 }
 
@@ -709,6 +709,8 @@ const CursorData* LoadOrFindCursor(const std::wstring& path, UINT loadType, int 
         if (s_failedCursorLoads.count({ path, size }) != 0) { return nullptr; }
     }
 
+    if (!CanLoadCursorTextures()) { return nullptr; }
+
     LogCategory("cursor_textures", "[CursorTextures] Loading cursor on-demand: " + pathStr + " at size " + std::to_string(size));
     CursorData newCursorData;
     if (LoadSingleCursor(path, loadType, size, newCursorData)) {
@@ -719,7 +721,7 @@ const CursorData* LoadOrFindCursor(const std::wstring& path, UINT loadType, int 
         return &g_cursorList.back();
     } else {
         LogCategory("cursor_textures", "[CursorTextures] ERROR: Failed to load cursor on-demand: " + pathStr);
-        if (CanCacheCursorLoadFailure()) {
+        if (CanLoadCursorTextures()) {
             std::lock_guard<std::mutex> lock(g_cursorListMutex);
             s_failedCursorLoads.insert({ path, size });
         }
@@ -1008,9 +1010,7 @@ bool CopyCursorDataFromHandle(HCURSOR hCursor, CursorData& outData) {
 }
 
 const CursorData* LoadOrFindSystemCursor(LPCWSTR systemCursorId) {
-    if (!systemCursorId ||
-        (GetRenderBackend() != RenderBackend::Vulkan &&
-         wglGetCurrentContext() == nullptr)) {
+    if (!systemCursorId || !CanLoadCursorTextures()) {
         return nullptr;
     }
 
