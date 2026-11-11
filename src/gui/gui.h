@@ -1056,6 +1056,7 @@ struct Config {
     bool disableConfigurePrompt = false;
     int startupIndicatorMode = ConfigDefaults::STARTUP_INDICATOR_MODE;
     std::string startupIndicatorImagePath = ConfigDefaults::STARTUP_INDICATOR_IMAGE_PATH;
+    float startupIndicatorScale = ConfigDefaults::STARTUP_INDICATOR_SCALE;
     NinjabrainOverlayConfig ninjabrainOverlay;
 };
 
@@ -1375,7 +1376,12 @@ void ClearGuiTabSelectionOverride();
 
 extern std::atomic<bool> g_welcomeToastVisible;
 extern std::atomic<bool> g_configurePromptDismissedThisSession;
-void RenderWelcomeToast(bool isFullscreen, int startupIndicatorMode, const std::string& customImagePath);
+void StartStartupIndicatorPreview();
+float ResolveStartupIndicatorOpacity(bool inFullscreenMode, int indicatorMode);
+float StartupIndicatorPixelScale(float viewportHeight, float userScale);
+void DrawStartupShortcutCard(float opacity, float scale);
+bool PrepareStartupIndicatorImage(const std::string& path);
+void RenderStartupIndicatorImage(float opacity, float scale);
 
 void RenderRebindIndicator();
 bool IsRebindIndicatorVisible();

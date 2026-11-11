@@ -920,6 +920,8 @@
     "startup_indicator.image_path": "圖片 / GIF：",
     "startup_indicator.none": "無",
     "startup_indicator.none_help": "此實例啟動時不顯示任何指示器。僅在您確定記得自己的快捷鍵時才選擇此項。",
+    "startup_indicator.preview": "預覽",
+    "startup_indicator.scale": "縮放：",
     "startup_indicator.section": "啟動指示器",
     "startup_indicator.shortcut_reminder": "快捷鍵提醒（預設）",
     "startup_indicator.shortcut_reminder_help": "在啟動時顯示幾秒鐘的快捷鍵提醒，告訴您哪個鍵可以開啟 Toolscreen。",

@@ -764,6 +764,45 @@ void RunStartupIndicatorConfigTest(TestRunMode runMode = TestRunMode::Automated)
     }
 
     {
+        toml::table tbl = baseTable();
+        tbl.erase("startupIndicatorScale");
+        Config config;
+        ConfigFromToml(tbl, config);
+        Expect(config.startupIndicatorScale == 1.0f, "Expected a missing startupIndicatorScale key to default to 1.0.");
+    }
+
+    const std::pair<double, float> scaleCases[] = {
+        { -1.0, 0.01f }, { 0.0, 0.01f }, { 0.01, 0.01f }, { 2.5, 2.5f }, { 5.0, 5.0f }, { 9.0, 5.0f },
+        { std::numeric_limits<double>::quiet_NaN(), 1.0f }, { std::numeric_limits<double>::infinity(), 1.0f },
+    };
+    for (const auto& [stored, expected] : scaleCases) {
+        toml::table tbl = baseTable();
+        tbl.insert_or_assign("startupIndicatorScale", stored);
+        Config config;
+        ConfigFromToml(tbl, config);
+        Expect(config.startupIndicatorScale == expected, "Expected startupIndicatorScale to clamp to [0.01, 5] and reject non-finite values.");
+    }
+
+    {
+        toml::table tbl = baseTable();
+        tbl.insert_or_assign("startupIndicatorScale", 3);
+        Config config;
+        ConfigFromToml(tbl, config);
+        Expect(config.startupIndicatorScale == 3.0f, "Expected an integer startupIndicatorScale to load as a float.");
+    }
+
+    {
+        Config config;
+        config.startupIndicatorScale = 2.5f;
+        toml::table serialized;
+        ConfigToToml(config, serialized);
+        Expect(serialized.contains("startupIndicatorScale"), "Expected startupIndicatorScale to always serialize.");
+        Config loaded;
+        ConfigFromToml(serialized, loaded);
+        Expect(loaded.startupIndicatorScale == 2.5f, "Expected startupIndicatorScale to roundtrip.");
+    }
+
+    {
         Config config;
         config.startupIndicatorMode = 0;
         config.startupIndicatorImagePath.clear();

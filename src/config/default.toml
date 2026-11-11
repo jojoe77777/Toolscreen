@@ -17,6 +17,7 @@ restoreWindowedModeOnFullscreenExit = true
 disableFullscreenPrompt = false
 startupIndicatorMode = 1
 startupIndicatorImagePath = ''
+startupIndicatorScale = 1.0
 keyRepeatDelay = -1
 keyRepeatStartDelay = -1
 mouseSensitivity = 1.0

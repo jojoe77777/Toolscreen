@@ -4790,9 +4790,10 @@ struct SameThreadOverlayState {
     int textureGridModeHeight = 0;
 
     bool showWelcomeToast = false;
-    bool welcomeToastIsFullscreen = false;
+    float welcomeToastOpacity = 0.0f;
     int startupIndicatorMode = 1;
     std::string startupIndicatorImagePath;
+    float startupIndicatorScale = ConfigDefaults::STARTUP_INDICATOR_SCALE;
     bool showRebindIndicator = false;
     bool showCursorTrail = false;
     bool modeHasMirrors = false;
@@ -5027,9 +5028,9 @@ void GetPublishedObsComposeSizeForTests(int& width, int& height) {
     height = g_sameThreadObsComposeH;
 }
 
-static void RenderSameThreadImGui(const SameThreadOverlayState& request, bool renderNinjabrainOverlay) {
+static void RenderSameThreadImGui(const SameThreadOverlayState& request, bool renderNinjabrainOverlay, bool drawStartupCard) {
     const bool shouldRenderAnyImGui = request.shouldRenderGui || request.showPerformanceOverlay || request.showProfiler ||
-                                      request.showTextureGrid || request.showEyeZoom || renderNinjabrainOverlay;
+                                      request.showTextureGrid || request.showEyeZoom || renderNinjabrainOverlay || drawStartupCard;
     if (!shouldRenderAnyImGui) return;
 
     std::lock_guard<std::recursive_mutex> imguiLock(GetImGuiContextMutex());
@@ -5127,6 +5128,11 @@ static void RenderSameThreadImGui(const SameThreadOverlayState& request, bool re
         ImGuiInputQueue_PublishCaptureState();
     }
 
+    if (drawStartupCard) {
+        PROFILE_SCOPE_CAT("ImGui Startup Indicator", "ImGui");
+        DrawStartupShortcutCard(request.welcomeToastOpacity, request.startupIndicatorScale);
+    }
+
     {
         PROFILE_SCOPE_CAT("ImGui Build Draw Data", "ImGui");
         ImGui::Render();
@@ -5141,7 +5147,7 @@ static void RenderSameThreadImGui(const SameThreadOverlayState& request, bool re
         s_screenPassImGuiFrame.showEyeZoom = request.showEyeZoom;
         s_screenPassImGuiFrame.renderNinjabrainOverlay = renderNinjabrainOverlay;
         s_screenPassImGuiFrame.drewObsExcludedContent =
-            request.showPerformanceOverlay || request.showProfiler || request.showTextureGrid;
+            request.showPerformanceOverlay || request.showProfiler || request.showTextureGrid || drawStartupCard;
     }
     {
         PROFILE_SCOPE_CAT("ImGui Submit Draw Data", "ImGui");
@@ -5516,12 +5522,13 @@ static bool RenderSameThreadOverlayPass(const SameThreadOverlayState& request, c
         RenderEditorSelectionHandles(s, request.fullW, request.fullH, editorMode);
     }
 
-    RenderSameThreadImGui(request, renderNinjabrainOverlay);
-    if (request.showWelcomeToast) {
-        PROFILE_SCOPE_CAT("Render Welcome Toast", "Rendering");
-        RenderWelcomeToast(request.welcomeToastIsFullscreen,
-                           request.startupIndicatorMode,
-                           request.startupIndicatorImagePath);
+    const bool drawStartupImage = request.showWelcomeToast && request.startupIndicatorMode == 2 &&
+                                  PrepareStartupIndicatorImage(request.startupIndicatorImagePath);
+    const bool drawStartupCard = request.showWelcomeToast && !drawStartupImage;
+    RenderSameThreadImGui(request, renderNinjabrainOverlay, drawStartupCard);
+    if (drawStartupImage) {
+        PROFILE_SCOPE_CAT("Render Startup Indicator Image", "Rendering");
+        RenderStartupIndicatorImage(request.welcomeToastOpacity, request.startupIndicatorScale);
     }
     return !activeMirrors.empty() || !eyeZoomSlideOutMirrors->empty() || !transitionSlideOutMirrors->empty() || !activeImages.empty() ||
             !activeWindowOverlays.empty() || !activeBrowserOverlays.empty() || request.shouldRenderGui || request.showPerformanceOverlay || request.showProfiler ||
@@ -6314,7 +6321,7 @@ bool RenderSameThreadObsFrame(const ModeConfig* modeToRender, const GLState& s, 
             request.textureGridModeWidth = 0;
             request.textureGridModeHeight = 0;
             request.showWelcomeToast = false;
-            request.welcomeToastIsFullscreen = false;
+            request.welcomeToastOpacity = 0.0f;
             request.startupIndicatorMode = 0;
             request.startupIndicatorImagePath.clear();
             request.showCursorTrail = cfgSnap->cursorTrail.enabled && IsCursorVisible();
@@ -8821,23 +8828,10 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
     const bool wantRebindIndicator = IsRebindIndicatorVisible();
     const bool isFullscreenMode = EqualsIgnoreCase(modeToRender->id, "Fullscreen");
 
-    const int startupIndicatorMode = configSnap ? configSnap->startupIndicatorMode : 1;
-    bool wantWelcomeToast = false;
-    {
-        static bool s_prevFullscreen = false;
-        static std::chrono::steady_clock::time_point s_fullscreenEnterTime{};
-        auto now = std::chrono::steady_clock::now();
-        if (isFullscreenMode && !s_prevFullscreen) { s_fullscreenEnterTime = now; }
-        s_prevFullscreen = isFullscreenMode;
-
-        if (isFullscreenMode && startupIndicatorMode != 0 &&
-            !g_configurePromptDismissedThisSession.load(std::memory_order_relaxed)) {
-            constexpr float kHoldSeconds = 10.0f;
-            constexpr float kFadeSeconds = 1.5f;
-            const float elapsed = std::chrono::duration_cast<std::chrono::duration<float>>(now - s_fullscreenEnterTime).count();
-            wantWelcomeToast = (elapsed <= (kHoldSeconds + kFadeSeconds + 0.25f));
-        }
-    }
+    const int startupIndicatorMode = configSnap ? configSnap->startupIndicatorMode : ConfigDefaults::STARTUP_INDICATOR_MODE;
+    const float startupIndicatorScale = configSnap ? configSnap->startupIndicatorScale : ConfigDefaults::STARTUP_INDICATOR_SCALE;
+    const float welcomeToastOpacity = ResolveStartupIndicatorOpacity(isFullscreenMode, startupIndicatorMode);
+    const bool wantWelcomeToast = welcomeToastOpacity > 0.0f;
 
     const bool wantCursorTrail = configSnap && configSnap->cursorTrail.enabled && IsCursorVisible();
     bool wantNinjabrainOverlay = false;
@@ -8942,10 +8936,11 @@ void RenderModeInternal(const ModeConfig* modeToRender, const GLState& s, int cu
 
         {
             PROFILE_SCOPE_CAT("Populate Overlay Element State", "Rendering");
-            target.welcomeToastIsFullscreen = isFullscreenMode;
             target.showWelcomeToast = wantWelcomeToast;
+            target.welcomeToastOpacity = welcomeToastOpacity;
             target.startupIndicatorMode = startupIndicatorMode;
             target.startupIndicatorImagePath = configSnap ? configSnap->startupIndicatorImagePath : std::string{};
+            target.startupIndicatorScale = startupIndicatorScale;
             target.showRebindIndicator = wantRebindIndicator;
             target.showCursorTrail = wantCursorTrail;
             target.modeHasMirrors = hasMirrors;

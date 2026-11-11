@@ -253,6 +253,11 @@ constexpr bool CONFIG_DISABLE_FULLSCREEN_PROMPT = false;
 constexpr bool CONFIG_DISABLE_CONFIGURE_PROMPT = false;
 constexpr int STARTUP_INDICATOR_MODE = 1;
 inline const std::string STARTUP_INDICATOR_IMAGE_PATH = "";
+constexpr float STARTUP_INDICATOR_SCALE = 1.0f;
+constexpr float STARTUP_INDICATOR_SCALE_MIN = 0.01f;
+constexpr float STARTUP_INDICATOR_CARD_SCALE_MIN = 0.5f;
+constexpr float STARTUP_INDICATOR_CARD_SCALE_MAX = 2.0f;
+constexpr float STARTUP_INDICATOR_SCALE_MAX = 5.0f;
 inline const std::string CONFIG_MIRROR_MATCH_COLORSPACE = "Auto";
 inline const std::string CONFIG_NINJABRAIN_API_BASE_URL = "http://127.0.0.1:52533";
 

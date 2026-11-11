@@ -514,30 +514,62 @@ static ImU32 ScaleToastAlpha(ImU32 color, float alpha) {
     return ImGui::ColorConvertFloat4ToU32(rgba);
 }
 
-static void RenderFullscreenWelcomeToastImGui(float toastOpacity) {
-    std::lock_guard<std::recursive_mutex> imguiLock(GetImGuiContextMutex());
+namespace {
+constexpr float kStartupIndicatorHoldSeconds = 10.0f;
+constexpr float kStartupIndicatorFadeSeconds = 1.5f;
+constexpr float kStartupIndicatorReferenceHeight = 1080.0f;
+constexpr float kStartupIndicatorBaseScale = 0.45f;
+using StartupIndicatorClock = std::chrono::steady_clock;
+std::atomic<StartupIndicatorClock::rep> s_startupIndicatorPreviewStart{ 0 };
 
-    HWND hwnd = g_minecraftHwnd.load();
-    if (!hwnd) { return; }
+float StartupIndicatorTimelineOpacity(StartupIndicatorClock::duration sinceStart) {
+    const float elapsed = std::chrono::duration_cast<std::chrono::duration<float>>(sinceStart).count();
+    if (elapsed <= kStartupIndicatorHoldSeconds) { return 1.0f; }
+    return std::clamp(1.0f - (elapsed - kStartupIndicatorHoldSeconds) / kStartupIndicatorFadeSeconds, 0.0f, 1.0f);
+}
+}
 
-    InitializeImGuiContext(hwnd);
-    if (ImGui::GetCurrentContext() == nullptr) { return; }
+float StartupIndicatorPixelScale(float viewportHeight, float userScale) {
+    return (viewportHeight / kStartupIndicatorReferenceHeight) * kStartupIndicatorBaseScale * userScale;
+}
 
-    ImGui_ImplOpenGL3_NewFrame();
-    SyncImGuiMouseCursorOwnership();
-    ImGui_ImplWin32_NewFrame();
-    SyncImGuiDisplayMetrics(hwnd);
-    ApplyDynamicGuiFontRefresh();
-    ImGui::NewFrame();
+void StartStartupIndicatorPreview() {
+    s_startupIndicatorPreviewStart.store(StartupIndicatorClock::now().time_since_epoch().count(), std::memory_order_release);
+}
 
-    ImGuiIO& io = ImGui::GetIO();
-    if (io.DisplaySize.x <= 0.0f || io.DisplaySize.y <= 0.0f) {
-        ImGui::Render();
-        RenderImGuiWithStateProtection(true);
-        return;
+float ResolveStartupIndicatorOpacity(bool inFullscreenMode, int indicatorMode) {
+    static bool s_wasFullscreen = false;
+    static StartupIndicatorClock::time_point s_enteredFullscreen{};
+    const auto now = StartupIndicatorClock::now();
+    if (inFullscreenMode && !s_wasFullscreen) { s_enteredFullscreen = now; }
+    s_wasFullscreen = inFullscreenMode;
+    if (indicatorMode == 0) { return 0.0f; }
+
+    float opacity = 0.0f;
+    if (inFullscreenMode && !g_configurePromptDismissedThisSession.load(std::memory_order_relaxed)) {
+        opacity = StartupIndicatorTimelineOpacity(now - s_enteredFullscreen);
     }
 
-    const float toastScale = (io.DisplaySize.y / 1080.0f) * 0.45f;
+    auto previewStart = s_startupIndicatorPreviewStart.load(std::memory_order_acquire);
+    if (previewStart != 0) {
+        const StartupIndicatorClock::time_point previewStartTime{ StartupIndicatorClock::duration(previewStart) };
+        const float previewOpacity = StartupIndicatorTimelineOpacity(now - previewStartTime);
+        if (previewOpacity <= 0.0f) {
+            s_startupIndicatorPreviewStart.compare_exchange_strong(previewStart, 0, std::memory_order_acq_rel);
+        }
+        opacity = (std::max)(opacity, previewOpacity);
+    }
+    return opacity;
+}
+
+void DrawStartupShortcutCard(float toastOpacity, float scale) {
+    if (toastOpacity <= 0.0f || ImGui::GetCurrentContext() == nullptr) { return; }
+    scale = std::clamp(scale, ConfigDefaults::STARTUP_INDICATOR_CARD_SCALE_MIN, ConfigDefaults::STARTUP_INDICATOR_CARD_SCALE_MAX);
+
+    const ImGuiIO& io = ImGui::GetIO();
+    if (io.DisplaySize.x <= 0.0f || io.DisplaySize.y <= 0.0f) { return; }
+
+    const float toastScale = StartupIndicatorPixelScale(io.DisplaySize.y, scale);
     const ImVec2 toastSize(700.0f * toastScale, 250.0f * toastScale);
     const float unit = toastSize.y / 250.0f;
 
@@ -548,369 +580,71 @@ static void RenderFullscreenWelcomeToastImGui(float toastOpacity) {
     }
     const std::string messageText = tr("welcome_toast.fullscreen_press_to_configure", hotkeyText);
 
-    ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
-    ImGui::SetNextWindowSize(toastSize);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
-    if (ImGui::Begin("##fullscreen_welcome_toast", nullptr,
-                     ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
-                         ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoFocusOnAppearing |
-                         ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground)) {
-        ImDrawList* drawList = ImGui::GetWindowDrawList();
-        ImFont* font = ImGui::GetFont();
-        const ImVec2 origin = ImGui::GetWindowPos();
-        const ImVec2 size = ImGui::GetWindowSize();
-        const float rounding = 28.0f * unit;
+    ImDrawList* drawList = ImGui::GetForegroundDrawList();
+    ImFont* font = ImGui::GetFont();
+    const ImVec2 origin(0.0f, 0.0f);
+    const ImVec2 size = toastSize;
+    const float rounding = 28.0f * unit;
 
-        auto calcTextSize = [&](const std::string& text, float fontSize) {
-            return font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, text.c_str());
-        };
-        auto addVec = [](const ImVec2& a, const ImVec2& b) {
-            return ImVec2(a.x + b.x, a.y + b.y);
-        };
-        auto subVec = [](const ImVec2& a, const ImVec2& b) {
-            return ImVec2(a.x - b.x, a.y - b.y);
-        };
-        auto fitTextSize = [&](const std::string& text, float desiredSize, float minSize, float maxWidth) {
-            float fontSize = desiredSize;
-            while (fontSize > minSize && calcTextSize(text, fontSize).x > maxWidth) {
-                fontSize -= unit;
-            }
-            return fontSize;
-        };
-        auto drawCenteredText = [&](const std::string& text, float centerY, float fontSize, ImU32 color) {
-            const ImVec2 textSize = calcTextSize(text, fontSize);
-            const ImVec2 textPos(origin.x + (size.x - textSize.x) * 0.5f, origin.y + centerY - textSize.y * 0.5f);
-            drawList->AddText(font, fontSize, addVec(textPos, ImVec2(2.0f * unit, 2.0f * unit)), ScaleToastAlpha(IM_COL32(20, 8, 31, 145), toastOpacity),
-                              text.c_str());
-            drawList->AddText(font, fontSize, textPos, color, text.c_str());
-        };
-        auto drawCenteredOutlinedText = [&](const std::string& text, float centerY, float fontSize, ImU32 fillColor, ImU32 outlineColor,
-                                            float outlineOffset) {
-            const ImVec2 textSize = calcTextSize(text, fontSize);
-            const ImVec2 textPos(origin.x + (size.x - textSize.x) * 0.5f, origin.y + centerY - textSize.y * 0.5f);
-            const ImVec2 offsets[] = {
-                ImVec2(-outlineOffset, 0.0f), ImVec2(outlineOffset, 0.0f), ImVec2(0.0f, -outlineOffset), ImVec2(0.0f, outlineOffset),
-                ImVec2(-outlineOffset, -outlineOffset), ImVec2(outlineOffset, -outlineOffset), ImVec2(-outlineOffset, outlineOffset),
-                ImVec2(outlineOffset, outlineOffset),
-            };
-
-            for (const ImVec2& offset : offsets) {
-                drawList->AddText(font, fontSize, addVec(textPos, offset), outlineColor, text.c_str());
-            }
-            drawList->AddText(font, fontSize, addVec(textPos, ImVec2(1.5f * unit, 1.5f * unit)), ScaleToastAlpha(IM_COL32(34, 15, 54, 120), toastOpacity),
-                              text.c_str());
-            drawList->AddText(font, fontSize, textPos, fillColor, text.c_str());
-        };
-
-        const ImVec2 panelMax = addVec(origin, size);
-        drawList->AddRectFilled(origin, panelMax, ScaleToastAlpha(IM_COL32(36, 10, 58, 244), toastOpacity), rounding,
-                                ImDrawFlags_RoundCornersBottomRight);
-        drawList->AddRectFilledMultiColor(origin, panelMax,
-                                          ScaleToastAlpha(IM_COL32(70, 45, 113, 208), toastOpacity),
-                                          ScaleToastAlpha(IM_COL32(40, 14, 64, 72), toastOpacity),
-                                          ScaleToastAlpha(IM_COL32(36, 10, 58, 0), toastOpacity),
-                                          ScaleToastAlpha(IM_COL32(65, 41, 107, 146), toastOpacity));
-        drawList->AddRectFilledMultiColor(origin, ImVec2(panelMax.x, origin.y + 118.0f * unit),
-                                          ScaleToastAlpha(IM_COL32(82, 58, 130, 88), toastOpacity),
-                                          ScaleToastAlpha(IM_COL32(63, 38, 102, 18), toastOpacity),
-                                          ScaleToastAlpha(IM_COL32(0, 0, 0, 0), toastOpacity),
-                                          ScaleToastAlpha(IM_COL32(0, 0, 0, 0), toastOpacity));
-
-        const float titleFontSize = fitTextSize(titleText, 66.0f * unit, 34.0f * unit, size.x - 80.0f * unit);
-        drawCenteredOutlinedText(titleText, 52.0f * unit, titleFontSize,
-                                 ScaleToastAlpha(IM_COL32(243, 224, 151, 255), toastOpacity),
-                                 ScaleToastAlpha(IM_COL32(74, 46, 35, 225), toastOpacity), 1.7f * unit);
-
-        const float messageFontSize = fitTextSize(messageText, 48.0f * unit, 22.0f * unit, size.x - 78.0f * unit);
-        drawCenteredText(messageText, 155.0f * unit, messageFontSize, ScaleToastAlpha(IM_COL32(247, 241, 224, 255), toastOpacity));
-    }
-    ImGui::End();
-    ImGui::PopStyleVar(3);
-
-    ImGui::Render();
-    RenderImGuiWithStateProtection(true);
-}
-
-static bool RenderCustomStartupIndicator(const std::string& path, float opacity);
-
-void RenderWelcomeToast(bool isFullscreen, int startupIndicatorMode, const std::string& customImagePath) {
-    if (startupIndicatorMode == 0) { return; }
-    if (isFullscreen && g_configurePromptDismissedThisSession.load(std::memory_order_relaxed)) { return; }
-
-    static bool s_prevFullscreen = false;
-    static std::chrono::steady_clock::time_point s_toast2StartTime{};
-    static bool s_toast2FinishedThisFullscreen = false;
-
-    if (isFullscreen && !s_prevFullscreen) {
-        s_toast2StartTime = std::chrono::steady_clock::now();
-        s_toast2FinishedThisFullscreen = false;
-    }
-    if (!isFullscreen) {
-        s_toast2FinishedThisFullscreen = false;
-    }
-    s_prevFullscreen = isFullscreen;
-
-    float toastOpacity = 1.0f;
-    if (isFullscreen) {
-        if (s_toast2FinishedThisFullscreen) { return; }
-
-        constexpr float kToast2HoldSeconds = 10.0f;
-        constexpr float kToast2FadeSeconds = 1.5f;
-
-        const auto now = std::chrono::steady_clock::now();
-        const float elapsed = std::chrono::duration_cast<std::chrono::duration<float>>(now - s_toast2StartTime).count();
-
-        if (elapsed <= kToast2HoldSeconds) {
-            toastOpacity = 1.0f;
-        } else {
-            const float t = (elapsed - kToast2HoldSeconds) / kToast2FadeSeconds;
-            const float clamped = (t < 0.0f) ? 0.0f : (t > 1.0f ? 1.0f : t);
-            toastOpacity = 1.0f - clamped;
-            if (toastOpacity <= 0.0f) {
-                s_toast2FinishedThisFullscreen = true;
-                return;
-            }
+    auto calcTextSize = [&](const std::string& text, float fontSize) {
+        return font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, text.c_str());
+    };
+    auto addVec = [](const ImVec2& a, const ImVec2& b) {
+        return ImVec2(a.x + b.x, a.y + b.y);
+    };
+    auto fitTextSize = [&](const std::string& text, float desiredSize, float minSize, float maxWidth) {
+        float fontSize = desiredSize;
+        while (fontSize > minSize && calcTextSize(text, fontSize).x > maxWidth) {
+            fontSize -= unit;
         }
-    }
+        return fontSize;
+    };
+    auto drawCenteredText = [&](const std::string& text, float centerY, float fontSize, ImU32 color) {
+        const ImVec2 textSize = calcTextSize(text, fontSize);
+        const ImVec2 textPos(origin.x + (size.x - textSize.x) * 0.5f, origin.y + centerY - textSize.y * 0.5f);
+        drawList->AddText(font, fontSize, addVec(textPos, ImVec2(2.0f * unit, 2.0f * unit)), ScaleToastAlpha(IM_COL32(20, 8, 31, 145), toastOpacity),
+                          text.c_str());
+        drawList->AddText(font, fontSize, textPos, color, text.c_str());
+    };
+    auto drawCenteredOutlinedText = [&](const std::string& text, float centerY, float fontSize, ImU32 fillColor, ImU32 outlineColor,
+                                        float outlineOffset) {
+        const ImVec2 textSize = calcTextSize(text, fontSize);
+        const ImVec2 textPos(origin.x + (size.x - textSize.x) * 0.5f, origin.y + centerY - textSize.y * 0.5f);
+        const ImVec2 offsets[] = {
+            ImVec2(-outlineOffset, 0.0f), ImVec2(outlineOffset, 0.0f), ImVec2(0.0f, -outlineOffset), ImVec2(0.0f, outlineOffset),
+            ImVec2(-outlineOffset, -outlineOffset), ImVec2(outlineOffset, -outlineOffset), ImVec2(-outlineOffset, outlineOffset),
+            ImVec2(outlineOffset, outlineOffset),
+        };
 
-    if (startupIndicatorMode == 2) {
-        if (!RenderCustomStartupIndicator(customImagePath, toastOpacity)) {
-            RenderFullscreenWelcomeToastImGui(toastOpacity);
+        for (const ImVec2& offset : offsets) {
+            drawList->AddText(font, fontSize, addVec(textPos, offset), outlineColor, text.c_str());
         }
-        return;
-    }
-
-    if (isFullscreen) {
-        RenderFullscreenWelcomeToastImGui(toastOpacity);
-        return;
-    }
-
-    static GLuint s_program = 0;
-    static GLuint s_vao = 0;
-    static GLuint s_vbo = 0;
-    static GLint s_locTexture = -1;
-    static GLint s_locOpacity = -1;
-
-    static GLuint s_toast1Texture = 0;
-    static int s_toast1Width = 0, s_toast1Height = 0;
-
-    static HGLRC s_lastCtx = NULL;
-    HGLRC currentCtx = wglGetCurrentContext();
-    if (currentCtx != s_lastCtx) {
-        s_lastCtx = currentCtx;
-        s_program = 0;
-        s_vao = 0;
-        s_vbo = 0;
-        s_locTexture = -1;
-        s_locOpacity = -1;
-        s_toast1Texture = 0;
-        s_toast1Width = s_toast1Height = 0;
-    }
-
-    if (s_program == 0) {
-        const char* vtxSrc = R"(#version 330 core
-layout(location = 0) in vec2 aPos;
-layout(location = 1) in vec2 aTexCoord;
-out vec2 TexCoord;
-void main() {
-    gl_Position = vec4(aPos, 0.0, 1.0);
-    TexCoord = aTexCoord;
-})";
-        const char* fragSrc = R"(#version 330 core
-out vec4 FragColor;
-in vec2 TexCoord;
-uniform sampler2D uTexture;
-uniform float uOpacity;
-void main() {
-    vec4 c = texture(uTexture, TexCoord);
-    FragColor = vec4(c.rgb, c.a * uOpacity);
-})";
-
-        s_program = CreateShaderProgram(vtxSrc, fragSrc);
-        if (s_program != 0) {
-            s_locTexture = glGetUniformLocation(s_program, "uTexture");
-            s_locOpacity = glGetUniformLocation(s_program, "uOpacity");
-            glUseProgram(s_program);
-            glUniform1i(s_locTexture, 0);
-            glUseProgram(0);
-        }
-    }
-
-    if (s_vao == 0) {
-        glGenVertexArrays(1, &s_vao);
-    }
-    if (s_vbo == 0) {
-        glGenBuffers(1, &s_vbo);
-    }
-    if (s_vao != 0 && s_vbo != 0) {
-        glBindVertexArray(s_vao);
-        glBindBuffer(GL_ARRAY_BUFFER, s_vbo);
-        glBufferData(GL_ARRAY_BUFFER, 6 * 4 * sizeof(float), nullptr, GL_DYNAMIC_DRAW);
-        glEnableVertexAttribArray(0);
-        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
-        glEnableVertexAttribArray(1);
-        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)(2 * sizeof(float)));
-        glBindVertexArray(0);
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
-    }
-
-    auto ensureToastTexture = [&](int resourceId, GLuint& outTexture, int& outW, int& outH) {
-        if (outTexture != 0 && outW > 0 && outH > 0) { return; }
-
-        stbi_set_flip_vertically_on_load_thread(0);
-
-        HMODULE hModule = NULL;
-        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                           (LPCWSTR)&RenderWelcomeToast, &hModule);
-        if (!hModule) { return; }
-
-        HRSRC hResource = FindResourceW(hModule, MAKEINTRESOURCEW(resourceId), RT_RCDATA);
-        if (!hResource) { return; }
-        HGLOBAL hData = LoadResource(hModule, hResource);
-        if (!hData) { return; }
-
-        DWORD dataSize = SizeofResource(hModule, hResource);
-        const unsigned char* rawData = (const unsigned char*)LockResource(hData);
-        if (!rawData || dataSize == 0) { return; }
-
-        int w = 0;
-        int h = 0;
-        int channels = 0;
-        unsigned char* pixels = stbi_load_from_memory(rawData, (int)dataSize, &w, &h, &channels, 4);
-        if (!pixels || w <= 0 || h <= 0) { return; }
-
-        glGenTextures(1, &outTexture);
-        BindTextureDirect(GL_TEXTURE_2D, outTexture);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-        glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
-        glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
-        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
-        BindTextureDirect(GL_TEXTURE_2D, 0);
-
-        outW = w;
-        outH = h;
-        stbi_image_free(pixels);
+        drawList->AddText(font, fontSize, addVec(textPos, ImVec2(1.5f * unit, 1.5f * unit)), ScaleToastAlpha(IM_COL32(34, 15, 54, 120), toastOpacity),
+                          text.c_str());
+        drawList->AddText(font, fontSize, textPos, fillColor, text.c_str());
     };
 
-    ensureToastTexture(IDR_TOAST1_PNG, s_toast1Texture, s_toast1Width, s_toast1Height);
+    const ImVec2 panelMax = addVec(origin, size);
+    drawList->AddRectFilled(origin, panelMax, ScaleToastAlpha(IM_COL32(36, 10, 58, 244), toastOpacity), rounding,
+                            ImDrawFlags_RoundCornersBottomRight);
+    drawList->AddRectFilledMultiColor(origin, panelMax,
+                                      ScaleToastAlpha(IM_COL32(70, 45, 113, 208), toastOpacity),
+                                      ScaleToastAlpha(IM_COL32(40, 14, 64, 72), toastOpacity),
+                                      ScaleToastAlpha(IM_COL32(36, 10, 58, 0), toastOpacity),
+                                      ScaleToastAlpha(IM_COL32(65, 41, 107, 146), toastOpacity));
+    drawList->AddRectFilledMultiColor(origin, ImVec2(panelMax.x, origin.y + 118.0f * unit),
+                                      ScaleToastAlpha(IM_COL32(82, 58, 130, 88), toastOpacity),
+                                      ScaleToastAlpha(IM_COL32(63, 38, 102, 18), toastOpacity),
+                                      ScaleToastAlpha(IM_COL32(0, 0, 0, 0), toastOpacity),
+                                      ScaleToastAlpha(IM_COL32(0, 0, 0, 0), toastOpacity));
 
-    GLuint texture = s_toast1Texture;
-    int imgW = s_toast1Width;
-    int imgH = s_toast1Height;
-    if (s_program == 0 || s_vao == 0 || s_vbo == 0 || texture == 0 || imgW <= 0 || imgH <= 0) { return; }
+    const float titleFontSize = fitTextSize(titleText, 66.0f * unit, 34.0f * unit, size.x - 80.0f * unit);
+    drawCenteredOutlinedText(titleText, 52.0f * unit, titleFontSize,
+                             ScaleToastAlpha(IM_COL32(243, 224, 151, 255), toastOpacity),
+                             ScaleToastAlpha(IM_COL32(74, 46, 35, 225), toastOpacity), 1.7f * unit);
 
-    GLint viewport[4];
-    glGetIntegerv(GL_VIEWPORT, viewport);
-    int vpW = viewport[2];
-    int vpH = viewport[3];
-    if (vpW <= 0 || vpH <= 0) { return; }
-
-    GLint savedProgram = 0, savedVAO = 0, savedVBO = 0, savedFBO = 0, savedTex = 0, savedActiveTex = 0;
-    GLboolean savedBlend = GL_FALSE, savedDepthTest = GL_FALSE, savedScissor = GL_FALSE, savedStencil = GL_FALSE;
-    GLint savedBlendSrcRGB = 0, savedBlendDstRGB = 0, savedBlendSrcA = 0, savedBlendDstA = 0;
-    GLint savedViewport[4];
-    GLboolean savedColorMask[4];
-    GLint savedUnpackRowLength = 0, savedUnpackSkipPixels = 0, savedUnpackSkipRows = 0, savedUnpackAlignment = 0;
-
-    glGetIntegerv(GL_CURRENT_PROGRAM, &savedProgram);
-    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &savedVAO);
-    glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &savedVBO);
-    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &savedFBO);
-    glGetIntegerv(GL_ACTIVE_TEXTURE, &savedActiveTex);
-    glActiveTexture(GL_TEXTURE0);
-    glGetIntegerv(GL_TEXTURE_BINDING_2D, &savedTex);
-    savedBlend = glIsEnabled(GL_BLEND);
-    savedDepthTest = glIsEnabled(GL_DEPTH_TEST);
-    savedScissor = glIsEnabled(GL_SCISSOR_TEST);
-    savedStencil = glIsEnabled(GL_STENCIL_TEST);
-    glGetIntegerv(GL_BLEND_SRC_RGB, &savedBlendSrcRGB);
-    glGetIntegerv(GL_BLEND_DST_RGB, &savedBlendDstRGB);
-    glGetIntegerv(GL_BLEND_SRC_ALPHA, &savedBlendSrcA);
-    glGetIntegerv(GL_BLEND_DST_ALPHA, &savedBlendDstA);
-    glGetIntegerv(GL_VIEWPORT, savedViewport);
-    glGetBooleanv(GL_COLOR_WRITEMASK, savedColorMask);
-    glGetIntegerv(GL_UNPACK_ROW_LENGTH, &savedUnpackRowLength);
-    glGetIntegerv(GL_UNPACK_SKIP_PIXELS, &savedUnpackSkipPixels);
-    glGetIntegerv(GL_UNPACK_SKIP_ROWS, &savedUnpackSkipRows);
-    glGetIntegerv(GL_UNPACK_ALIGNMENT, &savedUnpackAlignment);
-
-    glDisable(GL_DEPTH_TEST);
-    glDisable(GL_SCISSOR_TEST);
-    glDisable(GL_STENCIL_TEST);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-
-    float scaleFactor = (static_cast<float>(vpH) / 1080.0f) * 0.45f;
-    float drawW = (float)imgW * scaleFactor;
-    float drawH = (float)imgH * scaleFactor;
-
-    float px1 = 0.0f, py1 = 0.0f;
-    float px2 = drawW, py2 = drawH;
-    float nx1 = (px1 / vpW) * 2.0f - 1.0f;
-    float nx2 = (px2 / vpW) * 2.0f - 1.0f;
-    float ny_top = 1.0f - (py1 / vpH) * 2.0f;
-    float ny_bot = 1.0f - (py2 / vpH) * 2.0f;
-
-    float verts[] = {
-        nx1, ny_bot, 0.0f, 1.0f,
-        nx2, ny_bot, 1.0f, 1.0f,
-        nx2, ny_top, 1.0f, 0.0f,
-        nx1, ny_bot, 0.0f, 1.0f,
-        nx2, ny_top, 1.0f, 0.0f,
-        nx1, ny_top, 0.0f, 0.0f,
-    };
-
-    glUseProgram(s_program);
-    glBindVertexArray(s_vao);
-    glBindBuffer(GL_ARRAY_BUFFER, s_vbo);
-    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(verts), verts);
-    glActiveTexture(GL_TEXTURE0);
-    BindTextureDirect(GL_TEXTURE_2D, texture);
-    glUniform1f(s_locOpacity, toastOpacity);
-    glDrawArrays(GL_TRIANGLES, 0, 6);
-
-    glUseProgram(savedProgram);
-    glBindVertexArray(savedVAO);
-    glBindBuffer(GL_ARRAY_BUFFER, savedVBO);
-    glBindFramebuffer(GL_FRAMEBUFFER, savedFBO);
-    glActiveTexture(GL_TEXTURE0);
-    BindTextureDirect(GL_TEXTURE_2D, savedTex);
-    glActiveTexture(savedActiveTex);
-    if (oglViewport)
-        oglViewport(savedViewport[0], savedViewport[1], savedViewport[2], savedViewport[3]);
-    else
-        glViewport(savedViewport[0], savedViewport[1], savedViewport[2], savedViewport[3]);
-    glColorMask(savedColorMask[0], savedColorMask[1], savedColorMask[2], savedColorMask[3]);
-    glPixelStorei(GL_UNPACK_ROW_LENGTH, savedUnpackRowLength);
-    glPixelStorei(GL_UNPACK_SKIP_PIXELS, savedUnpackSkipPixels);
-    glPixelStorei(GL_UNPACK_SKIP_ROWS, savedUnpackSkipRows);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, savedUnpackAlignment);
-
-    if (savedBlend)
-        glEnable(GL_BLEND);
-    else
-        glDisable(GL_BLEND);
-    if (savedDepthTest)
-        glEnable(GL_DEPTH_TEST);
-    else
-        glDisable(GL_DEPTH_TEST);
-    if (savedScissor)
-        glEnable(GL_SCISSOR_TEST);
-    else
-        glDisable(GL_SCISSOR_TEST);
-    if (savedStencil)
-        glEnable(GL_STENCIL_TEST);
-    else
-        glDisable(GL_STENCIL_TEST);
-    glBlendFuncSeparate(savedBlendSrcRGB, savedBlendDstRGB, savedBlendSrcA, savedBlendDstA);
+    const float messageFontSize = fitTextSize(messageText, 48.0f * unit, 22.0f * unit, size.x - 78.0f * unit);
+    drawCenteredText(messageText, 155.0f * unit, messageFontSize, ScaleToastAlpha(IM_COL32(247, 241, 224, 255), toastOpacity));
 }
 
 static bool s_rebindIndicatorPrevEnabled = false;
@@ -1347,12 +1081,7 @@ static bool EnsureStartupIndicatorTexture(const std::string& path) {
     return !s_startupIndicatorTex.Empty();
 }
 
-static bool RenderCustomStartupIndicator(const std::string& path, float opacity) {
-    GLint viewport[4];
-    glGetIntegerv(GL_VIEWPORT, viewport);
-    int vpW = viewport[2], vpH = viewport[3];
-    if (vpW <= 0 || vpH <= 0) return false;
-
+static void SyncStartupIndicatorContext() {
     HGLRC currentCtx = wglGetCurrentContext();
     if (currentCtx != s_startupIndLastCtx) {
         s_startupIndLastCtx = currentCtx;
@@ -1362,7 +1091,9 @@ static bool RenderCustomStartupIndicator(const std::string& path, float opacity)
         s_startupIndLocOpacity = -1;
         s_startupIndicatorTex.ResetForContextLoss();
     }
+}
 
+static void EnsureStartupIndicatorPipeline() {
     if (s_startupIndProgram == 0) {
         const char* vtxSrc = R"(#version 330 core
 layout(location = 0) in vec2 aPos;
@@ -1403,12 +1134,26 @@ void main() {
         glBindVertexArray(0);
         glBindBuffer(GL_ARRAY_BUFFER, 0);
     }
-    if (s_startupIndProgram == 0) return false;
+}
 
+bool PrepareStartupIndicatorImage(const std::string& path) {
+    SyncStartupIndicatorContext();
+    EnsureStartupIndicatorPipeline();
+    if (s_startupIndProgram == 0 || s_startupIndVao == 0 || s_startupIndVbo == 0) return false;
     if (!EnsureStartupIndicatorTexture(path)) return false;
+    return s_startupIndicatorTex.textureId != 0;
+}
+
+void RenderStartupIndicatorImage(float opacity, float scale) {
+    if (opacity <= 0.0f || s_startupIndicatorTex.textureId == 0) return;
+
+    GLint viewport[4];
+    glGetIntegerv(GL_VIEWPORT, viewport);
+    const int vpW = viewport[2];
+    const int vpH = viewport[3];
+    if (vpW <= 0 || vpH <= 0) return;
 
     const auto frame = ResolveAnimatedTexture(s_startupIndicatorTex);
-    if (frame.textureId == 0) return false;
 
     GLint savedProgram, savedVAO, savedVBO, savedTex, savedActiveTex;
     GLint savedBlendSrcRGB, savedBlendDstRGB, savedBlendSrcA, savedBlendDstA;
@@ -1437,9 +1182,9 @@ void main() {
     glBindVertexArray(s_startupIndVao);
     glBindBuffer(GL_ARRAY_BUFFER, s_startupIndVbo);
 
-    float scale = (static_cast<float>(vpH) / 1080.0f) * 0.45f;
-    float drawW = s_startupIndicatorTex.width * scale;
-    float drawH = s_startupIndicatorTex.height * scale;
+    const float pixelScale = StartupIndicatorPixelScale(static_cast<float>(vpH), scale);
+    float drawW = s_startupIndicatorTex.width * pixelScale;
+    float drawH = s_startupIndicatorTex.height * pixelScale;
     float px1 = 0.0f, py1 = 0.0f;
     float nx1 = (px1 / vpW) * 2.0f - 1.0f;
     float nx2 = ((px1 + drawW) / vpW) * 2.0f - 1.0f;
@@ -1473,7 +1218,6 @@ void main() {
     if (savedScissor) glEnable(GL_SCISSOR_TEST); else glDisable(GL_SCISSOR_TEST);
     if (savedStencil) glEnable(GL_STENCIL_TEST); else glDisable(GL_STENCIL_TEST);
     glBlendFuncSeparate(savedBlendSrcRGB, savedBlendDstRGB, savedBlendSrcA, savedBlendDstA);
-    return true;
 }
 
 void RenderPerformanceOverlay(bool showPerformanceOverlay) {

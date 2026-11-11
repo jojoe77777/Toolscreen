@@ -930,6 +930,8 @@
     "startup_indicator.image_path": "图片 / GIF：",
     "startup_indicator.none": "无",
     "startup_indicator.none_help": "此实例启动时不显示任何指示器。仅在您确定记得自己的快捷键时才选择此项。",
+    "startup_indicator.preview": "预览",
+    "startup_indicator.scale": "缩放：",
     "startup_indicator.section": "启动指示器",
     "startup_indicator.shortcut_reminder": "快捷键提醒（默认）",
     "startup_indicator.shortcut_reminder_help": "在启动时显示几秒钟的快捷键提醒，告诉您哪个键可以打开 Toolscreen。",

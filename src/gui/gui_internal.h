@@ -62,6 +62,7 @@ void StartAsyncImagePicker(const std::string& pickerId, const std::wstring& init
 bool CheckAsyncImagePicker(const std::string& pickerId, std::string& outPath, std::string& outError);
 
 void HelpMarker(const char* desc);
+void RenderStartupIndicatorScaleAndPreview();
 void SliderCtrlClickTip();
 void RawInputSensitivityNote();
 bool IsHotkeyBindingActive_UiState();

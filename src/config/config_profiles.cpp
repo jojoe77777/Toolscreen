@@ -478,6 +478,7 @@ void ApplyProfileFields(const Config& src, Config& dst, const ProfileSectionSele
         dst.disableFullscreenPrompt = src.disableFullscreenPrompt;
         dst.startupIndicatorMode = src.startupIndicatorMode;
         dst.startupIndicatorImagePath = src.startupIndicatorImagePath;
+        dst.startupIndicatorScale = src.startupIndicatorScale;
     }
     if (sections.settings) {
         dst.debug = src.debug;

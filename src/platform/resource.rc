@@ -66,7 +66,6 @@ END
 //
 
 IDR_DEFAULT_CONFIG     RCDATA                  "../config/default.toml"
-IDR_TOAST1_PNG         RCDATA                  "../assets/images/ui/toast1.png"
 IDR_TOAST2_PNG         RCDATA                  "../assets/images/ui/toast2.png"
 IDR_DISCORD_PNG        RCDATA                  "../assets/images/ui/discord.png"
 IDR_LANGUAGE_PNG       RCDATA                  "../assets/images/ui/language.png"

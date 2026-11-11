@@ -216,6 +216,8 @@ if (BeginSelectableSettingsTopTabItem(trc("tabs.other"))) {
         }
         ImGui::Unindent();
     }
+
+    RenderStartupIndicatorScaleAndPreview();
     ImGui::PopID();
 
     ImGui::SeparatorText(trc("label.font"));

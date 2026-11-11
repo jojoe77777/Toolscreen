@@ -5566,40 +5566,14 @@ void DrawRebindIndicator(
 
 void DrawStartupIndicator(
     const VulkanRenderer::FinalBlitContext& context) {
-    if (!g_state.configSnapshot ||
-        g_state.configSnapshot->startupIndicatorMode == 0 ||
-        g_configurePromptDismissedThisSession.load(std::memory_order_relaxed)) {
-        return;
-    }
+    if (!g_state.configSnapshot) return;
+    const Config& config = *g_state.configSnapshot;
+    const float opacity = ResolveStartupIndicatorOpacity(
+        EqualsIgnoreCase(g_state.modeId, "Fullscreen"),
+        config.startupIndicatorMode);
+    if (opacity <= 0.0f) return;
 
-    const bool fullscreen = EqualsIgnoreCase(g_state.modeId, "Fullscreen");
-    static bool wasFullscreen = false;
-    static bool firstFrame = true;
-    static std::chrono::steady_clock::time_point enteredFullscreen{};
-    const auto now = std::chrono::steady_clock::now();
-    if (fullscreen && (!wasFullscreen || firstFrame)) {
-        enteredFullscreen = now;
-    }
-    wasFullscreen = fullscreen;
-    firstFrame = false;
-    if (!fullscreen) return;
-
-    constexpr float kHoldSeconds = 10.0f;
-    constexpr float kFadeSeconds = 1.5f;
-    const float elapsed =
-        std::chrono::duration_cast<std::chrono::duration<float>>(
-            now - enteredFullscreen)
-            .count();
-    if (elapsed >= kHoldSeconds + kFadeSeconds) return;
-    const float opacity = elapsed <= kHoldSeconds
-        ? 1.0f
-        : std::clamp(
-              1.0f - (elapsed - kHoldSeconds) / kFadeSeconds, 0.0f, 1.0f);
-
-    ImDrawList* draw = ImGui::GetForegroundDrawList();
-    const float screenHeight =
-        static_cast<float>(context.swapchain->extent.height);
-    if (g_state.configSnapshot->startupIndicatorMode == 2) {
+    if (config.startupIndicatorMode == 2) {
         const auto assetIt =
             g_state.textureAssets.find(kStartupIndicatorTextureId);
         if (assetIt != g_state.textureAssets.end()) {
@@ -5607,11 +5581,13 @@ void DrawStartupIndicator(
             TextureFrame* frame = ResolveTextureFrame(asset, true);
             if (frame && frame->sampled.linearDescriptor &&
                 asset.width > 0 && asset.height > 0) {
-                const float scale = screenHeight / 1080.0f * 0.45f;
+                const float scale = StartupIndicatorPixelScale(
+                    static_cast<float>(context.swapchain->extent.height),
+                    config.startupIndicatorScale);
                 const ImTextureID texture = static_cast<ImTextureID>(
                     reinterpret_cast<uintptr_t>(
                         frame->sampled.linearDescriptor));
-                draw->AddImage(
+                ImGui::GetForegroundDrawList()->AddImage(
                     texture, ImVec2(0.0f, 0.0f),
                     ImVec2(
                         static_cast<float>(asset.width) * scale,
@@ -5625,63 +5601,7 @@ void DrawStartupIndicator(
         }
     }
 
-    const float unit = screenHeight / 1080.0f * 0.45f;
-    const ImVec2 size(700.0f * unit, 250.0f * unit);
-    const float rounding = 28.0f * unit;
-    auto alphaColor = [opacity](ImU32 color) {
-        ImVec4 value = ImGui::ColorConvertU32ToFloat4(color);
-        value.w *= opacity;
-        return ImGui::ColorConvertFloat4ToU32(value);
-    };
-    draw->AddRectFilled(
-        ImVec2(0.0f, 0.0f), size,
-        alphaColor(IM_COL32(36, 10, 58, 244)), rounding,
-        ImDrawFlags_RoundCornersBottomRight);
-    draw->AddRectFilledMultiColor(
-        ImVec2(0.0f, 0.0f), size,
-        alphaColor(IM_COL32(70, 45, 113, 208)),
-        alphaColor(IM_COL32(40, 14, 64, 72)),
-        alphaColor(IM_COL32(36, 10, 58, 0)),
-        alphaColor(IM_COL32(65, 41, 107, 146)));
-
-    ImFont* font = ImGui::GetFont();
-    std::string title = tr("label.toolscreen");
-    std::string hotkey =
-        GetKeyComboString(g_state.configSnapshot->guiHotkey);
-    if (hotkey.empty()) hotkey = tr("hotkeys.none");
-    const std::string message =
-        tr("welcome_toast.fullscreen_press_to_configure", hotkey);
-    auto fittedSize = [&](const std::string& text, float desired,
-                          float minimum, float maximumWidth) {
-        float fontSize = desired;
-        while (fontSize > minimum &&
-               font->CalcTextSizeA(
-                       fontSize, FLT_MAX, 0.0f, text.c_str())
-                       .x > maximumWidth) {
-            fontSize -= unit;
-        }
-        return fontSize;
-    };
-    auto centeredText = [&](const std::string& text, float centerY,
-                            float fontSize, ImU32 color) {
-        const ImVec2 measured =
-            font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, text.c_str());
-        draw->AddText(
-            font, fontSize,
-            ImVec2((size.x - measured.x) * 0.5f,
-                   centerY - measured.y * 0.5f),
-            alphaColor(color), text.c_str());
-    };
-    centeredText(
-        title, 52.0f * unit,
-        fittedSize(title, 66.0f * unit, 34.0f * unit,
-                   size.x - 80.0f * unit),
-        IM_COL32(243, 224, 151, 255));
-    centeredText(
-        message, 155.0f * unit,
-        fittedSize(message, 48.0f * unit, 22.0f * unit,
-                   size.x - 78.0f * unit),
-        IM_COL32(247, 241, 224, 255));
+    DrawStartupShortcutCard(opacity, config.startupIndicatorScale);
 }
 
 void DrawCursorVisuals(const VulkanRenderer::FinalBlitContext& context) {

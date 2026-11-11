@@ -377,6 +377,30 @@ void HelpMarker(const char* desc) {
     }
 }
 
+void RenderStartupIndicatorScaleAndPreview() {
+    if (g_config.startupIndicatorMode == 0) return;
+
+    constexpr float kPercentPerUnit = 100.0f;
+    constexpr float kScaleSliderWidth = 250.0f;
+
+    const bool cardMode = g_config.startupIndicatorMode == 1;
+    const float minPercent =
+        (cardMode ? ConfigDefaults::STARTUP_INDICATOR_CARD_SCALE_MIN : ConfigDefaults::STARTUP_INDICATOR_SCALE_MIN) * kPercentPerUnit;
+    const float maxPercent =
+        (cardMode ? ConfigDefaults::STARTUP_INDICATOR_CARD_SCALE_MAX : ConfigDefaults::STARTUP_INDICATOR_SCALE_MAX) * kPercentPerUnit;
+    float scalePercent = std::clamp(g_config.startupIndicatorScale * kPercentPerUnit, minPercent, maxPercent);
+
+    ImGui::TextUnformatted(trc("startup_indicator.scale"));
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(kScaleSliderWidth);
+    if (ImGui::SliderFloat("##startup_ind_scale", &scalePercent, minPercent, maxPercent, "%.0f%%", ImGuiSliderFlags_AlwaysClamp)) {
+        g_config.startupIndicatorScale = scalePercent / kPercentPerUnit;
+        g_configIsDirty = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(trc("startup_indicator.preview"))) { StartStartupIndicatorPreview(); }
+}
+
 void SliderCtrlClickTip() {
     ImGui::TextDisabled(trc("label.tip_right_click_slider"));
     ImGui::Spacing();

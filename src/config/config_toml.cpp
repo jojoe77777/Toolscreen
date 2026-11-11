@@ -2220,6 +2220,11 @@ static int ClampObsFramerateConfigValue(int value) {
     return value;
 }
 
+static float ClampStartupIndicatorScale(float value) {
+    if (!std::isfinite(value)) { return ConfigDefaults::STARTUP_INDICATOR_SCALE; }
+    return std::clamp(value, ConfigDefaults::STARTUP_INDICATOR_SCALE_MIN, ConfigDefaults::STARTUP_INDICATOR_SCALE_MAX);
+}
+
 static int ClampKeyRepeatStartDelayConfigValue(int value) {
     if (value < 0) {
         return -1;
@@ -2271,6 +2276,7 @@ void ConfigToToml(const Config& config, toml::table& out) {
     if (!config.startupIndicatorImagePath.empty()) {
         out.insert("startupIndicatorImagePath", config.startupIndicatorImagePath);
     }
+    out.insert("startupIndicatorScale", ClampStartupIndicatorScale(config.startupIndicatorScale));
 
     toml::array guiHotkeyArr;
     for (const auto& key : config.guiHotkey) { guiHotkeyArr.push_back(static_cast<int64_t>(key)); }
@@ -2562,6 +2568,8 @@ void ConfigFromToml(const toml::table& tbl, Config& config) {
     }
     config.startupIndicatorImagePath =
         GetStringOr(tbl, "startupIndicatorImagePath", ConfigDefaults::STARTUP_INDICATOR_IMAGE_PATH);
+    config.startupIndicatorScale =
+        ClampStartupIndicatorScale(GetOr(tbl, "startupIndicatorScale", ConfigDefaults::STARTUP_INDICATOR_SCALE));
 
     config.guiHotkey.clear();
     if (auto arr = GetArray(tbl, "guiHotkey")) {
@@ -3025,6 +3033,7 @@ const std::vector<std::string>& GetConfigTomlOrderedKeys() {
         "disableFullscreenPrompt",
         "startupIndicatorMode",
         "startupIndicatorImagePath",
+        "startupIndicatorScale",
         "guiHotkey",
         "borderlessHotkey",
         "autoBorderless",

@@ -53,7 +53,7 @@ if (BeginSelectableSettingsTopTabItem(trc("tabs.other"))) {
     });
     const bool showStartupIndicatorSection = ShouldRenderConfigSearchSection(
         showAllSettingsSections,
-        {"startup", "indicator", "toast", "reminder", "hotkey", "welcome", "launch"});
+        {"startup", "indicator", "toast", "reminder", "hotkey", "welcome", "launch", "preview", "scale"});
     const bool showFontSection = ShouldRenderConfigSearchSection(showAllSettingsSections, {
         trc("label.font"),
         trc("label.font_path"),
@@ -273,6 +273,8 @@ if (BeginSelectableSettingsTopTabItem(trc("tabs.other"))) {
             }
             ImGui::Unindent();
         }
+
+        RenderStartupIndicatorScaleAndPreview();
         ImGui::PopID();
     }
 

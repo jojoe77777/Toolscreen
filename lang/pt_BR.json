@@ -918,6 +918,8 @@
     "startup_indicator.image_path": "Imagem / GIF:",
     "startup_indicator.none": "Nenhum",
     "startup_indicator.none_help": "Nenhum indicador aparece quando esta instância é iniciada. Escolha esta opção apenas se tiver certeza de que conhece seu atalho.",
+    "startup_indicator.preview": "Pré-visualizar",
+    "startup_indicator.scale": "Escala:",
     "startup_indicator.section": "Indicador de inicialização",
     "startup_indicator.shortcut_reminder": "Lembrete de atalho (padrão)",
     "startup_indicator.shortcut_reminder_help": "Mostra o lembrete de atalho por alguns segundos ao iniciar, indicando qual tecla abre o Toolscreen.",

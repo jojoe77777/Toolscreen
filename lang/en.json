@@ -918,6 +918,8 @@
     "startup_indicator.image_path": "Image / GIF:",
     "startup_indicator.none": "None",
     "startup_indicator.none_help": "No indicator appears when this instance launches. Only choose this if you are confident you know your hotkey.",
+    "startup_indicator.preview": "Preview",
+    "startup_indicator.scale": "Scale:",
     "startup_indicator.section": "Startup indicator",
     "startup_indicator.shortcut_reminder": "Shortcut reminder (default)",
     "startup_indicator.shortcut_reminder_help": "Shows the shortcut reminder for a few seconds at launch, telling you which key opens Toolscreen.",
