@@ -1552,6 +1552,44 @@ foreach(test_case IN LISTS TOOLSCREEN_BACKGROUND_FIT_TEST_CASES)
     )
 endforeach()
 
+add_executable(toolscreen_mirror_content_scan_tests
+    tests/mirror_content_scan_tests.cpp
+)
+
+target_include_directories(toolscreen_mirror_content_scan_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_compile_definitions(toolscreen_mirror_content_scan_tests PRIVATE
+    NOMINMAX
+    UNICODE
+    _UNICODE
+)
+
+if(MSVC)
+    target_compile_options(toolscreen_mirror_content_scan_tests PRIVATE
+        /W3
+        /MP
+        /EHsc
+    )
+endif()
+
+toolscreen_configure_target_outputs(toolscreen_mirror_content_scan_tests)
+toolscreen_enable_release_symbols(toolscreen_mirror_content_scan_tests)
+
+set(TOOLSCREEN_MIRROR_CONTENT_SCAN_TEST_CASES
+    empty_and_transparent_have_no_content
+    single_alpha_pixel_found_at_block_boundaries
+    only_alpha_counts_within_requested_pixels
+)
+
+foreach(test_case IN LISTS TOOLSCREEN_MIRROR_CONTENT_SCAN_TEST_CASES)
+    add_test(
+        NAME toolscreen_mirror_content_scan_${test_case}
+        COMMAND $<TARGET_FILE:toolscreen_mirror_content_scan_tests> --run ${test_case}
+    )
+endforeach()
+
 add_executable(toolscreen_game_state_source_tests
     tests/game_state_source_tests.cpp
     src/features/game_state_source.cpp

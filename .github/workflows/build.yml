@@ -45,7 +45,7 @@ jobs:
             artifact_dir: out/build-ci/bin/Release
             # The test runners only run on x64 hosts, so only this leg builds them.
             run_tests: true
-            build_targets: Toolscreen toolscreen_gui_integration_tests toolscreen_interactive_create_tests toolscreen_game_state_source_tests toolscreen_path_sanitize_tests toolscreen_background_fit_layout_tests toolscreen_startup_lifecycle_tests toolscreen_expression_parser_tests toolscreen_base64_tests
+            build_targets: Toolscreen toolscreen_gui_integration_tests toolscreen_interactive_create_tests toolscreen_game_state_source_tests toolscreen_path_sanitize_tests toolscreen_background_fit_layout_tests toolscreen_startup_lifecycle_tests toolscreen_expression_parser_tests toolscreen_base64_tests toolscreen_mirror_content_scan_tests
           - arch: arm64
             vs_arch: amd64_arm64
             configure_preset: ci-ninja-arm64
