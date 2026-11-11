@@ -4282,11 +4282,6 @@ static BOOL SwapBuffersHook_Impl(WGLSWAPBUFFERS next, HDC hDc) {
         }
 
         // All ImGui rendering is handled by render thread (via FrameRenderRequest ImGui state fields)
-        // Screenshot handling stays on main thread since it needs direct backbuffer access
-        if (g_screenshotRequested.exchange(false)) {
-            glBindFramebuffer(GL_READ_FRAMEBUFFER, s.read_fb);
-            ScreenshotToClipboard(fullW, fullH);
-        }
 
         // Render fake cursor overlay if enabled (MUST be after RestoreGLState)
         {

@@ -480,11 +480,6 @@ void ScreenDeltaToMirrorConfigDelta(const std::string& relativeTo,
                                     int finalW, int finalH,
                                     int& outConfigDx, int& outConfigDy);
 
-void ScreenshotToClipboard(int width, int height);
-bool ScreenshotPixelsToClipboard(const unsigned char* pixels, int width, int height,
-                                 size_t rowPitch, bool sourceIsBgra,
-                                 bool sourceIsTopDown);
-
 DWORD WINAPI FileMonitorThread(LPVOID lpParam);
 DWORD WINAPI ImageMonitorThread(LPVOID lpParam);
 

@@ -3240,11 +3240,6 @@ void HarvestTimestamps() {
                 g_state.frameCaptureHeight = frame.screenshotHeight;
                 g_state.frameCaptureForTests = false;
                 g_state.frameCaptureReady = true;
-            } else {
-                ScreenshotPixelsToClipboard(
-                    g_state.screenshotReadbackMapped, frame.screenshotWidth,
-                    frame.screenshotHeight,
-                    static_cast<size_t>(frame.screenshotWidth) * 4u, bgra, true);
             }
         }
         if (frame.virtualCameraPending) {

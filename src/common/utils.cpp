@@ -48,7 +48,6 @@ static std::mutex g_symbolMutex;
 namespace {
 constexpr size_t kMaxGifLoadBytes = 256ull * 1024ull * 1024ull;
 constexpr size_t kMaxDecodedImageBytes = 512ull * 1024ull * 1024ull;
-constexpr size_t kMaxScreenshotBytes = 512ull * 1024ull * 1024ull;
 
 bool TryMultiplySize(size_t left, size_t right, size_t& out) {
     if (left == 0 || right == 0) {
@@ -3214,127 +3213,6 @@ void ScreenDeltaToMirrorConfigDelta(const std::string& relativeTo,
 
     if (anchor == "topRightViewport" || anchor == "bottomRightViewport") { outConfigDx = -gameDx; }
     if (anchor == "bottomLeftViewport" || anchor == "bottomRightViewport") { outConfigDy = -gameDy; }
-}
-
-bool ScreenshotPixelsToClipboard(const unsigned char* sourcePixels, int width,
-                                 int height, size_t rowPitch,
-                                 bool sourceIsBgra, bool sourceIsTopDown) {
-    if (!sourcePixels || width <= 0 || height <= 0) {
-        Log("ERROR: Screenshot request rejected due to invalid dimensions " + std::to_string(width) + "x" + std::to_string(height) + ".");
-        return false;
-    }
-
-    size_t bufferSize = 0;
-    if (!TryComputeImageByteCount(width, height, 4, bufferSize)) {
-        Log("ERROR: Screenshot request rejected because byte-count overflowed for dimensions " + std::to_string(width) + "x" +
-            std::to_string(height) + ".");
-        return false;
-    }
-    if (bufferSize > kMaxScreenshotBytes) {
-        Log("ERROR: Screenshot request rejected because buffer size " + FormatByteCount(bufferSize) + " exceeds guard limit of " +
-            FormatByteCount(kMaxScreenshotBytes) + " for dimensions " + std::to_string(width) + "x" + std::to_string(height) + ".");
-        return false;
-    }
-    const size_t tightPitch = static_cast<size_t>(width) * 4u;
-    if (rowPitch < tightPitch) {
-        Log("ERROR: Screenshot request rejected because source row pitch is smaller than the image width.");
-        return false;
-    }
-
-    Log("Taking screenshot at " + std::to_string(width) + "x" + std::to_string(height) + " (" + FormatByteCount(bufferSize) + ").");
-    std::vector<BYTE> pixels(bufferSize);
-    for (int y = 0; y < height; ++y) {
-        const unsigned char* sourceRow =
-            sourcePixels + static_cast<size_t>(y) * rowPitch;
-        BYTE* destinationRow = pixels.data() + static_cast<size_t>(y) * tightPitch;
-        memcpy(destinationRow, sourceRow, tightPitch);
-        if (!sourceIsBgra) {
-            for (size_t x = 0; x < tightPitch; x += 4)
-                std::swap(destinationRow[x], destinationRow[x + 2]);
-        }
-    }
-
-    if (!OpenClipboard(g_minecraftHwnd.load())) {
-        Log("ERROR: Could not open clipboard.");
-        return false;
-    }
-    if (!EmptyClipboard()) {
-        Log("ERROR: Could not empty clipboard.");
-        CloseClipboard();
-        return false;
-    }
-
-    if (pixels.size() > (std::numeric_limits<SIZE_T>::max)() - sizeof(BITMAPINFOHEADER)) {
-        Log("ERROR: Screenshot clipboard payload size overflowed for dimensions " + std::to_string(width) + "x" +
-            std::to_string(height) + ".");
-        CloseClipboard();
-        return false;
-    }
-
-    HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, sizeof(BITMAPINFOHEADER) + pixels.size());
-    if (!hMem) {
-        Log("ERROR: GlobalAlloc failed.");
-        CloseClipboard();
-        return false;
-    }
-
-    LPVOID pMem = GlobalLock(hMem);
-    if (!pMem) {
-        Log("ERROR: GlobalLock failed.");
-        GlobalFree(hMem);
-        CloseClipboard();
-        return false;
-    }
-
-    BITMAPINFOHEADER bih = { 0 };
-    bih.biSize = sizeof(BITMAPINFOHEADER);
-    bih.biWidth = width;
-    // Positive DIB height is bottom-up (the OpenGL source); negative height is
-    // top-down (the Vulkan framebuffer source).
-    bih.biHeight = sourceIsTopDown ? -height : height;
-    bih.biPlanes = 1;
-    bih.biBitCount = 32;
-    bih.biCompression = BI_RGB;
-
-    memcpy(pMem, &bih, sizeof(bih));
-    memcpy(static_cast<BYTE*>(pMem) + sizeof(bih), pixels.data(), pixels.size());
-    GlobalUnlock(hMem);
-
-    if (!SetClipboardData(CF_DIB, hMem)) {
-        Log("ERROR: SetClipboardData failed with error code: " + std::to_string(GetLastError()));
-        GlobalFree(hMem);
-        CloseClipboard();
-        return false;
-    } else {
-        Log("Screenshot copied to clipboard.");
-    }
-    CloseClipboard();
-    return true;
-}
-
-void ScreenshotToClipboard(int width, int height) {
-    PROFILE_SCOPE_CAT("Screenshot to Clipboard", "System");
-    if (width <= 0 || height <= 0) {
-        Log("ERROR: Screenshot request rejected due to invalid dimensions " +
-            std::to_string(width) + "x" + std::to_string(height) + ".");
-        return;
-    }
-    size_t bufferSize = 0;
-    if (!TryComputeImageByteCount(width, height, 4, bufferSize) ||
-        bufferSize > kMaxScreenshotBytes) {
-        Log("ERROR: Screenshot request rejected because its pixel buffer is invalid or too large.");
-        return;
-    }
-    std::vector<BYTE> pixels(bufferSize);
-    GLint previousPackRowLength = 0;
-    glGetIntegerv(GL_PACK_ROW_LENGTH, &previousPackRowLength);
-    glReadBuffer(GL_BACK);
-    glPixelStorei(GL_PACK_ROW_LENGTH, 0);
-    glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE,
-                 pixels.data());
-    glPixelStorei(GL_PACK_ROW_LENGTH, previousPackRowLength);
-    ScreenshotPixelsToClipboard(pixels.data(), width, height,
-                                static_cast<size_t>(width) * 4u, false, false);
 }
 
 UINT GetToolscreenBorderlessToggleMessageId() {
