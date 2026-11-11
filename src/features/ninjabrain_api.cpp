@@ -508,6 +508,7 @@ void NinjabrainApiSession::RunStream(
     bool connected = false;
     bool disconnected = false;
     bool hasConnectedOnce = false;
+    std::string lastMessage;
 
     LogNinjabrainApiMessage(
         "NinjabrainBot API connecting " + streamNameString + " stream to " + apiBaseUrl_ + path +
@@ -539,10 +540,13 @@ void NinjabrainApiSession::RunStream(
         outageInProgress = false;
     });
     sse.on_message([&](const httplib::sse::SSEMessage& message) {
-        if (onMessage) { onMessage(message.data); }
+        if (!onMessage || message.data == lastMessage) { return; }
+        lastMessage = message.data;
+        onMessage(message.data);
     });
     sse.on_error([&, streamName = streamNameString](httplib::Error error) {
-        if (stopToken.stop_requested() || error == httplib::Error::Canceled) { return; }
+        if (stopToken.stop_requested() || error == httplib::Error::Canceled || error == httplib::Error::Timeout) { return; }
+        lastMessage.clear();
 
         const auto now = SteadyClock::now();
         const std::string errorString = httplib::to_string(error);
