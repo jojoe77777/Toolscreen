@@ -10574,9 +10574,10 @@ float   GetNinjabrainFontSize() { return g_ninjabrainFontSize; }
 
 static bool NB_IsFontStable(const std::string& fontPath, float /*sizePixels*/) {
     if (fontPath.empty()) return false;
-    const DWORD attrs = GetFileAttributesA(fontPath.c_str());
+    const std::filesystem::path widePath(Utf8ToWide(fontPath));
+    const DWORD attrs = GetFileAttributesW(widePath.c_str());
     if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_DIRECTORY)) return false;
-    std::ifstream f(fontPath, std::ios::binary);
+    std::ifstream f(widePath, std::ios::binary);
     if (!f) return false;
     unsigned char sig[4] = { 0, 0, 0, 0 };
     f.read(reinterpret_cast<char*>(sig), sizeof(sig));

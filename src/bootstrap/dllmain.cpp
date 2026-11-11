@@ -53,6 +53,7 @@
 #pragma comment(lib, "DbgHelp.lib")
 
 #define STB_IMAGE_IMPLEMENTATION
+#define STBI_WINDOWS_UTF8
 #include "imgui_impl_opengl3.h"
 #include "imgui_impl_win32.h"
 #include "third_party/stb_image.h"

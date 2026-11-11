@@ -21,6 +21,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstdint>
+#include <cwctype>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -1038,17 +1039,17 @@ static void UploadIndicatorFrames(RebindIndicatorTexture& slot, const unsigned c
     InitializeAnimatedTexturePlayback(slot, static_cast<size_t>(frameCount));
 }
 
-static bool PathHasGifExtension(const std::string& path) {
-    std::string ext = std::filesystem::path(path).extension().string();
-    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-    return ext == ".gif";
+static bool PathHasGifExtension(const std::filesystem::path& path) {
+    std::wstring ext = path.extension().wstring();
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](wchar_t ch) { return static_cast<wchar_t>(std::towlower(ch)); });
+    return ext == L".gif";
 }
 
 static bool LoadIndicatorTextureFromFile(const std::string& path, RebindIndicatorTexture& slot) {
     if (path.empty()) return false;
 
     std::string resolvedPath = path;
-    if (!g_toolscreenPath.empty() && !std::filesystem::path(path).is_absolute()) {
+    if (!g_toolscreenPath.empty() && !std::filesystem::path(Utf8ToWide(path)).is_absolute()) {
         resolvedPath = WideToUtf8(g_toolscreenPath) + "\\" + path;
     }
 
@@ -1058,12 +1059,14 @@ static bool LoadIndicatorTextureFromFile(const std::string& path, RebindIndicato
     int* delays = nullptr;
     unsigned char* pixels = nullptr;
 
-    if (PathHasGifExtension(resolvedPath)) {
+    const std::filesystem::path resolvedFsPath(Utf8ToWide(resolvedPath));
+
+    if (PathHasGifExtension(resolvedFsPath)) {
         std::error_code ec;
-        const std::uintmax_t fileSize = std::filesystem::file_size(resolvedPath, ec);
+        const std::uintmax_t fileSize = std::filesystem::file_size(resolvedFsPath, ec);
         if (!ec && fileSize > 0 && fileSize <= kMaxRebindIndicatorGifBytes &&
             fileSize <= static_cast<std::uintmax_t>((std::numeric_limits<int>::max)())) {
-            std::ifstream file(resolvedPath, std::ios::binary);
+            std::ifstream file(resolvedFsPath, std::ios::binary);
             std::vector<unsigned char> bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
             if (bytes.size() == fileSize) {
                 pixels = stbi_load_gif_from_memory(bytes.data(), static_cast<int>(bytes.size()), &delays, &w, &h, &frameCount, &channels, 4);

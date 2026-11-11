@@ -1128,6 +1128,7 @@ toolscreen_enable_release_symbols(toolscreen_gui_integration_tests)
 set(TOOLSCREEN_GUI_INTEGRATION_TEST_CASES
     log-multi-instance-latest-suffix
     log-header-includes-peer-info
+    settings-validate-image-file-non-ascii-path
     log-archive-collision-handling
     log-released-slot-reuse
     config-default-load

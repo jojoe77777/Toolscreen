@@ -36,6 +36,7 @@ const auto& GetTestCaseDefinitions() {
         {"config-default-load", &RunConfigDefaultLoadTest},
         {"log-multi-instance-latest-suffix", &RunLogMultiInstanceLatestSuffixTest},
         {"log-header-includes-peer-info", &RunLogHeaderIncludesPeerInfoTest},
+        {"settings-validate-image-file-non-ascii-path", &RunValidateImageFileNonAsciiPathTest},
         {"log-archive-collision-handling", &RunLogArchiveCollisionHandlingTest},
         {"log-released-slot-reuse", &RunLogReleasedSlotReuseTest},
         {"config-roundtrip", &RunConfigRoundtripTest},

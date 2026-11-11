@@ -1982,3 +1982,30 @@ void RunNinjabrainExtremePredictionPayloadTest(TestRunMode runMode = TestRunMode
     Expect(data.predictionAngles[0].valid && std::isfinite(data.predictionAngles[0].neededCorrection),
            "Expected huge angles to normalize to a finite value without an unbounded loop.");
 }
+
+void RunValidateImageFileNonAsciiPathTest(TestRunMode runMode = TestRunMode::Automated) {
+    (void)runMode;
+
+    static const unsigned char kOnePixelPng[] = {
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,
+        0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0xF8, 0xCF, 0xC0, 0xF0,
+        0x1F, 0x00, 0x05, 0x00, 0x01, 0xFF, 0x89, 0x99, 0x3D, 0x1D, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45,
+        0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82};
+
+    const std::filesystem::path root = PrepareCaseDirectory("validate_image_file_non_ascii_path");
+    const std::filesystem::path unicodeDir = root / L"caf\u00E9_\u65E5\u672C";
+    std::error_code error;
+    std::filesystem::create_directories(unicodeDir, error);
+    Expect(!error, "Failed to create the non-ASCII test directory.");
+
+    const std::filesystem::path imagePath = unicodeDir / L"pixel.png";
+    {
+        std::ofstream out(imagePath, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(kOnePixelPng), sizeof(kOnePixelPng));
+    }
+    Expect(std::filesystem::exists(imagePath), "Failed to write the PNG into the non-ASCII directory.");
+
+    const std::string result = ValidateImageFile(WideToUtf8(imagePath.wstring()), L"");
+    Expect(result.empty(), "Expected ValidateImageFile to accept a PNG under a non-ASCII directory, got: " + result);
+}
