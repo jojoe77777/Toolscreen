@@ -18,6 +18,10 @@ if (BeginSelectableSettingsTopTabItem(trc("label.overlays"))) {
         if (ShouldRenderConfigNestedTab(ConfigNestedTabId::Ninjabrain)) {
 #include "tab_ninjabrain_overlay.inl"
         }
+        
+        if (ShouldRenderConfigNestedTab(ConfigNestedTabId::Keystrokes)) {
+#include "tab_keystrokes.inl"
+        }
 
         ImGui::EndTabBar();
     }

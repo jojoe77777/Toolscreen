@@ -20,6 +20,7 @@
 #include "config/config_defaults.h"
 #include "features/ninjabrain_data.h"
 #include "imgui.h"
+#include "config/keystrokes_config.h"
 #include "version.h"
 
 typedef unsigned int GLuint;
@@ -1009,6 +1010,24 @@ struct NinjabrainOverlayConfig {
         {"angle", "Angle", true},
     };
 };
+
+// Keystrokes overlay.
+struct KeystrokesConfig {
+    bool enabled = true;
+    int x = 10;
+    int y = 10;
+    float scale = 1.0f;
+    Color pressedBgColor = { 1.0f, 1.0f, 1.0f, 0.8f };
+    Color unpressedBgColor = { 0.0f, 0.0f, 0.0f, 0.5f };
+    Color pressedTextColor = { 0.0f, 0.0f, 0.0f, 1.0f };
+    Color unpressedTextColor = { 1.0f, 1.0f, 1.0f, 1.0f };
+    float opacity = 1.0f;
+    std::vector<std::string> allowedModes;
+    std::vector<std::string> allowedStates;
+    bool onlyOnMyScreen = false;
+    bool onlyOnObs = false;
+    std::vector<KeystrokesKey> keys = ConfigDefaults::GetDefaultKeystrokesKeys();
+};
 struct Config {
     int configVersion = GetConfigVersion();
     std::vector<MirrorConfig> mirrors;
@@ -1057,6 +1076,7 @@ struct Config {
     int startupIndicatorMode = ConfigDefaults::STARTUP_INDICATOR_MODE;
     std::string startupIndicatorImagePath = ConfigDefaults::STARTUP_INDICATOR_IMAGE_PATH;
     NinjabrainOverlayConfig ninjabrainOverlay;
+    KeystrokesConfig keystrokes;
 };
 
 inline bool SanitizeConfigKeyRebindsForCannotTypeTriggers(Config& config) {
@@ -1073,6 +1093,7 @@ struct ProfileSectionSelection {
     bool windowOverlays = true;
     bool browserOverlays = true;
     bool ninjabrainOverlay = true;
+    bool keystrokes = true;
     bool hotkeys = true;
     bool inputsMouse = true;
     bool captureWindow = true;
@@ -1226,6 +1247,7 @@ extern std::atomic<bool> g_forceVisibleCursorWhileGuiOpen;
 extern std::atomic<bool> g_imageOverlaysVisible;
 extern std::atomic<bool> g_windowOverlaysVisible;
 extern std::atomic<bool> g_ninjabrainOverlayVisible;
+extern std::atomic<bool> g_keystrokesVisible;
 extern std::atomic<bool> g_browserOverlaysVisible;
 extern std::string g_currentlyEditingMirror;
 extern std::string g_selectedMirrorName;
