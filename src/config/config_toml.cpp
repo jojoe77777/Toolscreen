@@ -553,6 +553,7 @@ bool IsValidAppearanceCustomColorKey(const std::string& key) {
         "ResizeGrip",
         "ResizeGripHovered",
         "ResizeGripActive",
+        "TableHeaderBg",
     };
 
     return validKeys.find(key) != validKeys.end();

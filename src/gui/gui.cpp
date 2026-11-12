@@ -3615,6 +3615,8 @@ void RenderSettingsGUI() {
         {
             PROFILE_SCOPE_CAT("Settings Tabs", "ImGui");
 
+            SyncDerivedThemeColors();
+
             if (!g_scrollToMirrorName.empty() || !g_scrollToMirrorGroupName.empty() || !g_scrollToImageName.empty() || !g_scrollToWindowOverlayName.empty()) {
                 if (g_config.basicModeEnabled) { g_config.basicModeEnabled = false; g_configIsDirty = true; }
                 s_forcedSettingsTopTabLabel = GetConfigTopTabLabel(ConfigTopTabId::Overlays);

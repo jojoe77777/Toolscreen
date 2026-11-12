@@ -150,9 +150,10 @@ if (BeginSelectableSettingsTopTabItem(trc("tabs.general"))) {
         const char* buttonLabel = isBinding ? "[Press Keys...]" : (keyStr.empty() ? "[Click to Bind]" : keyStr.c_str());
 
         ImGui::PushID(label);
-        ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(40, 60, 100, 180));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(60, 80, 120, 200));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, IM_COL32(80, 100, 140, 220));
+        const ImGuiStyle& hotkeyStyle = ImGui::GetStyle();
+        ImGui::PushStyleColor(ImGuiCol_Button, hotkeyStyle.Colors[ImGuiCol_FrameBg]);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, hotkeyStyle.Colors[ImGuiCol_FrameBgHovered]);
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, hotkeyStyle.Colors[ImGuiCol_FrameBgActive]);
         float columnWidth = ImGui::GetContentRegionAvail().x;
         if (ImGui::Button(buttonLabel, ImVec2(columnWidth, 0))) {
             s_mainHotkeyToBind = hotkeyIdx;

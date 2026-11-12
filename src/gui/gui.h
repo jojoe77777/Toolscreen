@@ -1399,6 +1399,7 @@ void SaveConfigImmediate();
 void SaveConfigImmediate(bool processExiting);
 bool WaitForConfigSaveIdle(int timeoutMs = 3000);
 void ApplyAppearanceConfig();
+void SyncDerivedThemeColors();
 void SaveTheme();
 void LoadTheme();
 void LoadConfig();

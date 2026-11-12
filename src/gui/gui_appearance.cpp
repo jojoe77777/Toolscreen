@@ -353,6 +353,13 @@ static void ApplyPresetThemeColors(const std::string& themeName) {
     }
 }
 
+void SyncDerivedThemeColors() {
+    if (g_config.appearance.theme == "Custom" && g_config.appearance.customColors.count("TableHeaderBg") > 0) { return; }
+
+    ImGuiStyle& style = ImGui::GetStyle();
+    style.Colors[ImGuiCol_TableHeaderBg] = style.Colors[ImGuiCol_Tab];
+}
+
 void ApplyAppearanceConfig() {
     const std::string& theme = g_config.appearance.theme;
 
@@ -407,13 +414,16 @@ void ApplyAppearanceConfig() {
                                                                          { "SeparatorActive", ImGuiCol_SeparatorActive },
                                                                          { "ResizeGrip", ImGuiCol_ResizeGrip },
                                                                          { "ResizeGripHovered", ImGuiCol_ResizeGripHovered },
-                                                                         { "ResizeGripActive", ImGuiCol_ResizeGripActive } };
+                                                                         { "ResizeGripActive", ImGuiCol_ResizeGripActive },
+                                                                         { "TableHeaderBg", ImGuiCol_TableHeaderBg } };
 
         for (const auto& [name, color] : g_config.appearance.customColors) {
             auto it = colorNameToIdx.find(name);
             if (it != colorNameToIdx.end()) { style.Colors[it->second] = ImVec4(color.r, color.g, color.b, color.a); }
         }
     }
+
+    SyncDerivedThemeColors();
 
     Log("Applied appearance config: theme=" + theme);
 }
